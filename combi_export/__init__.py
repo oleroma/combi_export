@@ -60,6 +60,7 @@ _ui_cache = {
     "visibility": {},
     "stats": {"global": {"presets": 0, "cols": 0, "objs": 0, "exp": 0}, "presets": {}, "cols": {}},
     "tree": ({}, set()),
+    "tree_sources": {},
     "preset_metrics": {},
 }
 
@@ -564,21 +565,27 @@ def format_export_filename(bl_obj_name, obj_tag, col_use_tag, col_tag, combo_suf
     tag_suffix = sanitize_name(col_tag) if col_use_tag and col_tag else ""
     return f"{safe_name}{tag_suffix}{combo_suffix}.stl"
 
-def build_export_dir_parts(preset_prefix, col_sub_path, obj_sub_path, paths_by_level=None):
+def build_export_dir_entries(preset_prefix, col_sub_path, obj_sub_path, paths_by_level=None, owners=(None, None, None)):
+    """Export folders in order as (folder, source) pairs.
+    `owners` holds an (RNA path, property name) pair for the preset prefix, collection and object sub-paths;
+    their folders get (RNA path, property name, part index) as source. Folders made from override values get None."""
     if paths_by_level is None: paths_by_level = {}
-    c_parts = split_path_parts(col_sub_path)
-    o_parts = split_path_parts(obj_sub_path)
-    p_prefix = split_path_parts(preset_prefix)
+    def typed(text, owner): return [(p, owner + (i,) if owner else None) for i, p in enumerate(split_path_parts(text))]
+    def values(level): return [(p, None) for p in paths_by_level.get(level, [])]
+    p_owner, c_owner, o_owner = owners
     return (
-        paths_by_level.get("GLOBAL", []) +
-        p_prefix +
-        paths_by_level.get("PRESET", []) +
-        c_parts +
-        paths_by_level.get("COLLECTION", []) +
-        o_parts +
-        paths_by_level.get("OBJECT", []) +
-        paths_by_level.get("NONE", [])
+        values("GLOBAL") +
+        typed(preset_prefix, p_owner) +
+        values("PRESET") +
+        typed(col_sub_path, c_owner) +
+        values("COLLECTION") +
+        typed(obj_sub_path, o_owner) +
+        values("OBJECT") +
+        values("NONE")
     )
+
+def build_export_dir_parts(preset_prefix, col_sub_path, obj_sub_path, paths_by_level=None):
+    return [p for p, _src in build_export_dir_entries(preset_prefix, col_sub_path, obj_sub_path, paths_by_level)]
 
 def compute_override_freq_dict(overrides):
     freq_dict = {}
@@ -962,9 +969,10 @@ def rebuild_ui_cache_if_dirty():
         is_global = getattr(scene, "batch_stl_info_global", False)
 
         if not preset and not is_global:
-            _ui_cache["tree"] = ({}, set())
+            _ui_cache["tree"], _ui_cache["tree_sources"] = ({}, set()), {}
         else:
-            _ui_cache["tree"] = build_tree_dict(context, visibility, is_global)
+            tree, duplicates, sources = build_tree_dict(context, visibility, is_global)
+            _ui_cache["tree"], _ui_cache["tree_sources"] = (tree, duplicates), sources
 
         redraw_sidebars(context)
         return 0.1
@@ -986,12 +994,14 @@ def build_tree_dict(context, visibility_cache=None, is_global=False):
     root_name = bpy.path.abspath(scene.batch_stl_root_dir) if scene.batch_stl_root_dir else "//"
     root_name = os.path.normpath(root_name)
     tree, all_filepaths, duplicates = {}, set(), set()
+    sources = {}  # tree dir path (as keyed by draw_tree_dict) -> set of build_export_dir_entries sources
     global_ovrs = get_flat_overrides(scene.batch_stl_global_nodegroups, "GLOBAL")
     target_presets = scene.batch_stl_presets if is_global else ([get_active_preset(scene)] if get_active_preset(scene) else [])
 
     for preset in target_presets:
         if not preset: continue
         preset_ovrs = get_flat_overrides(preset.nodegroups, "PRESET")
+        p_owner = (preset.path_from_id(), "preset_prefix")
 
         for c in preset.collections:
             c_ptr = bpy.data.collections.get(c.collection_name)
@@ -1001,11 +1011,13 @@ def build_tree_dict(context, visibility_cache=None, is_global=False):
             elif is_collection_excluded(context, c_ptr): continue
 
             col_ovrs = get_flat_overrides(c.nodegroups, "COLLECTION")
+            c_owner = (c.path_from_id(), "sub_path")
 
             for obj_prop in c.objects:
                 if not obj_prop.export: continue
                 bl_obj = c_ptr.all_objects.get(obj_prop.name)
                 if not bl_obj or bl_obj.hide_viewport or bl_obj.type not in SUPPORTED_OBJECT_TYPES: continue
+                o_owner = (obj_prop.path_from_id(), "sub_path")
 
                 obj_ovrs = get_flat_overrides(obj_prop.nodegroups, "OBJECT")
                 all_overrides = resolve_overrides(global_ovrs + preset_ovrs + col_ovrs + obj_ovrs)
@@ -1015,11 +1027,14 @@ def build_tree_dict(context, visibility_cache=None, is_global=False):
 
                 for combo in combinations:
                     combo_suffix, paths_by_level = evaluate_combo_naming(combo, freq_dict)
-                    full_dir_parts = build_export_dir_parts(preset.preset_prefix, c.sub_path, obj_prop.sub_path, paths_by_level)
+                    entries = build_export_dir_entries(preset.preset_prefix, c.sub_path, obj_prop.sub_path, paths_by_level, (p_owner, c_owner, o_owner))
+                    full_dir_parts = [part for part, _src in entries]
 
-                    combo_root = tree
-                    for part in full_dir_parts:
+                    combo_root, dir_path = tree, f"/{root_name}"
+                    for part, src in entries:
                         combo_root = combo_root.setdefault(part, {})
+                        dir_path = f"{dir_path}/{part}"
+                        sources.setdefault(dir_path, set()).add(src)
 
                     filename = format_export_filename(bl_obj.name, obj_prop.tag, getattr(c, 'use_tag', False), c.tag, combo_suffix)
                     combo_root.setdefault('_files', []).append(filename)
@@ -1030,7 +1045,7 @@ def build_tree_dict(context, visibility_cache=None, is_global=False):
                     else:
                         all_filepaths.add(full_path_key)
 
-    return {root_name: tree}, duplicates
+    return {root_name: tree}, duplicates, sources
 
 # Expansion state: `batch_stl_collapsed_dirs` stores the directory paths whose state is flipped from the default.
 # The root folder starts expanded and everything below it collapsed.
@@ -1066,9 +1081,14 @@ def expand_last_dirs(tree_node, toggled, current_path=""):
         if not is_dir_collapsed(toggled, dir_path, is_root):
             expand_last_dirs(tree_node[k], toggled, dir_path)
 
-def draw_tree_dict(layout, tree_node, current_path="", toggled_list=None, duplicates=None, actual_path=""):
+def is_tree_dir_renamable(sources):
+    """A folder can be renamed only when every export that lands in it got it from a typed sub-path, not an override value."""
+    return bool(sources) and None not in sources
+
+def draw_tree_dict(layout, tree_node, current_path="", toggled_list=None, duplicates=None, actual_path="", sources=None):
     if toggled_list is None: toggled_list = load_toggled_dirs(bpy.context.scene)
     if duplicates is None: duplicates = set()
+    if sources is None: sources = _ui_cache.get("tree_sources", {})
 
     dirs = [k for k in tree_node.keys() if k != '_files']
     for k in dirs:
@@ -1082,9 +1102,14 @@ def draw_tree_dict(layout, tree_node, current_path="", toggled_list=None, duplic
         row = box.row()
         row.operator("batch_stl.toggle_dir_tree", text="", icon=ICONS['RIGHT'] if is_collapsed else ICONS['DOWN'], emboss=False).dir_path = dir_path
         row.scale_y = 0.4
-        row.label(text=str(k))
+        if is_tree_dir_renamable(sources.get(dir_path)):
+            name_row = row.row()
+            name_row.alignment = 'LEFT'  # size the flat button to its text so it reads like the label it replaces
+            name_row.operator("batch_stl.rename_tree_dir", text=str(k), emboss=False).dir_path = dir_path
+        else:
+            row.label(text=str(k))
         if not is_collapsed and isinstance(tree_node[k], dict):
-            draw_tree_dict(box, tree_node[k], dir_path, toggled_list, duplicates, next_actual)
+            draw_tree_dict(box, tree_node[k], dir_path, toggled_list, duplicates, next_actual, sources)
 
     for f in tree_node.get('_files', []):
         split = layout.split(factor=0.025)
@@ -1820,6 +1845,70 @@ class BATCH_STL_OT_tree_expansion(bpy.types.Operator):
             collapse = self.mode == 'COLLAPSE_ALL'
             for p, _node, is_root in iter_tree_dirs(tree): set_dir_collapsed(toggled, p, is_root, collapse)
         save_toggled_dirs(scene, toggled)
+        return {'FINISHED'}
+
+# Panel buttons only report single clicks, so a double click is two clicks on the same folder within the
+# user's double-click time (Preferences > Input).
+_tree_last_click = {"path": "", "time": 0.0}
+
+class BATCH_STL_OT_rename_tree_dir(bpy.types.Operator):
+    bl_idname = "batch_stl.rename_tree_dir"
+    bl_label = "Rename Folder"
+    bl_options = {'UNDO', 'INTERNAL'}
+    bl_description = "Double-click to rename this folder in the preset root and sub-folder fields that produce it"
+    dir_path: bpy.props.StringProperty()
+    new_name: bpy.props.StringProperty(name="Name", options={'SKIP_SAVE'})
+
+    def invoke(self, context, event):
+        now = time.time()
+        window_s = context.preferences.inputs.mouse_double_click_time / 1000.0
+        is_double = _tree_last_click["path"] == self.dir_path and now - _tree_last_click["time"] <= window_s
+        _tree_last_click.update(path="" if is_double else self.dir_path, time=now)
+        if not is_double: return {'CANCELLED'}
+        self.new_name = self.dir_path.rsplit("/", 1)[-1]
+        return context.window_manager.invoke_props_dialog(self, title="Rename Folder", confirm_text="Rename")
+
+    def draw(self, context):
+        self.layout.activate_init = True  # start typing straight away
+        self.layout.prop(self, "new_name", text="")
+
+    @inside_operator
+    def execute(self, context):
+        if is_any_exporting():
+            self.report({'WARNING'}, "Cannot rename folders while an export is running.")
+            return {'CANCELLED'}
+        srcs = _ui_cache.get("tree_sources", {}).get(self.dir_path)
+        if not is_tree_dir_renamable(srcs):
+            self.report({'WARNING'}, "This folder comes from an override value; change that value or its tag instead.")
+            return {'CANCELLED'}
+
+        scene = context.scene
+        parent, old_name = self.dir_path.rsplit("/", 1)
+        new_parts = split_path_parts(self.new_name)  # may hold several levels ("a/b") or none (removes the level)
+        replacement = "/".join(new_parts)
+        if replacement == old_name: return {'CANCELLED'}
+
+        indices_by_field = {}
+        for owner_path, prop, idx in srcs: indices_by_field.setdefault((owner_path, prop), set()).add(idx)
+        renamed = 0
+        for (owner_path, prop), indices in indices_by_field.items():
+            try: owner = scene.path_resolve(owner_path)
+            except ValueError: continue
+            parts = split_path_parts(getattr(owner, prop))
+            # The cache can lag an edit by one timer tick; only rewrite parts that still hold the old name.
+            hits = [i for i in indices if i < len(parts) and parts[i] == old_name]
+            if not hits: continue
+            for i in hits: parts[i] = replacement
+            setattr(owner, prop, "/".join(p for p in parts if p))
+            renamed += 1
+        if not renamed:
+            self.report({'WARNING'}, "Folder changed before the rename was applied. Please try again.")
+            return {'CANCELLED'}
+
+        if new_parts:  # carry the folder's expansion state, and its children's, over to the new path
+            old_dir, new_dir = self.dir_path, "/".join([parent] + new_parts)
+            moved = {new_dir + p[len(old_dir):] if p == old_dir or p.startswith(old_dir + "/") else p for p in load_toggled_dirs(scene)}
+            save_toggled_dirs(scene, moved)
         return {'FINISHED'}
 
 class BATCH_STL_OT_cancel_export(bpy.types.Operator):
@@ -2573,7 +2662,7 @@ def reset_batch_stl_state(*args):
 classes = (
     BatchSTLLogLine, BatchSTLJob, BatchSTLValue, BatchSTLInput, BatchSTLNode, BatchSTLNodeGroup, BatchSTLObject, BatchSTLCollection, BatchSTLExportPreset,
     BATCH_STL_UL_presets, BATCH_STL_UL_collections, BATCH_STL_UL_objects, BATCH_STL_UL_console_logs,
-    BATCH_STL_OT_clear_console, BATCH_STL_OT_preset_actions, BATCH_STL_OT_collection_actions, BATCH_STL_OT_table_action, BATCH_STL_OT_toggle_dir_tree, BATCH_STL_OT_tree_expansion, BATCH_STL_OT_cancel_export, BATCH_STL_OT_export_presets_json, BATCH_STL_OT_import_presets_json, EXPORT_OT_batch_stl_multi,
+    BATCH_STL_OT_clear_console, BATCH_STL_OT_preset_actions, BATCH_STL_OT_collection_actions, BATCH_STL_OT_table_action, BATCH_STL_OT_toggle_dir_tree, BATCH_STL_OT_tree_expansion, BATCH_STL_OT_rename_tree_dir, BATCH_STL_OT_cancel_export, BATCH_STL_OT_export_presets_json, BATCH_STL_OT_import_presets_json, EXPORT_OT_batch_stl_multi,
     VIEW3D_PT_batch_export_stl_main, VIEW3D_PT_batch_export_stl_presets, VIEW3D_PT_batch_export_stl_collections, VIEW3D_PT_batch_export_stl_objects
 )
 
