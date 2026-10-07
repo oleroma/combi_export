@@ -1,4 +1,4 @@
-# Fast Batch STL Exporter
+# Combi Export
 
 A high-performance batch export pipeline and parametric permutation engine for Blender 5.2+. Built around a custom vectorized NumPy binary STL generator and an adaptive dual-path execution engine, it enables one-click exporting of scene collections, multi-dimensional parameter sweeping via Geometry Nodes and modifiers, and automated variant generation.
 
@@ -80,4 +80,3 @@ Generate variant permutations across any socket:
 * **Blender:** 5.2.0 or newer.
 * **Dependencies:** Standard Blender Python environment (`numpy` is included with Blender).
 * **Installation:** Install as an extension from the Blender Preferences extensions menu or place `fast_batch_stl_export` into your Blender extensions directory.
-
