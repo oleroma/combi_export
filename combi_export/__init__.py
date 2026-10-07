@@ -40,7 +40,8 @@ ICONS = {
     'IMPORT': 'IMPORT', 'INFO': 'INFO', 'CONSOLE': 'CONSOLE', 'CHECK_ON': 'CHECKBOX_HLT',
     'CHECK_OFF': 'CHECKBOX_DEHLT', 'OVR': 'DECORATE_OVERRIDE', 'NODE': 'NODETREE',
     'TIME': 'TIME', 'MODIFIER': 'MODIFIER', 'TREE': 'OUTLINER_OB_EMPTY', 'ERROR': 'ERROR',
-    'RIGHT': 'TRIA_RIGHT', 'BLANK': 'BLANK1', 'FILE': 'FILE_3D'
+    'RIGHT': 'TRIA_RIGHT', 'BLANK': 'BLANK1', 'FILE': 'FILE_3D',
+    'EXPAND_ALL': 'FULLSCREEN_ENTER', 'COLLAPSE_ALL': 'FULLSCREEN_EXIT', 'EXPAND_LAST': 'TRIA_DOWN_BAR'
 }
 
 SUPPORTED_OBJECT_TYPES = {"MESH", "CURVE", "SURFACE", "META", "FONT"}
@@ -1031,19 +1032,49 @@ def build_tree_dict(context, visibility_cache=None, is_global=False):
 
     return {root_name: tree}, duplicates
 
+# Expansion state: `batch_stl_collapsed_dirs` stores the directory paths whose state is flipped from the default.
+# The root folder starts expanded and everything below it collapsed.
+def load_toggled_dirs(scene):
+    try: return set(json.loads(scene.batch_stl_collapsed_dirs))
+    except Exception: return set()
+
+def save_toggled_dirs(scene, toggled):
+    scene.batch_stl_collapsed_dirs = json.dumps(sorted(toggled))
+
+def is_dir_collapsed(toggled, dir_path, is_root):
+    return (dir_path in toggled) if is_root else (dir_path not in toggled)
+
+def set_dir_collapsed(toggled, dir_path, is_root, collapsed):
+    if collapsed == is_root: toggled.add(dir_path)  # the requested state differs from the default
+    else: toggled.discard(dir_path)
+
+def iter_tree_dirs(tree_node, current_path=""):
+    """Yield (dir_path, node, is_root) for every directory, keyed exactly like draw_tree_dict."""
+    for k, child in tree_node.items():
+        if k == '_files' or not isinstance(child, dict): continue
+        dir_path = f"{current_path}/{k}"
+        yield dir_path, child, current_path == ""
+        yield from iter_tree_dirs(child, dir_path)
+
+def expand_last_dirs(tree_node, toggled, current_path=""):
+    """Expand the last subdirectory of every expanded directory, recursively, opening each visible branch down to its last leaf."""
+    subdirs = [k for k, v in tree_node.items() if k != '_files' and isinstance(v, dict)]
+    is_root = current_path == ""
+    if subdirs: set_dir_collapsed(toggled, f"{current_path}/{subdirs[-1]}", is_root, False)
+    for k in subdirs:
+        dir_path = f"{current_path}/{k}"
+        if not is_dir_collapsed(toggled, dir_path, is_root):
+            expand_last_dirs(tree_node[k], toggled, dir_path)
+
 def draw_tree_dict(layout, tree_node, current_path="", toggled_list=None, duplicates=None, actual_path=""):
-    if toggled_list is None:
-        try: toggled_list = json.loads(bpy.context.scene.batch_stl_collapsed_dirs)
-        except Exception: toggled_list = []
+    if toggled_list is None: toggled_list = load_toggled_dirs(bpy.context.scene)
     if duplicates is None: duplicates = set()
 
     dirs = [k for k in tree_node.keys() if k != '_files']
     for k in dirs:
         dir_path = f"{current_path}/{k}"
         next_actual = os.path.normpath(os.path.join(actual_path, k)) if actual_path else os.path.normpath(k)
-        # The root folder starts expanded and everything below it collapsed; a click on the arrow flips that default.
-        expanded_by_default = (current_path == "")
-        is_collapsed = (dir_path in toggled_list) if expanded_by_default else (dir_path not in toggled_list)
+        is_collapsed = is_dir_collapsed(toggled_list, dir_path, current_path == "")
 
         split = layout.split(factor=0.005)
         split.column()
@@ -1742,15 +1773,53 @@ class BATCH_STL_OT_toggle_dir_tree(bpy.types.Operator):
     bl_idname = "batch_stl.toggle_dir_tree"
     bl_label = "Toggle Directory Tree"
     bl_options = {'INTERNAL'}
-    bl_description = "Toggle directory tree expansion"
+    bl_description = "Toggle directory tree expansion (Shift: also expand/collapse all child directories)"
     dir_path: bpy.props.StringProperty()
+    recursive: bpy.props.BoolProperty(options={'HIDDEN', 'SKIP_SAVE'}, default=False)
+
+    def invoke(self, context, event):
+        self.recursive = event.shift
+        return self.execute(context)
+
     def execute(self, context):
         scene = context.scene
-        try: collapsed = json.loads(scene.batch_stl_collapsed_dirs)
-        except Exception: collapsed = []
-        if self.dir_path in collapsed: collapsed.remove(self.dir_path)
-        else: collapsed.append(self.dir_path)
-        scene.batch_stl_collapsed_dirs = json.dumps(collapsed)
+        toggled = load_toggled_dirs(scene)
+        subtree = []
+        if self.recursive:
+            subtree = [(p, is_root) for p, _node, is_root in iter_tree_dirs(_ui_cache["tree"][0])
+                       if p == self.dir_path or p.startswith(self.dir_path + "/")]
+        clicked = next((is_root for p, is_root in subtree if p == self.dir_path), None)
+        if clicked is not None:
+            # The clicked folder flips and every folder below it follows its new state.
+            collapse = not is_dir_collapsed(toggled, self.dir_path, clicked)
+            for p, is_root in subtree: set_dir_collapsed(toggled, p, is_root, collapse)
+        elif self.dir_path in toggled: toggled.discard(self.dir_path)
+        else: toggled.add(self.dir_path)
+        save_toggled_dirs(scene, toggled)
+        return {'FINISHED'}
+
+class BATCH_STL_OT_tree_expansion(bpy.types.Operator):
+    bl_idname = "batch_stl.tree_expansion"
+    bl_label = "Directory Tree Expansion"
+    bl_options = {'INTERNAL'}
+    mode: bpy.props.EnumProperty(items=(('EXPAND_ALL', "", ""), ('COLLAPSE_ALL', "", ""), ('EXPAND_LAST', "", "")))
+
+    @classmethod
+    def description(cls, context, properties):
+        if properties.mode == 'EXPAND_ALL': return "Expand all directories"
+        if properties.mode == 'COLLAPSE_ALL': return "Collapse all directories"
+        return "Expand the last subdirectory of each open directory, recursively"
+
+    def execute(self, context):
+        scene = context.scene
+        tree = _ui_cache["tree"][0]
+        toggled = load_toggled_dirs(scene)
+        if self.mode == 'EXPAND_LAST':
+            expand_last_dirs(tree, toggled)
+        else:
+            collapse = self.mode == 'COLLAPSE_ALL'
+            for p, _node, is_root in iter_tree_dirs(tree): set_dir_collapsed(toggled, p, is_root, collapse)
+        save_toggled_dirs(scene, toggled)
         return {'FINISHED'}
 
 class BATCH_STL_OT_cancel_export(bpy.types.Operator):
@@ -2303,8 +2372,14 @@ class VIEW3D_PT_batch_export_stl_main(bpy.types.Panel):
                     warn_row = warn_box.row()
                     warn_row.label(text=f"WARNING: {len(duplicates)} naming collisions detected! Files will be overwritten.", icon=ICONS['ERROR'])
 
-                col = info_box.column(align=True)
+                # Tree on the left, a vertical strip of icon buttons on the right (same layout as UIList side buttons).
+                tree_row = info_box.row()
+                col = tree_row.column(align=True)
                 draw_tree_dict(col, tree_dict, duplicates=duplicates)
+                expand_tools = tree_row.column(align=True)
+                expand_tools.operator("batch_stl.tree_expansion", text="", icon=ICONS['EXPAND_ALL']).mode = 'EXPAND_ALL'
+                expand_tools.operator("batch_stl.tree_expansion", text="", icon=ICONS['COLLAPSE_ALL']).mode = 'COLLAPSE_ALL'
+                expand_tools.operator("batch_stl.tree_expansion", text="", icon=ICONS['EXPAND_LAST']).mode = 'EXPAND_LAST'
 
             info_box.separator()
 
@@ -2498,7 +2573,7 @@ def reset_batch_stl_state(*args):
 classes = (
     BatchSTLLogLine, BatchSTLJob, BatchSTLValue, BatchSTLInput, BatchSTLNode, BatchSTLNodeGroup, BatchSTLObject, BatchSTLCollection, BatchSTLExportPreset,
     BATCH_STL_UL_presets, BATCH_STL_UL_collections, BATCH_STL_UL_objects, BATCH_STL_UL_console_logs,
-    BATCH_STL_OT_clear_console, BATCH_STL_OT_preset_actions, BATCH_STL_OT_collection_actions, BATCH_STL_OT_table_action, BATCH_STL_OT_toggle_dir_tree, BATCH_STL_OT_cancel_export, BATCH_STL_OT_export_presets_json, BATCH_STL_OT_import_presets_json, EXPORT_OT_batch_stl_multi,
+    BATCH_STL_OT_clear_console, BATCH_STL_OT_preset_actions, BATCH_STL_OT_collection_actions, BATCH_STL_OT_table_action, BATCH_STL_OT_toggle_dir_tree, BATCH_STL_OT_tree_expansion, BATCH_STL_OT_cancel_export, BATCH_STL_OT_export_presets_json, BATCH_STL_OT_import_presets_json, EXPORT_OT_batch_stl_multi,
     VIEW3D_PT_batch_export_stl_main, VIEW3D_PT_batch_export_stl_presets, VIEW3D_PT_batch_export_stl_collections, VIEW3D_PT_batch_export_stl_objects
 )
 

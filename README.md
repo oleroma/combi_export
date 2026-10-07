@@ -47,7 +47,7 @@ Generate variant permutations across any socket:
 * **Cartesian Product Generator:** Calculates multi-dimensional permutation matrices using `itertools.product`, ensuring all parameter combinations are generated systematically.
 
 ### 5. Predictive Directory Tree & Overwrite Protection
-* **Interactive Nested UI Hierarchy:** Calculates permutations ahead of time and displays an interactive directory hierarchy using collapsible nested UI boxes and indentation (`batch_stl.toggle_dir_tree`).
+* **Interactive Nested UI Hierarchy:** Calculates permutations ahead of time and displays an interactive directory hierarchy using collapsible nested UI boxes and indentation (`batch_stl.toggle_dir_tree`; Shift-click to expand/collapse all child folders). Toolbar buttons expand all, collapse all, or expand the last subfolder of each open folder recursively (`batch_stl.tree_expansion`).
 * **Pre-Export Clash Detection:** Instantly flags duplicate output file paths with visual alerts before export starts, preventing accidental file overwrites.
 * **Decoupled UI Cache:** Background timer cache (~10Hz) prevents UI stalls when evaluating large permutation matrices.
 
