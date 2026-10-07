@@ -10,7 +10,7 @@ build_date = "2026-10-07"
 license = [
     "SPDX:GPL-3.0-or-later"
 ]
-tags = ["Import-Export", "Geometry Nodes", "3D Printing", "Pipeline"]
+tags = ["Import-Export", "Geometry Nodes", "Pipeline"]
 blender_version_min = "5.2.0"
 
 [permissions]
