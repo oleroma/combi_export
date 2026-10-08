@@ -1042,10 +1042,9 @@ def rebuild_ui_cache_if_dirty():
 
         _ui_cache["stats"] = {"global": {"presets": total_presets, "cols": g_cols, "objs": g_objs, "exp": g_exp}, "presets": preset_stats, "cols": col_stats}
 
-        show_console = getattr(scene, "batch_stl_show_console", False)
         info_tab = getattr(scene, "batch_stl_info_tab", 'LOG')
 
-        if not show_console or info_tab != 'TREE':
+        if info_tab != 'TREE':
             redraw_sidebars(context)
             return 0.1
 
@@ -2210,7 +2209,7 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
             self.report({'ERROR'}, "Improper setup: One or more override fields are missing or invalid.")
             return {"CANCELLED"}
 
-        if context.scene.batch_stl_show_console: context.scene.batch_stl_info_tab = 'LOG'
+        context.scene.batch_stl_info_tab = 'LOG'
         job.console_logs.clear()
 
         objects_to_export_directly, objects_needing_headless = [], []
@@ -2652,7 +2651,6 @@ class VIEW3D_PT_batch_export_stl_main(bpy.types.Panel):
         sub_row.enabled = not any_exporting
         sub_row.operator("batch_stl.import_presets_json", text="", icon=ICONS['IMPORT'])
         sub_row.operator("batch_stl.export_presets_json", text="", icon=ICONS['EXPORT'])
-        row.prop(scene, "batch_stl_show_console", text="", icon=ICONS['INFO'], toggle=True)
         row.separator()
 
     def draw(self, context):
@@ -2665,78 +2663,89 @@ class VIEW3D_PT_batch_export_stl_main(bpy.types.Panel):
         dir_col.enabled = not any_exporting
         dir_col.prop(scene, "batch_stl_root_dir")
 
-        active_preset = get_active_preset(scene)
-        stats = _ui_cache.get("stats", {})
-
-        if scene.batch_stl_show_console:
-            info_box = layout.box()
-
-            tab_row = info_box.row()
-            tab_row.prop(scene, "batch_stl_info_tab", expand=True)
-
-            if scene.batch_stl_info_tab == 'LOG':
-                active_job = get_job(scene.batch_stl_preset_index)
-                if active_job:
-                    info_box.template_list("BATCH_STL_UL_console_logs", "", active_job, "console_logs", active_job, "console_index", rows=6)
-                    clear_col = info_box.column()
-                    clear_col.enabled = not any_exporting
-                    clear_col.operator("batch_stl.clear_console", text="Clear Log", icon=ICONS['DEL'])
-                else:
-                    info_box.label(text="No export log for this preset yet.", icon=ICONS['INFO'])
-                info_box.prop(scene, "batch_stl_verbose_console", toggle=True, icon=ICONS['CONSOLE'])
-
-            elif scene.batch_stl_info_tab == 'TREE':
-                tree_tools = info_box.row()
-                tree_tools.prop(scene, "batch_stl_info_global", text="Global Tree View", toggle=True, icon=ICONS['GLOBAL'])
-
-                tree_dict, duplicates = _ui_cache.get("tree", ({}, set()))
-                if duplicates:
-                    warn_box = info_box.box()
-                    warn_row = warn_box.row()
-                    warn_row.label(text=f"WARNING: {len(duplicates)} naming collisions detected! Files will be overwritten.", icon=ICONS['ERROR'])
-
-                # Tree on the left, a vertical strip of icon buttons on the right (same layout as UIList side buttons).
-                tree_row = info_box.row()
-                col = tree_row.column(align=True)
-                draw_tree_dict(col, tree_dict, duplicates=duplicates)
-                expand_tools = tree_row.column(align=True)
-                expand_tools.operator("batch_stl.tree_expansion", text="", icon=ICONS['EXPAND_ALL']).mode = 'EXPAND_ALL'
-                expand_tools.operator("batch_stl.tree_expansion", text="", icon=ICONS['COLLAPSE_ALL']).mode = 'COLLAPSE_ALL'
-                expand_tools.operator("batch_stl.tree_expansion", text="", icon=ICONS['EXPAND_LAST']).mode = 'EXPAND_LAST'
-
-            info_box.separator()
-
-            tip_box = info_box.box()
-            tip_header = tip_box.row()
-            icon_tip = ICONS['DOWN'] if scene.batch_stl_ui_tips else ICONS['RIGHT']
-            tip_header.prop(scene, "batch_stl_ui_tips", text="", icon=icon_tip, emboss=False)
-            tip_header.label(text="OVERRIDE INFO", icon=ICONS['INFO'])
-
-            if scene.batch_stl_ui_tips:
-                col = tip_box.column()
-                col.label(text="Hierarchy: Global > Preset > Collection > Object > NodeGroup > Node.", icon=ICONS['BLANK'])
-                col.label(text="For modifier targets, leave Node blank or set as <Modifier Interface>", icon=ICONS['BLANK'])
-                col.separator()
-
-                col.label(text="Sweep Mode (Shift-Click '+' button to toggle):", icon=ICONS['SWEEP'])
-                col.label(text="  • Floats/Ints: Define start, step, and count", icon=ICONS['BLANK'])
-                col.label(text="  • Menus/Bools: Auto-iterates all values", icon=ICONS['BLANK'])
-                col.label(text="  • Shift-Click when active to populate all sweep values", icon=ICONS['BLANK'])
-                col.separator()
-
-                col.label(text="Export Tools (Per Value):", icon=ICONS['BLANK'])
-                col.label(text="  • Folder Icon: Save this value's exports into a subfolder", icon=ICONS['DIR'])
-                col.label(text="  • Bookmark Icon: Append/Prepend a tag to filename", icon=ICONS['TAG'])
-
-                col.label(text="Tag Formatting:", icon=ICONS['BLANK'])
-                col.label(text="  • [ tag ] replaces input value, [ _tag ] appends, [ tag_ ] prepends", icon=ICONS['BLANK'])
-
         layout.separator()
 
         # Global Overrides
         g_col = layout.column()
         g_col.enabled = not any_exporting
         draw_overrides_table(g_col, scene, scene.batch_stl_global_nodegroups, False, "batch_stl_ui_global_ovr_main", "Global Overrides", is_global=True, is_locked=any_exporting)
+
+
+class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Combi Export"
+    bl_label = "Info"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw_header(self, context):
+        self.layout.label(text="", icon=ICONS['INFO'])
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+        any_exporting = is_any_exporting()
+
+        tab_row = layout.row()
+        tab_row.prop(scene, "batch_stl_info_tab", expand=True)
+
+        if scene.batch_stl_info_tab == 'LOG':
+            active_job = get_job(scene.batch_stl_preset_index)
+            if active_job:
+                layout.template_list("BATCH_STL_UL_console_logs", "", active_job, "console_logs", active_job, "console_index", rows=6)
+                clear_col = layout.column()
+                clear_col.enabled = not any_exporting
+                clear_col.operator("batch_stl.clear_console", text="Clear Log", icon=ICONS['DEL'])
+            else:
+                layout.label(text="No export log for this preset yet.", icon=ICONS['INFO'])
+            layout.prop(scene, "batch_stl_verbose_console", toggle=True, icon=ICONS['CONSOLE'])
+
+        elif scene.batch_stl_info_tab == 'TREE':
+            tree_tools = layout.row()
+            tree_tools.prop(scene, "batch_stl_info_global", text="Global Tree View", toggle=True, icon=ICONS['GLOBAL'])
+
+            tree_dict, duplicates = _ui_cache.get("tree", ({}, set()))
+            if duplicates:
+                warn_box = layout.box()
+                warn_row = warn_box.row()
+                warn_row.label(text=f"WARNING: {len(duplicates)} naming collisions detected! Files will be overwritten.", icon=ICONS['ERROR'])
+
+            # Tree on the left, a vertical strip of icon buttons on the right (same layout as UIList side buttons).
+            tree_row = layout.row()
+            col = tree_row.column(align=True)
+            draw_tree_dict(col, tree_dict, duplicates=duplicates)
+            expand_tools = tree_row.column(align=True)
+            expand_tools.operator("batch_stl.tree_expansion", text="", icon=ICONS['EXPAND_ALL']).mode = 'EXPAND_ALL'
+            expand_tools.operator("batch_stl.tree_expansion", text="", icon=ICONS['COLLAPSE_ALL']).mode = 'COLLAPSE_ALL'
+            expand_tools.operator("batch_stl.tree_expansion", text="", icon=ICONS['EXPAND_LAST']).mode = 'EXPAND_LAST'
+
+        layout.separator()
+
+        tip_box = layout.box()
+        tip_header = tip_box.row()
+        icon_tip = ICONS['DOWN'] if scene.batch_stl_ui_tips else ICONS['RIGHT']
+        tip_header.prop(scene, "batch_stl_ui_tips", text="", icon=icon_tip, emboss=False)
+        tip_header.label(text="OVERRIDE INFO", icon=ICONS['INFO'])
+
+        if scene.batch_stl_ui_tips:
+            col = tip_box.column()
+            col.label(text="Hierarchy: Global > Preset > Collection > Object > NodeGroup > Node.", icon=ICONS['BLANK'])
+            col.label(text="For modifier targets, leave Node blank or set as <Modifier Interface>", icon=ICONS['BLANK'])
+            col.separator()
+
+            col.label(text="Sweep Mode (Shift-Click '+' button to toggle):", icon=ICONS['SWEEP'])
+            col.label(text="  • Floats/Ints: Define start, step, and count", icon=ICONS['BLANK'])
+            col.label(text="  • Menus/Bools: Auto-iterates all values", icon=ICONS['BLANK'])
+            col.label(text="  • Shift-Click when active to populate all sweep values", icon=ICONS['BLANK'])
+            col.separator()
+
+            col.label(text="Export Tools (Per Value):", icon=ICONS['BLANK'])
+            col.label(text="  • Folder Icon: Save this value's exports into a subfolder", icon=ICONS['DIR'])
+            col.label(text="  • Bookmark Icon: Append/Prepend a tag to filename", icon=ICONS['TAG'])
+
+            col.label(text="Tag Formatting:", icon=ICONS['BLANK'])
+            col.label(text="  • [ tag ] replaces input value, [ _tag ] appends, [ tag_ ] prepends", icon=ICONS['BLANK'])
+
 
 class VIEW3D_PT_batch_export_stl_presets(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
@@ -2927,12 +2936,8 @@ classes = (
     BatchSTLLogLine, BatchSTLJob, BatchSTLValue, BatchSTLInput, BatchSTLNode, BatchSTLNodeGroup, BatchSTLObject, BatchSTLCollection, BatchSTLExportPreset,
     BATCH_STL_UL_presets, BATCH_STL_UL_collections, BATCH_STL_UL_objects, BATCH_STL_UL_console_logs,
     BATCH_STL_OT_clear_console, BATCH_STL_OT_preset_actions, BATCH_STL_OT_collection_actions, BATCH_STL_OT_table_action, BATCH_STL_OT_toggle_dir_tree, BATCH_STL_OT_tree_expansion, BATCH_STL_OT_cancel_export, BATCH_STL_OT_export_presets_json, BATCH_STL_OT_import_presets_json, EXPORT_OT_batch_stl_multi,
-    VIEW3D_PT_batch_export_stl_main, VIEW3D_PT_batch_export_stl_presets, VIEW3D_PT_batch_export_stl_collections, VIEW3D_PT_batch_export_stl_objects
+    VIEW3D_PT_batch_export_stl_main, VIEW3D_PT_batch_export_stl_info, VIEW3D_PT_batch_export_stl_presets, VIEW3D_PT_batch_export_stl_collections, VIEW3D_PT_batch_export_stl_objects
 )
-
-def update_show_console(self, context):
-    mark_dirty()
-    if not self.batch_stl_show_console: self.batch_stl_collapsed_dirs = "[]"
 
 def register():
     for cls in classes: bpy.utils.register_class(cls)
@@ -2949,7 +2954,6 @@ def register():
     for prop in ["batch_stl_ui_global_ovr_main", "batch_stl_ui_preset_ovr", "batch_stl_ui_global_ovr", "batch_stl_ui_local_ovr", "batch_stl_ui_global_ovr_nested", "batch_stl_ui_local_ovr_nested", "batch_stl_ui_tips"]:
         setattr(Scene, prop, bpy.props.BoolProperty(default=True if ("nested" not in prop and "tips" not in prop) else False, options={'SKIP_SAVE'}))
 
-    Scene.batch_stl_show_console = bpy.props.BoolProperty(default=False, update=update_show_console, options={'SKIP_SAVE'})
     Scene.batch_stl_collapsed_dirs = bpy.props.StringProperty(default="[]", options={'SKIP_SAVE'})
     Scene.batch_stl_info_tab = bpy.props.EnumProperty(items=[('LOG', "Console Log", ""), ('TREE', "Tree View", "")], name="Info Tab", default='LOG', update=lambda s, c: mark_dirty(), options={'SKIP_SAVE'})
     Scene.batch_stl_info_global = bpy.props.BoolProperty(name="Global Mode", default=False, update=lambda s, c: mark_dirty(), options={'SKIP_SAVE'})
@@ -2972,7 +2976,7 @@ def unregister():
 
     if hasattr(bpy.types.WindowManager, "batch_stl_jobs"): del bpy.types.WindowManager.batch_stl_jobs
 
-    props = ["batch_stl_root_dir", "batch_stl_presets", "batch_stl_preset_index", "batch_stl_global_nodegroups", "batch_stl_ui_global_ovr_main", "batch_stl_verbose_console", "batch_stl_ui_preset_ovr", "batch_stl_ui_global_ovr", "batch_stl_ui_local_ovr", "batch_stl_show_console", "batch_stl_collapsed_dirs", "batch_stl_ui_tips", "batch_stl_ui_global_ovr_nested", "batch_stl_ui_local_ovr_nested", "batch_stl_info_tab", "batch_stl_info_global"]
+    props = ["batch_stl_root_dir", "batch_stl_presets", "batch_stl_preset_index", "batch_stl_global_nodegroups", "batch_stl_ui_global_ovr_main", "batch_stl_verbose_console", "batch_stl_ui_preset_ovr", "batch_stl_ui_global_ovr", "batch_stl_ui_local_ovr", "batch_stl_collapsed_dirs", "batch_stl_ui_tips", "batch_stl_ui_global_ovr_nested", "batch_stl_ui_local_ovr_nested", "batch_stl_info_tab", "batch_stl_info_global"]
     for p in props:
         if hasattr(bpy.types.Scene, p): delattr(bpy.types.Scene, p)
 
