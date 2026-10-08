@@ -2732,14 +2732,23 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
 
         if scene.batch_stl_info_tab == 'LOG':
             active_job = get_job(scene.batch_stl_preset_index)
+            log_row = layout.row()
+            
             if active_job:
-                layout.template_list("BATCH_STL_UL_console_logs", "", active_job, "console_logs", active_job, "console_index", rows=6)
-                clear_col = layout.column()
-                clear_col.enabled = not any_exporting
-                clear_col.operator("batch_stl.clear_console", text="Clear Log", icon=ICONS['DEL'])
+                col = log_row.column(align=True)
+                col.template_list("BATCH_STL_UL_console_logs", "", active_job, "console_logs", active_job, "console_index", rows=6)
             else:
-                layout.label(text="No export log for this preset yet.", icon=ICONS['INFO'])
-            layout.prop(scene, "batch_stl_verbose_console", toggle=True, icon=ICONS['CONSOLE'])
+                col = log_row.column()
+                col.label(text="No export log for this preset yet.", icon=ICONS['INFO'])
+                
+            log_tools = log_row.column(align=True)
+            log_tools.prop(scene, "batch_stl_verbose_console", text="", toggle=True, icon=ICONS['CONSOLE'])
+            
+            if active_job:
+                log_tools.separator()
+                clear_col = log_tools.column(align=True)
+                clear_col.enabled = not any_exporting
+                clear_col.operator("batch_stl.clear_console", text="", icon=ICONS['DEL'])
 
         elif scene.batch_stl_info_tab == 'TREE':
             tree_dict, duplicates = _ui_cache.get("tree", ({}, set()))
