@@ -1514,7 +1514,7 @@ def on_input_name_update(self, context):
         if self.name not in source_inputs:
             is_invalid = True
 
-    if self.name == "" and self.prev_name != "" and my_node and len(my_node.inputs) > 1:
+    if self.name == "" and my_node and len(my_node.inputs) > 1:
         for i, inp in enumerate(my_node.inputs):
             if inp == self:
                 with raw_edits(): my_node.inputs.remove(i)
@@ -1680,10 +1680,13 @@ def on_no_spaces_update(prop_name, label=""):
             setattr(self, "prev_" + prop_name, val)
     return update
 
+def search_empty_cb(self, context, edit_text):
+    return []
+
 class BatchSTLLogLine(bpy.types.PropertyGroup): text: bpy.props.StringProperty()
 class BatchSTLValue(bpy.types.PropertyGroup):
     prev_value_string: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    value_string: bpy.props.StringProperty(name="Value", default="", update=on_value_update("value_string"))
+    value_string: bpy.props.StringProperty(name="Value", default="", search=search_empty_cb, update=on_value_update("value_string"))
     prev_value_menu: bpy.props.StringProperty(default="", options={'HIDDEN'})
     value_menu: bpy.props.StringProperty(name="Value", default="", search=search_menu_items_cb, update=on_value_update("value_menu", "Edit Override Value"))
     use_tag: bpy.props.BoolProperty(name="Use Tag", default=False, update=mark_dirty)
@@ -1693,11 +1696,11 @@ class BatchSTLValue(bpy.types.PropertyGroup):
     use_sweep: bpy.props.BoolProperty(name="Sweep", default=False, update=mark_dirty)
     sweep_range: bpy.props.StringProperty(name="Sweep Range", default="", update=mark_dirty)
     prev_sweep_start: bpy.props.StringProperty(default="0", options={'HIDDEN'})
-    sweep_start: bpy.props.StringProperty(name="Start", default="0", update=on_value_update("sweep_start", "Edit Sweep Start"))
+    sweep_start: bpy.props.StringProperty(name="Start", description="Value start", default="0", update=on_value_update("sweep_start", "Edit Sweep Start"))
     prev_sweep_step: bpy.props.StringProperty(default="1", options={'HIDDEN'})
-    sweep_step: bpy.props.StringProperty(name="Step", default="1", update=on_value_update("sweep_step", "Edit Sweep Step"))
+    sweep_step: bpy.props.StringProperty(name="Step", description="Value step", default="1", update=on_value_update("sweep_step", "Edit Sweep Step"))
     prev_sweep_count: bpy.props.StringProperty(default="2", options={'HIDDEN'})
-    sweep_count: bpy.props.StringProperty(name="Steps", default="2", update=on_value_update("sweep_count", "Edit Sweep Steps"))
+    sweep_count: bpy.props.StringProperty(name="Steps", description="Number of steps", default="2", update=on_value_update("sweep_count", "Edit Sweep Steps"))
 
 class BatchSTLInput(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty(name="Input Socket", default="", search=search_input_name_cb, update=on_input_name_update)
@@ -1716,7 +1719,7 @@ def on_node_name_update(self, context):
             is_duplicate = any(other != self and clean_node_name(other.name) == clean_node_name(self.name) for other in ng.nodes) and self.name != ""
             break
 
-    if self.name == "" and self.prev_name != "" and my_ng and len(my_ng.nodes) > 1:
+    if self.name == "" and my_ng and len(my_ng.nodes) > 1:
         for i, n in enumerate(my_ng.nodes):
             if n == self:
                 with raw_edits(): my_ng.nodes.remove(i)
@@ -1761,7 +1764,7 @@ def on_group_name_update(self, context):
             is_duplicate = any(other != self and other.group_name == self.group_name for other in container) and self.group_name != ""
             break
 
-    if self.group_name == "" and self.prev_group_name != "" and my_container:
+    if self.group_name == "" and my_container:
         for i, ng in enumerate(my_container):
             if ng == self:
                 with raw_edits(): my_container.remove(i)
