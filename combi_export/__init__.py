@@ -107,6 +107,10 @@ def raw_edits():
     try: yield
     finally: _raw_edit_depth -= 1
 
+# Returned by an edit callback that removed its own item (field cleared to delete it): `self` is then gone and
+# must not be read again.
+DELETED = object()
+
 def edit_callback(label, prop, prev_prop):
     """Decorator for the update callback of `prop`: skips the logic during raw_edits(), and records a single undo
     step (when `label` is set) for the outermost callback of a cascade instead of one per nested callback."""
@@ -120,18 +124,16 @@ def edit_callback(label, prop, prev_prop):
                 return
             old_val = getattr(self, prev_prop)
             _undo_suppress_depth += 1
-            try: update(self, context)
+            try: result = update(self, context)
             finally: _undo_suppress_depth -= 1
             mark_dirty()
-            if label:
-                is_deleted = False
-                try:
-                    new_val = getattr(self, prop)
-                except ReferenceError:
-                    is_deleted = True
-                
-                if not is_deleted and new_val != old_val:
-                    push_search_undo(label)
+            if not label: return
+            if result is DELETED:
+                push_search_undo(label)
+                return
+            try: new_val = getattr(self, prop)
+            except ReferenceError: return
+            if new_val != old_val: push_search_undo(label)
         return wrapper
     return decorate
 
@@ -460,11 +462,11 @@ def count_override_combinations(overrides):
     return math.prod(len(pool) for pool in _build_override_pools(overrides))
 
 def generate_override_combinations(overrides):
+    """Lazily yield every combination (a list of (override, input) pairs); use count_override_combinations() for the
+    total, so large sweeps are never held in memory at once."""
     pools = _build_override_pools(overrides)
-    if not pools: return [[]]
-
-    combinations = list(itertools.product(*pools))
-    return [[var for variation in combo for var in variation] for combo in combinations]
+    if not pools: return iter([[]])
+    return ([var for variation in combo for var in variation] for combo in itertools.product(*pools))
 
 def reconstruct_overrides_for_combo(combo):
     grouped = {}
@@ -994,6 +996,7 @@ def rebuild_ui_cache_if_dirty():
             return 0.1
 
         scene = context.scene
+        _ui_cache["objects_state"] = mapped_objects_state(scene)
 
         gho, ghp = check_ng_for_overrides(scene.batch_stl_global_nodegroups)
         preset_metrics = {}
@@ -1066,12 +1069,22 @@ def rebuild_ui_cache_if_dirty():
         redraw_sidebars(context)
         return 0.1
     except Exception:
+        _ui_cache["is_dirty"] = True  # retry, otherwise the UI shows stale data until the next unrelated edit
         try:
             if bpy.context.scene.batch_stl_verbose_console:
                 traceback.print_exc()
         except Exception:
             pass
         return 0.25
+
+def mapped_objects_state(scene):
+    """(collection, object name, hidden) of every supported object in a mapped collection: renaming or hiding one
+    changes the object lists, counts and tree."""
+    state = set()
+    for name in {c.collection_name for p in scene.batch_stl_presets for c in p.collections if c.collection_name}:
+        col = bpy.data.collections.get(name)
+        if col: state.update((name, o.name, o.hide_viewport) for o in col.all_objects if o.type in SUPPORTED_OBJECT_TYPES)
+    return frozenset(state)
 
 @persistent
 def batch_stl_undo_handler(*args):
@@ -1082,9 +1095,13 @@ def batch_stl_depsgraph_handler(scene, depsgraph):
     if _ui_cache.get("is_dirty", False): return
     mapped = {c.collection_name for p in scene.batch_stl_presets for c in p.collections if c.collection_name}
     if not mapped: return
-    
+
     # Objects linked to / unlinked from collections change the object lists, counts and tree.
     if depsgraph.id_type_updated('COLLECTION'):
+        mark_dirty()
+        return
+
+    if mapped_objects_state(scene) != _ui_cache.get("objects_state"):
         mark_dirty()
         return
 
@@ -1136,9 +1153,7 @@ def build_tree_dict(context, excluded_cache=None, is_global=False):
                 all_overrides = resolve_overrides(global_ovrs + preset_ovrs + col_ovrs + obj_ovrs)
 
                 freq_dict = compute_override_freq_dict(all_overrides)
-                combinations = generate_override_combinations(all_overrides) or [[]]
-
-                for combo in combinations:
+                for combo in generate_override_combinations(all_overrides):
                     combo_suffix, paths_by_level = evaluate_combo_naming(combo, freq_dict)
                     full_dir_parts = build_export_dir_parts(preset.preset_prefix, c.sub_path, obj_prop.sub_path, paths_by_level)
 
@@ -1279,8 +1294,8 @@ def run_headless_export(job_file_path):
         print("  └─ No active objects to export.\nBATCH_STL_DONE", flush=True)
         sys.exit(0)
 
-    batch_combinations = {sig: generate_override_combinations(ovrs) for sig, ovrs in batch_overrides.items()}
-    total_ops = sum(len(items) * len(batch_combinations[sig]) for sig, items in execution_batches.items())
+    batch_counts = {sig: count_override_combinations(ovrs) for sig, ovrs in batch_overrides.items()}
+    total_ops = sum(len(items) * batch_counts[sig] for sig, items in execution_batches.items())
     print(f"BATCH_STL_TOTAL:{total_ops}", flush=True)
 
     current_op_step, batch_counter, first_export_started = 0, 1, False
@@ -1288,7 +1303,7 @@ def run_headless_export(job_file_path):
     for signature, batch_items in execution_batches.items():
         all_overrides = batch_overrides[signature]
         freq_dict = compute_override_freq_dict(all_overrides)
-        combinations = batch_combinations[signature]
+        num_combinations = batch_counts[signature]
         batch_objects = {item[2] for item in batch_items}
 
         isolated_collections = []
@@ -1309,7 +1324,7 @@ def run_headless_export(job_file_path):
         baseline_global_states, baseline_mod_states = capture_baseline_states(all_overrides, batch_objects)
 
         try:
-            for combo_idx, combo in enumerate(combinations):
+            for combo_idx, combo in enumerate(generate_override_combinations(all_overrides)):
                 t_perm_start = time.perf_counter()
                 if not first_export_started:
                     print(f"=== Headless init took {time.time() - start_time_unix:.2f} s to start first export ===", flush=True)
@@ -1331,7 +1346,7 @@ def run_headless_export(job_file_path):
 
                     result_text = export_object_stl(filepath, bl_obj, depsgraph, instance_arrays.get(bl_obj.name_full, ()))
 
-                    print(f"{preset.name} | {c.collection_name} | {bl_obj.name} | Permutation {combo_idx + 1}/{len(combinations)} | Batch {batch_counter}/{len(execution_batches)}\n  └─ {result_text} | {time.perf_counter() - t_perm_start:.2f} s", flush=True)
+                    print(f"{preset.name} | {c.collection_name} | {bl_obj.name} | Permutation {combo_idx + 1}/{num_combinations} | Batch {batch_counter}/{len(execution_batches)}\n  └─ {result_text} | {time.perf_counter() - t_perm_start:.2f} s", flush=True)
                     current_op_step += 1
                     print(f"BATCH_STL_PROGRESS:{current_op_step}", flush=True)
 
@@ -1515,7 +1530,7 @@ def on_input_name_update(self, context):
         for i, inp in enumerate(my_node.inputs):
             if inp == self:
                 with raw_edits(): my_node.inputs.remove(i)
-                return
+                return DELETED
 
     if is_invalid:
         with raw_edits():
@@ -1657,7 +1672,7 @@ def on_value_update(prop_name, label=""):
                 for idx, val_item in enumerate(my_input.values):
                     if val_item == self:
                         with raw_edits(): my_input.values.remove(idx)
-                        return
+                        return DELETED
             else:
                 is_invalid = True
 
@@ -1720,7 +1735,7 @@ def on_node_name_update(self, context):
         for i, n in enumerate(my_ng.nodes):
             if n == self:
                 with raw_edits(): my_ng.nodes.remove(i)
-                return
+                return DELETED
 
     if self.name != "" and my_ng:
         ng_ptr = bpy.data.node_groups.get(my_ng.group_name)
@@ -1765,7 +1780,7 @@ def on_group_name_update(self, context):
         for i, ng in enumerate(my_container):
             if ng == self:
                 with raw_edits(): my_container.remove(i)
-                return
+                return DELETED
 
     is_invalid = self.group_name != "" and not bpy.data.node_groups.get(self.group_name)
 
@@ -2386,7 +2401,11 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
 
         for c in self.preset.collections:
             c_ptr = bpy.data.collections.get(c.collection_name)
-            if not c_ptr or is_collection_excluded(bpy.context, c_ptr): continue
+            if not c_ptr:
+                # e.g. the collection was renamed or deleted: say so instead of reporting a complete export
+                if c.collection_name: log_to_console(job, f"SKIPPED (collection not found): {c.collection_name}")
+                continue
+            if is_collection_excluded(bpy.context, c_ptr): continue
             sync_collection_objects(c, c_ptr)
             c_pinned_ovrs = get_flat_overrides(c.nodegroups, "COLLECTION")
             for obj_prop in c.objects:
@@ -2440,7 +2459,9 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
 
         try:
             sub_env = dict(os.environ, PYTHONUNBUFFERED="1")
-            self.process = subprocess.Popen(worker_args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", env=sub_env)
+            # blender.exe is a console program: without this flag Windows opens a console window for the worker.
+            flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            self.process = subprocess.Popen(worker_args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", env=sub_env, creationflags=flags)
         except Exception as e:
             self.report({'ERROR'}, f"Failed to spawn headless Blender: {e}")
             self.cleanup(context)

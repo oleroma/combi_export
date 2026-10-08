@@ -169,7 +169,7 @@ Instead of creating intermediate text or using standard single-threaded Python f
 
 ### UI Cache Engine (`rebuild_ui_cache_if_dirty`)
 - Driven by a background timer (`bpy.app.timers`) running at ~10Hz with a dirty flag (`mark_dirty()`).
-- The flag is set by property updates, undo/redo, and a `depsgraph_update_post` handler that reacts to collection changes (objects linked/unlinked) and to exclusion changes of mapped collections.
+- The flag is set by property updates, undo/redo, and a `depsgraph_update_post` handler that reacts to collection changes (objects linked/unlinked), to objects in mapped collections being renamed or hidden, and to exclusion changes of mapped collections.
 - Recomputes statistics (preset counts, collections, exported object count, total permutation iterations).
 - Computes directory hierarchies and leaf files in advance. The UI displays this with an uncollapsable root directory and dedicated side-column toolbar buttons for toggling global view and bulk expanding/collapsing.
 - **Naming Collision Detection**: Analyzes all destination paths and flags collisions when two permutations or objects resolve to the identical output file path.
