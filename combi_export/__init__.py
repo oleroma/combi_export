@@ -138,10 +138,14 @@ def edit_callback(label, prop, prev_prop):
     return decorate
 
 _INVALID_NAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_WINDOWS_RESERVED = {"con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9"}
 
 def sanitize_name(text):
     """Make text safe to use inside a single file or folder name on every OS."""
-    return _INVALID_NAME_CHARS.sub("_", str(text))
+    s = _INVALID_NAME_CHARS.sub("_", str(text))
+    if s.split('.')[0].lower() in _WINDOWS_RESERVED:
+        s = f"_{s}"
+    return s
 
 def split_path_parts(path_text):
     """Split a user-typed sub-path into safe folder names; empty, '.' and '..' parts are dropped."""
@@ -171,6 +175,29 @@ def redraw_sidebars(context=None):
 def clean_node_name(name):
     if not name: return ""
     return name.split(" [")[0].strip()
+
+def is_group_used_by_object(group, obj, override_target):
+    if not group: return False
+    for mod in obj.modifiers:
+        if mod.type == 'NODES' and mod.node_group:
+            if override_target == 'MODIFIER':
+                if mod.node_group == group: return True
+            else:
+                def check_tree(tree, seen=None):
+                    if not tree: return False
+                    if seen is None: seen = set()
+                    if tree in seen: return False
+                    seen.add(tree)
+                    if tree == group: return True
+                    for node in tree.nodes:
+                        if getattr(node, "node_tree", None):
+                            if check_tree(node.node_tree, seen): return True
+                    return False
+                if check_tree(mod.node_group): return True
+    return False
+
+def filter_overrides_for_object(overrides, bl_obj):
+    return [o for o in overrides if is_group_used_by_object(o.parent_group_ptr, bl_obj, getattr(o, "override_target", "NODE"))]
 
 def is_collection_excluded(context, target_collection):
     if not target_collection: return True
@@ -373,7 +400,7 @@ def get_sorted_values(ng_ptr, node_obj, inp, values):
             if inp.override_type in ('FLOAT', 'INT'):
                 try: return (float(val.sweep_start), idx)
                 except ValueError: return (float('-inf'), idx)
-            return (0, idx)
+            return ("", idx) if getattr(inp, "override_type", "") == 'STRING' else (0, idx)
         else:
             if inp.override_type in ('FLOAT', 'INT'):
                 try:
@@ -429,6 +456,7 @@ def parse_sweep_values(ovr, inp):
         
         try: count = int(count_str)
         except ValueError: count = 2
+        count = min(count, 1000)
 
         if count <= 0:
             vals.append(round(start, 8) if is_float else int(start))
@@ -537,11 +565,7 @@ def apply_overrides(overrides, target_objects):
                         if socket.default_value != val:
                             socket.default_value = val
                             trees_to_update.add(parent_tree)
-                    except (TypeError, ValueError):
-                        try:
-                            socket.default_value = (val, val, val)
-                            trees_to_update.add(parent_tree)
-                        except Exception: pass
+                    except (TypeError, ValueError): pass
 
         elif override.override_target == 'MODIFIER' and override.parent_group_ptr:
             for inp in override.inputs:
@@ -615,11 +639,13 @@ def get_active_object(collection):
 def get_job(preset_index, create=False):
     """Runtime export state of a preset (keyed by its index). Creating requires an operator context, not a draw call."""
     jobs = bpy.context.window_manager.batch_stl_jobs
+    scene_name = getattr(bpy.context.scene, "name", "")
     for job in jobs:
-        if job.preset_index == preset_index: return job
+        if job.preset_index == preset_index and getattr(job, "scene_name", "") == scene_name: return job
     if not create: return None
     job = jobs.add()
     job.preset_index = preset_index
+    if scene_name: job.scene_name = scene_name
     return job
 
 def is_any_exporting():
@@ -641,7 +667,7 @@ def apply_tag(base, tag):
     return tag
 
 def format_export_filename(bl_obj_name, obj_tag, col_use_tag, col_tag, combo_suffix=""):
-    safe_name = apply_tag(bpy.path.clean_name(bl_obj_name), sanitize_name(obj_tag))
+    safe_name = apply_tag(sanitize_name(bl_obj_name).strip(" ."), sanitize_name(obj_tag))
     tag_suffix = sanitize_name(col_tag) if col_use_tag and col_tag else ""
     return f"{safe_name}{tag_suffix}{combo_suffix}.stl"
 
@@ -678,7 +704,7 @@ def evaluate_combo_naming(combo, freq_dict):
         param_key = override_param_key(ovr, inp.input_name)
         if param_key not in processed_params:
             val = get_input_value(inp)
-            val_str = f"{val:g}" if isinstance(val, float) else str(val).replace(" ", "_")
+            val_str = f"{val:.10g}" if isinstance(val, float) else str(val).replace(" ", "_")
             naming_str = sanitize_name(apply_tag(val_str, inp.tag))
 
             if freq_dict.get(param_key, 0) > 1:
@@ -693,9 +719,30 @@ def sync_collection_objects(col_prop, col_ptr=None):
     if not col_ptr: return
 
     # A list (not a set) keeps new objects in the collection's own order.
-    actual_names = [obj.name for obj in col_ptr.all_objects if obj.type in SUPPORTED_OBJECT_TYPES]
+    actual_objs = [obj for obj in col_ptr.all_objects if obj.type in SUPPORTED_OBJECT_TYPES]
+    actual_names = [obj.name for obj in actual_objs]
     actual_set = set(actual_names)
+    
+    # First pass: try to detect renamed objects using the pointer
+    for obj_prop in col_prop.objects:
+        if obj_prop.obj_ptr and obj_prop.obj_ptr.name != obj_prop.name:
+            if obj_prop.obj_ptr.name in actual_set:
+                obj_prop.name = obj_prop.obj_ptr.name
+                
     existing_names = {obj.name for obj in col_prop.objects}
+    missing_names = actual_set - existing_names
+    removed_names = existing_names - actual_set
+    
+    if len(missing_names) == 1 and len(removed_names) == 1:
+        old_name = removed_names.pop()
+        new_name = missing_names.pop()
+        for obj_prop in col_prop.objects:
+            if obj_prop.name == old_name:
+                obj_prop.name = new_name
+                if col_ptr.all_objects.get(new_name):
+                    obj_prop.obj_ptr = col_ptr.all_objects.get(new_name)
+                break
+        existing_names = {obj.name for obj in col_prop.objects}
 
     for i in reversed(range(len(col_prop.objects))):
         if col_prop.objects[i].name not in actual_set: col_prop.objects.remove(i)
@@ -705,6 +752,7 @@ def sync_collection_objects(col_prop, col_ptr=None):
             new_obj = col_prop.objects.add()
             new_obj.name = name
             new_obj.export = True
+            new_obj.obj_ptr = col_ptr.all_objects.get(name)
 
 # --- BINARY STL WRITER ---
 def mesh_to_stl_array(mesh, matrix_world):
@@ -1043,6 +1091,7 @@ def rebuild_ui_cache_if_dirty():
                             c_objs += 1
                             p_objs += 1
                             obj_ovrs = resolve_overrides(c_pinned_ovrs + get_flat_overrides(obj_prop.nodegroups, "OBJECT"))
+                            obj_ovrs = filter_overrides_for_object(obj_ovrs, bl_obj)
                             c_exp += count_override_combinations(obj_ovrs)
 
                 p_exp += c_exp
@@ -1089,6 +1138,10 @@ def mapped_objects_state(scene):
 @persistent
 def batch_stl_undo_handler(*args):
     mark_dirty()
+    try:
+        for job in bpy.context.window_manager.batch_stl_jobs:
+            job.cancel_export = True
+    except Exception: pass
 
 @persistent
 def batch_stl_depsgraph_handler(scene, depsgraph):
@@ -1099,6 +1152,9 @@ def batch_stl_depsgraph_handler(scene, depsgraph):
     # Objects linked to / unlinked from collections change the object lists, counts and tree.
     if depsgraph.id_type_updated('COLLECTION'):
         mark_dirty()
+        return
+
+    if not depsgraph.id_type_updated('OBJECT') and not depsgraph.id_type_updated('SCENE'):
         return
 
     if mapped_objects_state(scene) != _ui_cache.get("objects_state"):
@@ -1151,6 +1207,11 @@ def build_tree_dict(context, excluded_cache=None, is_global=False):
 
                 obj_ovrs = get_flat_overrides(obj_prop.nodegroups, "OBJECT")
                 all_overrides = resolve_overrides(global_ovrs + preset_ovrs + col_ovrs + obj_ovrs)
+                all_overrides = filter_overrides_for_object(all_overrides, bl_obj)
+
+                combo_count = count_override_combinations(all_overrides)
+                if len(all_filepaths) + combo_count > 5000:
+                    return {root_name: {"_files": [f"Tree preview limited (>{5000} files)"]}}, set()
 
                 freq_dict = compute_override_freq_dict(all_overrides)
                 for combo in generate_override_combinations(all_overrides):
@@ -1275,6 +1336,7 @@ def run_headless_export(job_file_path):
             if not bl_obj or bl_obj.hide_viewport or bl_obj.type not in SUPPORTED_OBJECT_TYPES: continue
 
             obj_overrides = resolve_overrides(pinned_ovrs + get_flat_overrides(obj_prop.nodegroups, "OBJECT"))
+            obj_overrides = filter_overrides_for_object(obj_overrides, bl_obj)
             full_sig = get_override_signature(obj_overrides)
             if not full_sig and skip_direct: continue
             execution_batches.setdefault(full_sig, []).append((c, obj_prop, bl_obj))
@@ -1812,6 +1874,7 @@ class BatchSTLNodeGroup(bpy.types.PropertyGroup):
 
 class BatchSTLObject(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty()
+    obj_ptr: bpy.props.PointerProperty(type=bpy.types.Object)
     export: bpy.props.BoolProperty(default=True, update=mark_dirty)
     prev_tag: bpy.props.StringProperty(default="", options={'HIDDEN'})
     tag: bpy.props.StringProperty(name="Tag", default="", update=on_no_spaces_update("tag"))
@@ -1845,6 +1908,7 @@ class BatchSTLCollection(bpy.types.PropertyGroup):
 class BatchSTLJob(bpy.types.PropertyGroup):
     """Runtime state of one preset's export. Lives on the WindowManager so it is never saved or rolled back by undo."""
     preset_index: bpy.props.IntProperty(default=-1)
+    scene_name: bpy.props.StringProperty(default="")
     is_exporting: bpy.props.BoolProperty(default=False)
     cancel_export: bpy.props.BoolProperty(default=False)
     export_progress: bpy.props.FloatProperty(name="Progress", default=0.0, min=0.0, max=1.0)
@@ -2391,6 +2455,11 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
             self.report({'ERROR'}, "Improper setup: One or more override fields are missing or invalid.")
             return {"CANCELLED"}
 
+        tree, duplicates = build_tree_dict(context, is_global=False)
+        if duplicates:
+            self.report({'ERROR'}, f"Export aborted: {len(duplicates)} naming collisions detected. Check tree view.")
+            return {"CANCELLED"}
+
         context.scene.batch_stl_info_tab = 'LOG'
         job.console_logs.clear()
 
@@ -2414,7 +2483,10 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
                 if not bl_obj or bl_obj.hide_viewport or bl_obj.type not in SUPPORTED_OBJECT_TYPES: continue
 
                 obj_ovrs = get_flat_overrides(obj_prop.nodegroups, "OBJECT")
-                if not preset_ovrs and not c_pinned_ovrs and not obj_ovrs: objects_to_export_directly.append((c, obj_prop, bl_obj))
+                all_ovrs = resolve_overrides(preset_ovrs + c_pinned_ovrs + obj_ovrs)
+                all_ovrs = filter_overrides_for_object(all_ovrs, bl_obj)
+                
+                if not all_ovrs: objects_to_export_directly.append((c, obj_prop, bl_obj))
                 else: objects_needing_headless.append((c, obj_prop, bl_obj))
 
         if objects_to_export_directly:
@@ -3151,6 +3223,14 @@ classes = (
 
 def register():
     for cls in classes: bpy.utils.register_class(cls)
+
+    if "--batch-stl-headless" not in sys.argv:
+        try:
+            tmp = tempfile.gettempdir()
+            for f in os.listdir(tmp):
+                if f.startswith("fast_batch_stl_"):
+                    shutil.rmtree(os.path.join(tmp, f), ignore_errors=True)
+        except Exception: pass
 
     bpy.types.WindowManager.batch_stl_jobs = bpy.props.CollectionProperty(type=BatchSTLJob)
 
