@@ -1066,8 +1066,37 @@ def rebuild_ui_cache_if_dirty():
         return 0.25
 
 @persistent
-def batch_stl_depsgraph_handler(*args):
+def batch_stl_undo_handler(*args):
     mark_dirty()
+
+@persistent
+def batch_stl_depsgraph_handler(scene, depsgraph):
+    if _ui_cache.get("is_dirty", False): return
+    mapped = {c.collection_name for p in scene.batch_stl_presets for c in p.collections if c.collection_name}
+    if not mapped: return
+    
+    context = bpy.context
+    if not getattr(context, "view_layer", None): return
+    
+    old_vis = _ui_cache.get("visibility", {})
+    changed = False
+    
+    def traverse(layer_collection, parent_excluded=False):
+        nonlocal changed
+        if changed: return
+        current_excluded = parent_excluded or layer_collection.exclude
+        if layer_collection.collection:
+            cname = layer_collection.collection.name
+            if cname in mapped:
+                if old_vis.get(cname, False) != current_excluded:
+                    changed = True
+                    return
+        for child in layer_collection.children: 
+            traverse(child, current_excluded)
+            
+    traverse(context.view_layer.layer_collection)
+    if changed:
+        mark_dirty()
 
 # --- TREE VISUALIZER LOGIC ---
 def build_tree_dict(context, visibility_cache=None, is_global=False):
@@ -2963,11 +2992,15 @@ def register():
 
     if "--batch-stl-headless" not in sys.argv:
         if batch_stl_depsgraph_handler not in bpy.app.handlers.depsgraph_update_post: bpy.app.handlers.depsgraph_update_post.append(batch_stl_depsgraph_handler)
+        if batch_stl_undo_handler not in bpy.app.handlers.undo_post: bpy.app.handlers.undo_post.append(batch_stl_undo_handler)
+        if batch_stl_undo_handler not in bpy.app.handlers.redo_post: bpy.app.handlers.redo_post.append(batch_stl_undo_handler)
         if not bpy.app.timers.is_registered(rebuild_ui_cache_if_dirty): bpy.app.timers.register(rebuild_ui_cache_if_dirty)
 
 def unregister():
     if reset_batch_stl_state in bpy.app.handlers.load_post: bpy.app.handlers.load_post.remove(reset_batch_stl_state)
     if batch_stl_depsgraph_handler in bpy.app.handlers.depsgraph_update_post: bpy.app.handlers.depsgraph_update_post.remove(batch_stl_depsgraph_handler)
+    if batch_stl_undo_handler in bpy.app.handlers.undo_post: bpy.app.handlers.undo_post.remove(batch_stl_undo_handler)
+    if batch_stl_undo_handler in bpy.app.handlers.redo_post: bpy.app.handlers.redo_post.remove(batch_stl_undo_handler)
     if bpy.app.timers.is_registered(rebuild_ui_cache_if_dirty): bpy.app.timers.unregister(rebuild_ui_cache_if_dirty)
 
     for cls in reversed(classes):
