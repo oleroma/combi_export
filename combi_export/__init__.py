@@ -1166,14 +1166,13 @@ def iter_tree_dirs(tree_node, current_path=""):
         yield from iter_tree_dirs(child, dir_path)
 
 def expand_last_dirs(tree_node, toggled, current_path=""):
-    """Expand the last subdirectory of every expanded directory, recursively, opening each visible branch down to its last leaf."""
+    """Expand the last subdirectory of every directory, recursively."""
     subdirs = [k for k, v in tree_node.items() if k != '_files' and isinstance(v, dict)]
     is_root = current_path == ""
     if subdirs: set_dir_collapsed(toggled, f"{current_path}/{subdirs[-1]}", is_root, False)
     for k in subdirs:
         dir_path = f"{current_path}/{k}"
-        if not is_dir_collapsed(toggled, dir_path, is_root):
-            expand_last_dirs(tree_node[k], toggled, dir_path)
+        expand_last_dirs(tree_node[k], toggled, dir_path)
 
 def draw_tree_dict(layout, tree_node, current_path="", toggled_list=None, duplicates=None, actual_path=""):
     if toggled_list is None: toggled_list = load_toggled_dirs(bpy.context.scene)
@@ -1183,13 +1182,17 @@ def draw_tree_dict(layout, tree_node, current_path="", toggled_list=None, duplic
     for k in dirs:
         dir_path = f"{current_path}/{k}"
         next_actual = os.path.normpath(os.path.join(actual_path, k)) if actual_path else os.path.normpath(k)
-        is_collapsed = is_dir_collapsed(toggled_list, dir_path, current_path == "")
+        is_root = current_path == ""
+        is_collapsed = False if is_root else is_dir_collapsed(toggled_list, dir_path, is_root)
 
         split = layout.split(factor=0.005)
         split.column()
         box = split.column().box()
         row = box.row()
-        row.operator("batch_stl.toggle_dir_tree", text="", icon=ICONS['RIGHT'] if is_collapsed else ICONS['DOWN'], emboss=False).dir_path = dir_path
+        if is_root:
+            row.label(text="", icon=ICONS['DOWN'])
+        else:
+            row.operator("batch_stl.toggle_dir_tree", text="", icon=ICONS['RIGHT'] if is_collapsed else ICONS['DOWN'], emboss=False).dir_path = dir_path
         row.scale_y = 0.4
         row.label(text=str(k))
         if not is_collapsed and isinstance(tree_node[k], dict):
@@ -2289,17 +2292,20 @@ class BATCH_STL_OT_tree_expansion(bpy.types.Operator):
     def description(cls, context, properties):
         if properties.mode == 'EXPAND_ALL': return "Expand all directories"
         if properties.mode == 'COLLAPSE_ALL': return "Collapse all directories"
-        return "Expand the last subdirectory of each open directory, recursively"
+        return "Collapse all, then expand the last subdirectory of every directory"
 
     def execute(self, context):
         scene = context.scene
         tree = _ui_cache["tree"][0]
         toggled = load_toggled_dirs(scene)
         if self.mode == 'EXPAND_LAST':
+            for p, _node, is_root in iter_tree_dirs(tree): 
+                set_dir_collapsed(toggled, p, is_root, True)
             expand_last_dirs(tree, toggled)
         else:
             collapse = self.mode == 'COLLAPSE_ALL'
-            for p, _node, is_root in iter_tree_dirs(tree): set_dir_collapsed(toggled, p, is_root, collapse)
+            for p, _node, is_root in iter_tree_dirs(tree): 
+                set_dir_collapsed(toggled, p, is_root, collapse)
         save_toggled_dirs(scene, toggled)
         return {'FINISHED'}
 
@@ -2819,19 +2825,25 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
 
         if scene.batch_stl_info_tab == 'LOG':
             active_job = get_job(scene.batch_stl_preset_index)
+            log_row = layout.row()
+            
             if active_job:
-                layout.template_list("BATCH_STL_UL_console_logs", "", active_job, "console_logs", active_job, "console_index", rows=6)
-                clear_col = layout.column()
-                clear_col.enabled = not any_exporting
-                clear_col.operator("batch_stl.clear_console", text="Clear Log", icon=ICONS['DEL'])
+                col = log_row.column(align=True)
+                col.template_list("BATCH_STL_UL_console_logs", "", active_job, "console_logs", active_job, "console_index", rows=6)
             else:
-                layout.label(text="No export log for this preset yet.", icon=ICONS['INFO'])
-            layout.prop(scene, "batch_stl_verbose_console", toggle=True, icon=ICONS['CONSOLE'])
+                col = log_row.column()
+                col.label(text="No export log for this preset yet.", icon=ICONS['INFO'])
+                
+            log_tools = log_row.column(align=True)
+            log_tools.prop(scene, "batch_stl_verbose_console", text="", toggle=True, icon=ICONS['CONSOLE'])
+            
+            if active_job:
+                log_tools.separator()
+                clear_col = log_tools.column(align=True)
+                clear_col.enabled = not any_exporting
+                clear_col.operator("batch_stl.clear_console", text="", icon=ICONS['DEL'])
 
         elif scene.batch_stl_info_tab == 'TREE':
-            tree_tools = layout.row()
-            tree_tools.prop(scene, "batch_stl_info_global", text="Global Tree View", toggle=True, icon=ICONS['GLOBAL'])
-
             tree_dict, duplicates = _ui_cache.get("tree", ({}, set()))
             if duplicates:
                 warn_box = layout.box()
@@ -2843,6 +2855,8 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
             col = tree_row.column(align=True)
             draw_tree_dict(col, tree_dict, duplicates=duplicates)
             expand_tools = tree_row.column(align=True)
+            expand_tools.prop(scene, "batch_stl_info_global", text="", toggle=True, icon=ICONS['GLOBAL'])
+            expand_tools.separator()
             expand_tools.operator("batch_stl.tree_expansion", text="", icon=ICONS['EXPAND_ALL']).mode = 'EXPAND_ALL'
             expand_tools.operator("batch_stl.tree_expansion", text="", icon=ICONS['COLLAPSE_ALL']).mode = 'COLLAPSE_ALL'
             expand_tools.operator("batch_stl.tree_expansion", text="", icon=ICONS['EXPAND_LAST']).mode = 'EXPAND_LAST'
