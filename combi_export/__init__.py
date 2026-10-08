@@ -324,8 +324,7 @@ def get_override_signature(overrides):
     for ovr in overrides:
         inputs_sig = tuple(
             (inp.input_name, inp.override_type, get_input_value(inp), inp.use_sweep, inp.sweep_range,
-             inp.sweep_start_float, inp.sweep_step_float, inp.sweep_count_float,
-             inp.sweep_start_int, inp.sweep_step_int, inp.sweep_count_int,
+             inp.sweep_start, inp.sweep_step, inp.sweep_count,
              inp.use_tag, inp.tag, inp.use_dir)
             for inp in ovr.inputs
         )
@@ -343,12 +342,9 @@ class MockInput:
         self.use_dir = getattr(source, "use_dir", False)
         self.use_sweep = getattr(source, "use_sweep", False)
         self.sweep_range = getattr(source, "sweep_range", "")
-        self.sweep_start_float = getattr(source, "sweep_start_float", 0.0)
-        self.sweep_step_float = getattr(source, "sweep_step_float", 1.0)
-        self.sweep_count_float = getattr(source, "sweep_count_float", 2)
-        self.sweep_start_int = getattr(source, "sweep_start_int", 0)
-        self.sweep_step_int = getattr(source, "sweep_step_int", 1)
-        self.sweep_count_int = getattr(source, "sweep_count_int", 2)
+        self.sweep_start = getattr(source, "sweep_start", "0")
+        self.sweep_step = getattr(source, "sweep_step", "1")
+        self.sweep_count = getattr(source, "sweep_count", "2")
         self._val = override_val
         self._is_temp = is_temp
 
@@ -379,8 +375,9 @@ def get_sorted_values(ng_ptr, node_obj, inp, values):
         if val is None:
             return (float('-inf'), idx)
         if getattr(val, "use_sweep", False):
-            if inp.override_type == 'FLOAT': return (val.sweep_start_float, idx)
-            if inp.override_type == 'INT': return (val.sweep_start_int, idx)
+            if inp.override_type in ('FLOAT', 'INT'):
+                try: return (float(val.sweep_start), idx)
+                except ValueError: return (float('-inf'), idx)
             return (0, idx)
         else:
             if inp.override_type in ('FLOAT', 'INT'):
@@ -425,9 +422,18 @@ def parse_sweep_values(ovr, inp):
     elif inp.override_type in ['INT', 'FLOAT']:
         vals = []
         is_float = (inp.override_type == 'FLOAT')
-        start = getattr(inp, "sweep_start_float" if is_float else "sweep_start_int", 0.0 if is_float else 0)
-        step = getattr(inp, "sweep_step_float" if is_float else "sweep_step_int", 1.0 if is_float else 1)
-        count = getattr(inp, "sweep_count_float" if is_float else "sweep_count_int", 2)
+        start_str = getattr(inp, "sweep_start", "0")
+        step_str = getattr(inp, "sweep_step", "1")
+        count_str = getattr(inp, "sweep_count", "2")
+        
+        try: start = float(start_str) if is_float else int(start_str)
+        except ValueError: start = 0.0 if is_float else 0
+        
+        try: step = float(step_str) if is_float else int(step_str)
+        except ValueError: step = 1.0 if is_float else 1
+        
+        try: count = int(count_str)
+        except ValueError: count = 2
 
         if count <= 0:
             vals.append(round(start, 8) if is_float else int(start))
@@ -789,12 +795,9 @@ def copy_val_to_dict(v):
         "value_string": v.value_string, "value_menu": v.value_menu, "use_tag": v.use_tag,
         "tag": v.tag, "use_dir": v.use_dir, "use_sweep": getattr(v, "use_sweep", False),
         "sweep_range": getattr(v, "sweep_range", ""),
-        "sweep_start_float": getattr(v, "sweep_start_float", 0.0),
-        "sweep_step_float": getattr(v, "sweep_step_float", 1.0),
-        "sweep_count_float": getattr(v, "sweep_count_float", 2),
-        "sweep_start_int": getattr(v, "sweep_start_int", 0),
-        "sweep_step_int": getattr(v, "sweep_step_int", 1),
-        "sweep_count_int": getattr(v, "sweep_count_int", 2)
+        "sweep_start": getattr(v, "sweep_start", "0"),
+        "sweep_step": getattr(v, "sweep_step", "1"),
+        "sweep_count": getattr(v, "sweep_count", "2")
     }
 
 def copy_input_to_dict(i):
@@ -894,10 +897,9 @@ def is_override_val_valid(inp, val, ng_ptr=None, node=None):
     if val is None or inp.override_type not in SUPPORTED_OVERRIDE_TYPES:
         return False
     if getattr(val, "use_sweep", False):
-        if inp.override_type == 'FLOAT':
-            return getattr(val, "sweep_count_float", 0) >= 1
-        elif inp.override_type == 'INT':
-            return getattr(val, "sweep_count_int", 0) >= 1
+        if inp.override_type in ('FLOAT', 'INT'):
+            try: return int(getattr(val, "sweep_count", "2")) >= 1
+            except ValueError: return False
         elif inp.override_type == 'STRING':
             return bool(val.sweep_range and val.sweep_range.strip())
         return True
@@ -1621,6 +1623,22 @@ def on_value_update(prop_name, label=""):
                             if my_val not in items:
                                 is_invalid = True
 
+                        if prop_name in ("value_string", "sweep_start", "sweep_step"):
+                            if my_val != "":
+                                try:
+                                    if i.override_type == 'FLOAT': float(my_val)
+                                    elif i.override_type == 'INT': int(my_val)
+                                except ValueError:
+                                    is_invalid = True
+                            elif prop_name != "value_string":
+                                is_invalid = True
+                                
+                        if prop_name == "sweep_count":
+                            try:
+                                if int(my_val) < 1: is_invalid = True
+                            except ValueError:
+                                is_invalid = True
+
                         for other in i.values:
                             if other != self and getattr(other, prop_name) == my_val and not getattr(other, "use_sweep", False) and not getattr(self, "use_sweep", False):
                                 is_duplicate = True
@@ -1667,12 +1685,12 @@ class BatchSTLValue(bpy.types.PropertyGroup):
     use_dir: bpy.props.BoolProperty(name="Use Dir", default=True, update=mark_dirty)
     use_sweep: bpy.props.BoolProperty(name="Sweep", default=False, update=mark_dirty)
     sweep_range: bpy.props.StringProperty(name="Sweep Range", default="", update=mark_dirty)
-    sweep_start_float: bpy.props.FloatProperty(name="Start", default=0.0, update=mark_dirty)
-    sweep_step_float: bpy.props.FloatProperty(name="Step", default=1.0, update=mark_dirty)
-    sweep_count_float: bpy.props.IntProperty(name="Steps", default=2, min=1, update=mark_dirty)
-    sweep_start_int: bpy.props.IntProperty(name="Start", default=0, update=mark_dirty)
-    sweep_step_int: bpy.props.IntProperty(name="Step", default=1, update=mark_dirty)
-    sweep_count_int: bpy.props.IntProperty(name="Steps", default=2, min=1, update=mark_dirty)
+    prev_sweep_start: bpy.props.StringProperty(default="0", options={'HIDDEN'})
+    sweep_start: bpy.props.StringProperty(name="Start", default="0", update=on_value_update("sweep_start", "Edit Sweep Start"))
+    prev_sweep_step: bpy.props.StringProperty(default="1", options={'HIDDEN'})
+    sweep_step: bpy.props.StringProperty(name="Step", default="1", update=on_value_update("sweep_step", "Edit Sweep Step"))
+    prev_sweep_count: bpy.props.StringProperty(default="2", options={'HIDDEN'})
+    sweep_count: bpy.props.StringProperty(name="Steps", default="2", update=on_value_update("sweep_count", "Edit Sweep Steps"))
 
 class BatchSTLInput(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty(name="Input Socket", default="", search=search_input_name_cb, update=on_input_name_update)
@@ -2733,14 +2751,10 @@ def draw_overrides_table(layout, scene, nodegroups, is_collection, is_open_prop,
                     c_val_prop = c_val.row(align=True)
                     c_val_prop.alert = not val_valid
                     if getattr(val, "use_sweep", False):
-                        if inp.override_type == 'FLOAT':
-                            c_val_prop.prop(val, "sweep_start_float", text="")
-                            c_val_prop.prop(val, "sweep_step_float", text="")
-                            c_val_prop.prop(val, "sweep_count_float", text="")
-                        elif inp.override_type == 'INT':
-                            c_val_prop.prop(val, "sweep_start_int", text="")
-                            c_val_prop.prop(val, "sweep_step_int", text="")
-                            c_val_prop.prop(val, "sweep_count_int", text="")
+                        if inp.override_type in ('FLOAT', 'INT'):
+                            c_val_prop.prop(val, "sweep_start", text="")
+                            c_val_prop.prop(val, "sweep_step", text="")
+                            c_val_prop.prop(val, "sweep_count", text="")
                         elif inp.override_type == 'STRING':
                             c_val_prop.prop(val, "sweep_range", text="")
                         elif inp.override_type in ['BOOLEAN', 'MENU']:
