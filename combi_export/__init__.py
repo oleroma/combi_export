@@ -1195,28 +1195,28 @@ def draw_tree_dict(layout, tree_node, current_path="", toggled_list=None, duplic
         split = layout.split(factor=0.005)
         split.column()
         box = split.column().box()
-        row = box.row()
+        row = box.row(align=True)
         if is_root:
             row.label(text="", icon=ICONS['DOWN'])
         else:
             row.operator_context = 'INVOKE_DEFAULT'
             row.operator("batch_stl.toggle_dir_tree", text="", icon=ICONS['RIGHT'] if is_collapsed else ICONS['DOWN'], emboss=False).dir_path = dir_path
             row.operator_context = 'EXEC_DEFAULT'
-        row.scale_y = 0.4
-        row.label(text=str(k))
+        row.scale_y = 0.8
+        row.label(text=str(k), icon=ICONS['DIR'])
         if not is_collapsed and isinstance(tree_node[k], dict):
             draw_tree_dict(box, tree_node[k], dir_path, toggled_list, duplicates, next_actual)
 
     for f in tree_node.get('_files', []):
-        split = layout.split(factor=0.025)
-        split.column()        # Consume the 2.5% width as an empty indent spacer
-        col = split.column()  # Assign the remaining 97.5% width to your content
+        split = layout.split(factor=0.12)
+        split.column()
+        col = split.column()
 
         row = col.row()
-        row.scale_y = 0.4
+        row.scale_y = 0.8
         check_path = os.path.normpath(os.path.join(actual_path, f)) if actual_path else os.path.normpath(f)
         if clash_key(check_path) in duplicates: row.alert = True
-        row.label(text=str(f))
+        row.label(text=str(f), icon=ICONS['OBJECT'])
 
 # --- HEADLESS EXPORT EXECUTION ROUTINE ---
 def run_headless_export(job_file_path):
@@ -2893,38 +2893,54 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
         tip_header.label(text="EXTENSION GUIDE", icon=ICONS['INFO'])
 
         if scene.batch_stl_ui_tips:
-            col = tip_box.column()
+            box_col = tip_box.column()
             
-            col.label(text="Hierarchical Overrides (Priority):", icon=ICONS['OVR'])
-            col.label(text="  • Global > Preset > Collection > Object", icon=ICONS['BLANK'])
-            col.label(text="  • Modifiers: Leave Node empty or set to <Modifier Interface>", icon=ICONS['BLANK'])
-            col.separator()
+            box_col.label(text="Hierarchical Overrides (Priority):", icon=ICONS['OVR'])
+            split = box_col.split(factor=0.05)
+            split.column()
+            child_col = split.column()
+            child_col.label(text="  • Global > Preset > Collection > Object", icon=ICONS['BLANK'])
+            child_col.label(text="  • Modifiers: Leave Node empty or set to <Modifier Interface>", icon=ICONS['BLANK'])
+            box_col.separator()
 
-            col.label(text="Shortcuts & Ergonomics:", icon=ICONS['INFO'])
-            col.label(text="  • Shift + Add Input (+): Auto-populates all exposed inputs", icon=ICONS['ADD'])
-            col.label(text="  • Shift + Up/Down: Propagates override tier to all child tiers", icon=ICONS['UP'])
-            col.label(text="  • Copy/Paste/Import/Export: Transfer configurations seamlessly", icon=ICONS['COPY'])
-            col.label(text="  • Instant Deletion: Empty a field & submit to delete it", icon=ICONS['DEL'])
-            col.label(text="  • Validation: Invalid inputs are rejected and reset safely", icon=ICONS['CHECK_ON'])
-            col.separator()
+            box_col.label(text="Shortcuts & Ergonomics:", icon=ICONS['INFO'])
+            split = box_col.split(factor=0.05)
+            split.column()
+            child_col = split.column()
+            child_col.label(text="  • Shift + Add Input (+): Auto-populates all exposed inputs", icon=ICONS['ADD'])
+            child_col.label(text="  • Shift + Up/Down: Propagates override tier to all child tiers", icon=ICONS['UP'])
+            child_col.label(text="  • Copy/Paste/Import/Export: Transfer configurations seamlessly", icon=ICONS['COPY'])
+            child_col.label(text="  • Instant Deletion: Empty a field & submit to delete it", icon=ICONS['DEL'])
+            child_col.label(text="  • Validation: Invalid inputs are rejected and reset safely", icon=ICONS['CHECK_ON'])
+            box_col.separator()
 
-            col.label(text="Parametric Sweeping:", icon=ICONS['SWEEP'])
-            col.label(text="  • Float/Int Ranges: Define Start, Step, and Count", icon=ICONS['BLANK'])
-            col.label(text="  • Menus/Bools: Auto-iterates True/False and Enum options", icon=ICONS['BLANK'])
-            col.label(text="  • Shift + Sweep (+): Populates all menu/bool values automatically", icon=ICONS['SWEEP'])
-            col.separator()
+            box_col.label(text="Parametric Sweeping:", icon=ICONS['SWEEP'])
+            split = box_col.split(factor=0.05)
+            split.column()
+            child_col = split.column()
+            child_col.label(text="  • Float/Int Ranges: Define Start, Step, and Count", icon=ICONS['BLANK'])
+            child_col.label(text="  • Menus/Bools: Auto-iterates True/False and Enum options", icon=ICONS['BLANK'])
+            child_col.label(text="  • Shift + Sweep (+): Populates all menu/bool values automatically", icon=ICONS['SWEEP'])
+            box_col.separator()
 
-            col.label(text="Directory & Naming Tags:", icon=ICONS['FILE'])
-            col.label(text="  • Directory (Folder): Routes variant to a dedicated sub-folder", icon=ICONS['DIR'])
-            col.label(text="  • Tag (Bookmark): Formats filename according to rules", icon=ICONS['TAG'])
-            col.label(text="  • Rules: [ tag ] = Replace, [ _tag ] = Append, [ tag_ ] = Prepend", icon=ICONS['BLANK'])
-            col.separator()
+            box_col.label(text="Directory & Naming Tags:", icon=ICONS['FILE'])
+            split = box_col.split(factor=0.05)
+            split.column()
+            child_col = split.column()
+            child_col.label(text="  • Directory (Folder): Routes variant to a dedicated sub-folder", icon=ICONS['DIR'])
+            child_col.label(text="  • Tag (Bookmark): Formats filename according to rules", icon=ICONS['TAG'])
+            child_col.label(text="  • Rules: [ tag ] = Replace, [ _tag ] = Append, [ tag_ ] = Prepend", icon=ICONS['BLANK'])
+            box_col.separator()
 
-            col.label(text="Tree View & Output Console:", icon=ICONS['TREE'])
-            col.label(text="  • Global View: Show all presets or isolate current", icon=ICONS['GLOBAL'])
-            col.label(text="  • Expand/Collapse All: Toggle full directory visibility", icon=ICONS['EXPAND_ALL'])
-            col.label(text="  • Expand Last: Collapses tree and expands only the last sub-folders", icon=ICONS['EXPAND_LAST'])
-            col.label(text="  • Verbose Console / Clear Log: Manage background worker output", icon=ICONS['CONSOLE'])
+            box_col.label(text="Tree View & Output Console:", icon=ICONS['TREE'])
+            split = box_col.split(factor=0.05)
+            split.column()
+            child_col = split.column()
+            child_col.label(text="  • Global View: Show all presets or isolate current", icon=ICONS['GLOBAL'])
+            child_col.label(text="  • Expand/Collapse All: Toggle full directory visibility", icon=ICONS['EXPAND_ALL'])
+            child_col.label(text="  • Expand Last: Collapses tree and expands only the last sub-folders", icon=ICONS['EXPAND_LAST'])
+            child_col.label(text="  • Verbose Console / Clear Log: Manage background worker output", icon=ICONS['CONSOLE'])
+
 
 
 class VIEW3D_PT_batch_export_stl_presets(bpy.types.Panel):
@@ -3135,7 +3151,7 @@ def register():
         setattr(Scene, prop, bpy.props.BoolProperty(default=True if ("nested" not in prop and "tips" not in prop) else False, options={'SKIP_SAVE'}))
 
     Scene.batch_stl_collapsed_dirs = bpy.props.StringProperty(default="[]", options={'SKIP_SAVE'})
-    Scene.batch_stl_info_tab = bpy.props.EnumProperty(items=[('LOG', "Console Log", ""), ('TREE', "Tree View", "")], name="Info Tab", default='LOG', update=lambda s, c: mark_dirty(), options={'SKIP_SAVE'})
+    Scene.batch_stl_info_tab = bpy.props.EnumProperty(items=[('LOG', "Console Log", "", ICONS['CONSOLE'], 0), ('TREE', "Tree View", "", ICONS['TREE'], 1)], name="Info Tab", default='LOG', update=lambda s, c: mark_dirty(), options={'SKIP_SAVE'})
     Scene.batch_stl_info_global = bpy.props.BoolProperty(name="Global Mode", default=False, update=lambda s, c: mark_dirty(), options={'SKIP_SAVE'})
 
     reset_batch_stl_state(None)
