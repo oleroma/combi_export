@@ -791,9 +791,9 @@ def write_object_stl(filepath, bl_obj, depsgraph, instance_arrays=()):
 # --- JSON UTILS ---
 def copy_val_to_dict(v):
     return {
-        "value_bool": v.value_bool, "value_int": v.value_int, "value_float": v.value_float,
-        "value_string": v.value_string, "value_menu": v.value_menu, "use_tag": v.use_tag,
-        "tag": v.tag, "use_dir": v.use_dir, "use_sweep": getattr(v, "use_sweep", False),
+        "value_string": getattr(v, "value_string", ""), "value_menu": getattr(v, "value_menu", ""),
+        "use_tag": getattr(v, "use_tag", False), "tag": getattr(v, "tag", ""),
+        "use_dir": getattr(v, "use_dir", False), "use_sweep": getattr(v, "use_sweep", False),
         "sweep_range": getattr(v, "sweep_range", ""),
         "sweep_start": getattr(v, "sweep_start", "0"),
         "sweep_step": getattr(v, "sweep_step", "1"),
@@ -821,6 +821,11 @@ def copy_preset_to_dict(src):
 def paste_val_from_dict(new_v, data):
     for k, v in data.items():
         if hasattr(new_v, k): setattr(new_v, k, v)
+    # Migrate legacy properties to value_string
+    if not new_v.value_string:
+        if "value_float" in data: new_v.value_string = str(data["value_float"])
+        elif "value_int" in data: new_v.value_string = str(data["value_int"])
+        elif "value_bool" in data: new_v.value_string = str(data["value_bool"])
 
 def paste_input_from_dict(new_i, data):
     new_i.name = data["name"]
@@ -1194,7 +1199,9 @@ def draw_tree_dict(layout, tree_node, current_path="", toggled_list=None, duplic
         if is_root:
             row.label(text="", icon=ICONS['DOWN'])
         else:
+            row.operator_context = 'INVOKE_DEFAULT'
             row.operator("batch_stl.toggle_dir_tree", text="", icon=ICONS['RIGHT'] if is_collapsed else ICONS['DOWN'], emboss=False).dir_path = dir_path
+            row.operator_context = 'EXEC_DEFAULT'
         row.scale_y = 0.4
         row.label(text=str(k))
         if not is_collapsed and isinstance(tree_node[k], dict):
@@ -2234,11 +2241,8 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
                                 v = val if p_idx == 0 else vals.add()
                                 v.use_sweep = False
                                 v.use_dir, v.use_tag, v.tag = val.use_dir, val.use_tag, val.tag  # generated values inherit the sweep's tag settings
-                                if inp_obj.override_type == 'FLOAT': v.value_float = p_val
-                                elif inp_obj.override_type == 'INT': v.value_int = p_val
-                                elif inp_obj.override_type == 'MENU': v.value_menu = str(p_val)
-                                elif inp_obj.override_type == 'BOOLEAN': v.value_bool = bool(p_val)
-                                elif inp_obj.override_type == 'STRING': v.value_string = str(p_val)
+                                if inp_obj.override_type in ('FLOAT', 'INT', 'STRING'): v.value_string = str(p_val)
+                                elif inp_obj.override_type in ('MENU', 'BOOLEAN'): v.value_menu = str(p_val)
 
     @inside_operator
     def execute(self, context):
@@ -2617,6 +2621,7 @@ class BATCH_STL_UL_console_logs(bpy.types.UIList):
 
 def draw_inline_controls(layout, operator_id, use_clipboard=False):
     row = layout.row(align=True)
+    row.operator_context = 'INVOKE_DEFAULT'
     row.operator(operator_id, icon=ICONS['ADD'], text="").action = 'ADD'
     row.operator(operator_id, icon=ICONS['DEL'], text="").action = 'REMOVE'
     row.operator(operator_id, icon=ICONS['UP'], text="").action = 'UP'
@@ -2636,6 +2641,7 @@ def draw_stats_table(parent_layout, stats_list):
 def draw_overrides_table(layout, scene, nodegroups, is_collection, is_open_prop, title_text, is_preset=False, is_global=False, is_locked=False):
     # Setup inline helper to simplify conditional operator generation drastically
     def draw_op(parent, action, icon, depress=False, ng_idx=-1, n_idx=-1, i_idx=-1, v_idx=-1):
+        parent.operator_context = 'INVOKE_DEFAULT'
         op = parent.operator("batch_stl.table_action", text="", icon=icon, depress=depress)
         op.action, op.is_collection, op.is_preset, op.is_global = action, is_collection, is_preset, is_global
         op.ng_idx, op.n_idx, op.i_idx, op.v_idx = ng_idx, n_idx, i_idx, v_idx
@@ -3049,7 +3055,7 @@ class VIEW3D_PT_batch_export_stl_objects(bpy.types.Panel):
 # === [ 6. REGISTRATION & LIFECYCLE ] ===
 # ==============================================================================
 
-VALUE_PROPS = ('value_bool', 'value_int', 'value_float', 'value_string', 'value_menu')
+VALUE_PROPS = ('value_string', 'value_menu')
 
 def sync_prev_values(scene):
     """The `prev_*` properties (what a rejected edit reverts to) are not stored in files saved before they existed:
