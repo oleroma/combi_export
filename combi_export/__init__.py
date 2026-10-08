@@ -1,5 +1,5 @@
 """
-Fast Batch STL Exporter
+Combi Export (formerly Fast Batch STL Exporter)
 Architecture: Single-File Monolithic (Optimized for Agentic Environments)
 Data Hierarchy: Global > Preset > Collection > Object > NodeGroup > Node > Input > Value
 """
@@ -58,7 +58,7 @@ _clipboard = {"preset": None, "collection": None, "nodegroup": None}
 
 _ui_cache = {
     "is_dirty": True,
-    "visibility": {},
+    "excluded": {},
     "stats": {"global": {"presets": 0, "cols": 0, "objs": 0, "exp": 0}, "presets": {}, "cols": {}},
     "tree": ({}, set()),
     "preset_metrics": {},
@@ -194,27 +194,23 @@ def is_collection_excluded(context, target_collection):
     if not found_any: return True
     return not found_any_visible
 
-def get_modifier_socket_identifier(node_group, socket_name):
+def find_interface_input(node_group, socket_name):
+    """The node group's interface input socket named `socket_name` (older API: node_group.inputs), or None."""
     if not node_group: return None
     if hasattr(node_group, "interface"):
         for item in node_group.interface.items_tree:
             if getattr(item, "item_type", "") == 'SOCKET' and getattr(item, "in_out", "INPUT") == 'INPUT' and item.name == socket_name:
-                return item.identifier
+                return item
     elif hasattr(node_group, "inputs"):
-        for inp in node_group.inputs:
-            if inp.name == socket_name: return inp.identifier
+        return node_group.inputs.get(socket_name)
     return None
 
+def get_modifier_socket_identifier(node_group, socket_name):
+    item = find_interface_input(node_group, socket_name)
+    return item.identifier if item else None
+
 def get_modifier_socket_default(node_group, socket_name):
-    if not node_group: return None
-    if hasattr(node_group, "interface"):
-        for item in node_group.interface.items_tree:
-            if getattr(item, "item_type", "") == 'SOCKET' and getattr(item, "in_out", "INPUT") == 'INPUT' and item.name == socket_name:
-                return getattr(item, "default_value", None)
-    elif hasattr(node_group, "inputs"):
-        for inp in node_group.inputs:
-            if inp.name == socket_name: return getattr(inp, "default_value", None)
-    return None
+    return getattr(find_interface_input(node_group, socket_name), "default_value", None)
 
 def get_menu_switch_items(node_group, node_name, input_name):
     if not node_group: return []
@@ -256,7 +252,7 @@ def set_modifier_input(mod, ident, value):
     try:
         mod[ident] = value
         return
-    except (TypeError, Exception): pass
+    except Exception: pass
     if hasattr(mod, "properties") and hasattr(mod.properties, "inputs"):
         prop_input = getattr(mod.properties.inputs, ident, None)
         if prop_input is not None and hasattr(prop_input, "value"):
@@ -361,9 +357,6 @@ class MockOverride:
         self.inputs = inputs
         self.level = level
 
-def get_sorted_inputs(ng_ptr, node_obj, inputs):
-    return list(enumerate(inputs))
-
 def get_sorted_values(ng_ptr, node_obj, inp, values):
     menu_order = {}
     if inp and getattr(inp, "override_type", "") == 'MENU':
@@ -403,7 +396,7 @@ def get_flat_overrides(nodegroups, level="NONE"):
             target = 'MODIFIER' if not node.name or node.name == "<Modifier Interface>" else 'NODE'
             
             temp_inputs = []
-            for _, inp in get_sorted_inputs(ng_ptr, node, node.inputs):
+            for inp in node.inputs:
                 for _, val in get_sorted_values(ng_ptr, node, inp, inp.values):
                     temp_inputs.append(MockInput(inp, val, is_temp=True))
                     
@@ -582,10 +575,10 @@ def revert_overrides(global_states, mod_states, target_objects):
                 if curr_is_set:
                     unset_modifier_input(mod, ident, default_val)
                     objects_to_update.add(mod.id_data)
-        except (ReferenceError, Exception): pass
+        except Exception: pass
     for obj in objects_to_update:
         try: obj.update_tag()
-        except (ReferenceError, Exception): pass
+        except Exception: pass
 
     trees_to_update = set()
     for state in global_states:
@@ -604,7 +597,7 @@ def revert_overrides(global_states, mod_states, target_objects):
 
     for tree in trees_to_update:
         try: tree.update_tag()
-        except (ReferenceError, Exception): pass
+        except Exception: pass
 
 def get_active_preset(scene):
     presets = scene.batch_stl_presets
@@ -632,16 +625,21 @@ def is_any_exporting():
 
 def log_to_console(job, text):
     if job:
-        job.console_logs.add().text = text
-        if len(job.console_logs) > 300: job.console_logs.remove(0)
+        # UI labels cannot show line breaks: one log entry per line, like the worker output.
+        for line in text.split("\n"):
+            job.console_logs.add().text = line
+        while len(job.console_logs) > 300: job.console_logs.remove(0)
         job.console_index = len(job.console_logs) - 1
 
+def apply_tag(base, tag):
+    """Tag rules: '_tag' appends, 'tag_' prepends, a bare 'tag' replaces `base`; no tag keeps `base`."""
+    if not tag: return base
+    if tag.startswith("_"): return f"{base}{tag}"
+    if tag.endswith("_"): return f"{tag}{base}"
+    return tag
+
 def format_export_filename(bl_obj_name, obj_tag, col_use_tag, col_tag, combo_suffix=""):
-    safe_name = bpy.path.clean_name(bl_obj_name)
-    obj_tag = sanitize_name(obj_tag)
-    if obj_tag:
-        # _tag appends, tag_ prepends; a bare tag fully replaces the object name as the filename
-        safe_name = f"{safe_name}{obj_tag}" if obj_tag.startswith("_") else (f"{obj_tag}{safe_name}" if obj_tag.endswith("_") else obj_tag)
+    safe_name = apply_tag(bpy.path.clean_name(bl_obj_name), sanitize_name(obj_tag))
     tag_suffix = sanitize_name(col_tag) if col_use_tag and col_tag else ""
     return f"{safe_name}{tag_suffix}{combo_suffix}.stl"
 
@@ -679,8 +677,7 @@ def evaluate_combo_naming(combo, freq_dict):
         if param_key not in processed_params:
             val = get_input_value(inp)
             val_str = f"{val:g}" if isinstance(val, float) else str(val).replace(" ", "_")
-            naming_str = f"{val_str}{inp.tag}" if inp.tag.startswith("_") else (f"{inp.tag}{val_str}" if inp.tag.endswith("_") else inp.tag) if inp.tag else val_str
-            naming_str = sanitize_name(naming_str)
+            naming_str = sanitize_name(apply_tag(val_str, inp.tag))
 
             if freq_dict.get(param_key, 0) > 1:
                 if getattr(inp, "use_tag", False): combo_suffix += f"_{naming_str}"
@@ -693,11 +690,13 @@ def sync_collection_objects(col_prop, col_ptr=None):
     if not col_ptr: col_ptr = bpy.data.collections.get(col_prop.collection_name)
     if not col_ptr: return
 
-    actual_names = {obj.name for obj in col_ptr.all_objects if obj.type in SUPPORTED_OBJECT_TYPES}
-    existing_names = {obj.name: obj for obj in col_prop.objects}
+    # A list (not a set) keeps new objects in the collection's own order.
+    actual_names = [obj.name for obj in col_ptr.all_objects if obj.type in SUPPORTED_OBJECT_TYPES]
+    actual_set = set(actual_names)
+    existing_names = {obj.name for obj in col_prop.objects}
 
     for i in reversed(range(len(col_prop.objects))):
-        if col_prop.objects[i].name not in actual_names: col_prop.objects.remove(i)
+        if col_prop.objects[i].name not in actual_set: col_prop.objects.remove(i)
 
     for name in actual_names:
         if name not in existing_names:
@@ -787,6 +786,13 @@ def write_object_stl(filepath, bl_obj, depsgraph, instance_arrays=()):
         f.write(struct.pack('<I', num_tris))
         for a in arrays: a.tofile(f)
     return num_tris
+
+def export_object_stl(filepath, bl_obj, depsgraph, instance_arrays=()):
+    """write_object_stl() for the export loops: returns the log text, so one unwritable file (e.g. locked by a
+    slicer) is reported instead of aborting the whole export."""
+    try: num_tris = write_object_stl(filepath, bl_obj, depsgraph, instance_arrays)
+    except OSError as e: return f"FAILED ({e.strerror or e}): {filepath}"
+    return filepath if num_tris else f"SKIPPED (no geometry): {filepath}"
 
 # --- JSON UTILS ---
 def copy_val_to_dict(v):
@@ -885,14 +891,7 @@ def is_override_input_valid(ng_ptr, node, inp):
         return False
     is_mod = not node.name or node.name == "<Modifier Interface>"
     if is_mod:
-        if hasattr(ng_ptr, "interface"):
-            for item in ng_ptr.interface.items_tree:
-                if getattr(item, "item_type", "") == 'SOCKET' and getattr(item, "in_out", "INPUT") == 'INPUT' and item.name == inp.name:
-                    return True
-            return False
-        elif hasattr(ng_ptr, "inputs"):
-            return inp.name in ng_ptr.inputs
-        return False
+        return find_interface_input(ng_ptr, inp.name) is not None
     target_n = ng_ptr.nodes.get(clean_node_name(node.name))
     if not target_n:
         return False
@@ -901,12 +900,21 @@ def is_override_input_valid(ng_ptr, node, inp):
 def is_override_val_valid(inp, val, ng_ptr=None, node=None):
     if val is None or inp.override_type not in SUPPORTED_OVERRIDE_TYPES:
         return False
+    parse = float if inp.override_type == 'FLOAT' else int
     if getattr(val, "use_sweep", False):
         if inp.override_type in ('FLOAT', 'INT'):
-            try: return int(getattr(val, "sweep_count", "2")) >= 1
+            try:
+                parse(val.sweep_start)
+                parse(val.sweep_step)
+                return int(getattr(val, "sweep_count", "2")) >= 1
             except ValueError: return False
         elif inp.override_type == 'STRING':
             return bool(val.sweep_range and val.sweep_range.strip())
+        return True
+    if inp.override_type in ('FLOAT', 'INT'):
+        # get_input_value() would silently export an empty or malformed number as 0
+        try: parse(val.value_string)
+        except ValueError: return False
         return True
     if inp.override_type == 'STRING':
         return bool(val.value_string and val.value_string.strip())
@@ -994,16 +1002,18 @@ def rebuild_ui_cache_if_dirty():
             preset_metrics[p_idx] = {"has_ovr": ho, "has_perm": hp}
         _ui_cache["preset_metrics"] = preset_metrics
 
-        visibility = {}
+        # {collection name: excluded}; a collection linked in several places is excluded only if every occurrence is,
+        # and one missing from the view layer counts as excluded (look it up with .get(name, True)).
+        excluded = {}
         if hasattr(context, "view_layer") and context.view_layer:
             def traverse(layer_collection, parent_excluded=False):
                 current_excluded = parent_excluded or layer_collection.exclude
                 if layer_collection.collection:
                     cname = layer_collection.collection.name
-                    visibility[cname] = visibility.get(cname, True) and current_excluded
+                    excluded[cname] = excluded.get(cname, True) and current_excluded
                 for child in layer_collection.children: traverse(child, current_excluded)
             traverse(context.view_layer.layer_collection)
-        _ui_cache["visibility"] = visibility
+        _ui_cache["excluded"] = excluded
 
         preset = get_active_preset(scene)
         total_presets = len(scene.batch_stl_presets)
@@ -1021,7 +1031,7 @@ def rebuild_ui_cache_if_dirty():
                 sync_collection_objects(c, c_ptr)
                 c_objs, c_exp = 0, 0
 
-                if c_ptr and not visibility.get(c.collection_name, True):
+                if c_ptr and not excluded.get(c.collection_name, True):
                     c_pinned_ovrs = preset_ovrs + get_flat_overrides(c.nodegroups, "COLLECTION")
                     for obj_prop in c.objects:
                         if not obj_prop.export: continue
@@ -1051,7 +1061,7 @@ def rebuild_ui_cache_if_dirty():
         if not preset and not is_global:
             _ui_cache["tree"] = ({}, set())
         else:
-            _ui_cache["tree"] = build_tree_dict(context, visibility, is_global)
+            _ui_cache["tree"] = build_tree_dict(context, excluded, is_global)
 
         redraw_sidebars(context)
         return 0.1
@@ -1073,31 +1083,30 @@ def batch_stl_depsgraph_handler(scene, depsgraph):
     mapped = {c.collection_name for p in scene.batch_stl_presets for c in p.collections if c.collection_name}
     if not mapped: return
     
+    # Objects linked to / unlinked from collections change the object lists, counts and tree.
+    if depsgraph.id_type_updated('COLLECTION'):
+        mark_dirty()
+        return
+
     context = bpy.context
     if not getattr(context, "view_layer", None): return
-    
-    old_vis = _ui_cache.get("visibility", {})
-    changed = False
-    
+
+    # Combined like the cache: a collection linked in several places counts as excluded only if every occurrence is.
+    excluded = {}
     def traverse(layer_collection, parent_excluded=False):
-        nonlocal changed
-        if changed: return
         current_excluded = parent_excluded or layer_collection.exclude
         if layer_collection.collection:
             cname = layer_collection.collection.name
-            if cname in mapped:
-                if old_vis.get(cname, False) != current_excluded:
-                    changed = True
-                    return
-        for child in layer_collection.children: 
-            traverse(child, current_excluded)
-            
+            if cname in mapped: excluded[cname] = excluded.get(cname, True) and current_excluded
+        for child in layer_collection.children: traverse(child, current_excluded)
+
     traverse(context.view_layer.layer_collection)
-    if changed:
+    cached = _ui_cache.get("excluded", {})
+    if any(cached.get(name, True) != excluded.get(name, True) for name in mapped):
         mark_dirty()
 
 # --- TREE VISUALIZER LOGIC ---
-def build_tree_dict(context, visibility_cache=None, is_global=False):
+def build_tree_dict(context, excluded_cache=None, is_global=False):
     scene = context.scene
     root_name = bpy.path.abspath(scene.batch_stl_root_dir) if scene.batch_stl_root_dir else "//"
     root_name = os.path.normpath(root_name)
@@ -1112,8 +1121,8 @@ def build_tree_dict(context, visibility_cache=None, is_global=False):
         for c in preset.collections:
             c_ptr = bpy.data.collections.get(c.collection_name)
             if not c_ptr: continue
-            if visibility_cache is not None:
-                if visibility_cache.get(c.collection_name, True): continue
+            if excluded_cache is not None:
+                if excluded_cache.get(c.collection_name, True): continue
             elif is_collection_excluded(context, c_ptr): continue
 
             col_ovrs = get_flat_overrides(c.nodegroups, "COLLECTION")
@@ -1316,13 +1325,11 @@ def run_headless_export(job_file_path):
                 for c, obj_prop, bl_obj in batch_items:
                     full_dir_parts = build_export_dir_parts(preset.preset_prefix, c.sub_path, obj_prop.sub_path, paths_by_level)
                     out_dir = os.path.normpath(os.path.join(root_dir, *full_dir_parts)) if full_dir_parts else root_dir
-                    os.makedirs(out_dir, exist_ok=True)
 
                     filename = format_export_filename(bl_obj.name, obj_prop.tag, getattr(c, 'use_tag', False), c.tag, combo_suffix)
                     filepath = os.path.join(out_dir, filename)
 
-                    num_tris = write_object_stl(filepath, bl_obj, depsgraph, instance_arrays.get(bl_obj.name_full, ()))
-                    result_text = filepath if num_tris else f"SKIPPED (no geometry): {filepath}"
+                    result_text = export_object_stl(filepath, bl_obj, depsgraph, instance_arrays.get(bl_obj.name_full, ()))
 
                     print(f"{preset.name} | {c.collection_name} | {bl_obj.name} | Permutation {combo_idx + 1}/{len(combinations)} | Batch {batch_counter}/{len(execution_batches)}\n  └─ {result_text} | {time.perf_counter() - t_perm_start:.2f} s", flush=True)
                     current_op_step += 1
@@ -1381,13 +1388,9 @@ def classify_socket_type(socket_type):
 def infer_input_type(group_ptr, node_name, input_name):
     if not group_ptr or not input_name: return 'FLOAT'
     if not node_name or node_name == "<Modifier Interface>":
-        if hasattr(group_ptr, "interface"):
-            for it in group_ptr.interface.items_tree:
-                if getattr(it, "item_type", "") == 'SOCKET' and getattr(it, "in_out", "INPUT") == 'INPUT' and it.name == input_name:
-                    return classify_socket_type(getattr(it, "socket_type", ""))
-        elif hasattr(group_ptr, "inputs"):
-            inp = group_ptr.inputs.get(input_name)
-            if inp: return classify_socket_type(inp.type)
+        item = find_interface_input(group_ptr, input_name)
+        if item:
+            return classify_socket_type(getattr(item, "socket_type", "") if hasattr(group_ptr, "interface") else item.type)
     else:
         node = group_ptr.nodes.get(clean_node_name(node_name))
         if node and input_name in node.inputs:
@@ -1439,13 +1442,7 @@ def get_target_node_names(group_ptr, exclude=()):
 def get_socket_default_value(group_ptr, node_name, input_name):
     if not group_ptr: return None
     if not node_name or node_name == "<Modifier Interface>":
-        if hasattr(group_ptr, "interface"):
-            for it in group_ptr.interface.items_tree:
-                if getattr(it, "item_type", "") == 'SOCKET' and getattr(it, "in_out", "INPUT") == 'INPUT' and it.name == input_name:
-                    return getattr(it, "default_value", None)
-        elif hasattr(group_ptr, "inputs"):
-            inp = group_ptr.inputs.get(input_name)
-            if inp: return getattr(inp, "default_value", None)
+        return get_modifier_socket_default(group_ptr, input_name)
     else:
         node = group_ptr.nodes.get(clean_node_name(node_name))
         if node and input_name in node.inputs:
@@ -1453,7 +1450,7 @@ def get_socket_default_value(group_ptr, node_name, input_name):
     return None
 
 def sync_input_type(inp, scene, update_value=True):
-    for lvl, ng in HierarchyIterator.iterate(scene):
+    for _lvl, ng in HierarchyIterator.iterate(scene):
         for n in ng.nodes:
             if inp in n.inputs.values():
                 ng_ptr = bpy.data.node_groups.get(ng.group_name)
@@ -1467,19 +1464,19 @@ def sync_input_type(inp, scene, update_value=True):
                         if default_val is not None:
                             if new_type == 'FLOAT':
                                 try: v.value_string = str(round(float(default_val), 4))
-                                except: pass
+                                except (TypeError, ValueError): pass
                             elif new_type == 'INT':
                                 try: v.value_string = str(int(default_val))
-                                except: pass
+                                except (TypeError, ValueError): pass
                             elif new_type == 'BOOLEAN':
                                 try: v.value_menu = str(bool(default_val))
-                                except: pass
+                                except (TypeError, ValueError): pass
                             elif new_type == 'STRING':
                                 try: v.value_string = str(default_val)
-                                except: pass
+                                except (TypeError, ValueError): pass
                             elif new_type == 'MENU':
                                 try: v.value_menu = str(default_val)
-                                except: pass
+                                except (TypeError, ValueError): pass
                         if new_type == 'MENU' and not v.value_menu:
                             # For menus, if there's no clear default or it's empty, try to pick the first item
                             items = get_menu_switch_items(ng_ptr, n.name, inp.name)
@@ -1495,7 +1492,7 @@ def on_input_name_update(self, context):
     my_ng = None
     other_input = None
     if hasattr(context.scene, "batch_stl_presets"):
-        for lvl, ng in HierarchyIterator.iterate(context.scene):
+        for _lvl, ng in HierarchyIterator.iterate(context.scene):
             for n in ng.nodes:
                 if self in n.inputs.values():
                     my_node = n
@@ -1563,7 +1560,7 @@ def search_target_node_cb(self, context, edit_text):
     if edit_text == self.name: edit_text = ""
     res = []
 
-    for lvl, ng in HierarchyIterator.iterate(context.scene):
+    for _lvl, ng in HierarchyIterator.iterate(context.scene):
         if self in ng.nodes.values():
             ng_ptr = bpy.data.node_groups.get(ng.group_name)
             if ng_ptr:
@@ -1586,7 +1583,7 @@ def search_input_name_cb(self, context, edit_text):
     """Sockets of the target node (or modifier interface) that can still be overridden."""
     if not context or not getattr(context, "scene", None): return []
     if edit_text == self.name: edit_text = ""
-    for lvl, ng in HierarchyIterator.iterate(context.scene):
+    for _lvl, ng in HierarchyIterator.iterate(context.scene):
         for n in ng.nodes:
             if self in n.inputs.values():
                 names = get_supported_inputs(bpy.data.node_groups.get(ng.group_name), n.name)
@@ -1595,7 +1592,7 @@ def search_input_name_cb(self, context, edit_text):
 
 def search_menu_items_cb(self, context, edit_text):
     if not context or not getattr(context, "scene", None): return []
-    for lvl, ng in HierarchyIterator.iterate(context.scene):
+    for _lvl, ng in HierarchyIterator.iterate(context.scene):
         for n in ng.nodes:
             for i in n.inputs:
                 if self in i.values.values():
@@ -1614,7 +1611,7 @@ def on_value_update(prop_name, label=""):
         is_duplicate = False
         is_invalid = False
         my_input = None
-        for lvl, ng in HierarchyIterator.iterate(context.scene):
+        for _lvl, ng in HierarchyIterator.iterate(context.scene):
             for n in ng.nodes:
                 for i in n.inputs:
                     if self in i.values.values():
@@ -1713,7 +1710,7 @@ def on_node_name_update(self, context):
     is_duplicate = False
     is_invalid = False
     my_ng = None
-    for lvl, ng in HierarchyIterator.iterate(context.scene):
+    for _lvl, ng in HierarchyIterator.iterate(context.scene):
         if self in ng.nodes.values():
             my_ng = ng
             is_duplicate = any(other != self and clean_node_name(other.name) == clean_node_name(self.name) for other in ng.nodes) and self.name != ""
@@ -1758,7 +1755,7 @@ class BatchSTLNode(bpy.types.PropertyGroup):
 def on_group_name_update(self, context):
     is_duplicate = False
     my_container = None
-    for lvl, container in HierarchyIterator.iterate_lists(context.scene):
+    for _lvl, container in HierarchyIterator.iterate_lists(context.scene):
         if self in container.values():
             my_container = container
             is_duplicate = any(other != self and other.group_name == self.group_name for other in container) and self.group_name != ""
@@ -1874,7 +1871,7 @@ class BATCH_STL_OT_import_presets_json(bpy.types.Operator, ImportHelper):
     bl_idname = "batch_stl.import_presets_json"
     bl_label = "Import JSON"
     bl_description = "Import presets from a JSON file"
-    bl_options = {'REGISTER'}
+    bl_options = {'REGISTER', 'UNDO'}
     filename_ext = ".json"
     filter_glob: bpy.props.StringProperty(default="*.json", options={'HIDDEN'})
     @inside_operator
@@ -2066,11 +2063,10 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
 
     def _handle_group_action(self, ng_list, context, preset):
         if self.action == 'ADD_GROUP':
-            ng = ng_list.add()
+            ng_list.add()
         elif self.action == 'DEL_GROUP' and 0 <= self.ng_idx < len(ng_list):
             ng_list.remove(self.ng_idx)
         elif self.action == 'COPY_GROUP' and 0 <= self.ng_idx < len(ng_list):
-            global _clipboard
             _clipboard["nodegroup"] = copy_ng_to_dict(ng_list[self.ng_idx])
         elif self.action == 'PASTE_GROUP' and _clipboard.get("nodegroup"):
             paste_ng_from_dict(ng_list, _clipboard["nodegroup"])
@@ -2410,13 +2406,11 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
                 t_dir_start = time.perf_counter()
                 full_dir_parts = build_export_dir_parts(self.preset.preset_prefix, c.sub_path, obj_prop.sub_path)
                 out_dir = os.path.normpath(os.path.join(preset_root, *full_dir_parts)) if full_dir_parts else preset_root
-                os.makedirs(out_dir, exist_ok=True)
 
                 filename = format_export_filename(bl_obj.name, obj_prop.tag, getattr(c, 'use_tag', False), c.tag)
                 filepath = os.path.join(out_dir, filename)
 
-                num_tris = write_object_stl(filepath, bl_obj, depsgraph, instance_arrays.get(bl_obj.name_full, ()))
-                result_text = filepath if num_tris else f"SKIPPED (no geometry): {filepath}"
+                result_text = export_object_stl(filepath, bl_obj, depsgraph, instance_arrays.get(bl_obj.name_full, ()))
 
                 log_to_console(job, f"{self.preset.name} | {c.collection_name} | {bl_obj.name} | Permutation 1/1 | Batch 1/1\n  └─ {result_text} | {time.perf_counter() - t_dir_start:.2f} s")
 
@@ -2439,7 +2433,8 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
 
         # The worker runs this very file as a script (see the __main__ block at the bottom).
         # --factory-startup disables Python auto-run, so mirror the user's setting to keep scripted drivers working.
-        worker_args = [bpy.app.binary_path, "--factory-startup"]
+        # --python-exit-code: a Python error in the worker exits with code 1 instead of 0.
+        worker_args = [bpy.app.binary_path, "--factory-startup", "--python-exit-code", "1"]
         if context.preferences.filepaths.use_scripts_auto_execute: worker_args.append("--enable-autoexec")
         worker_args += ["-b", self.temp_blend, "-P", __file__, "--", "--batch-stl-headless", self.job_json]
 
@@ -2727,7 +2722,7 @@ def draw_overrides_table(layout, scene, nodegroups, is_collection, is_open_prop,
             inputs_box = inputs_col.box()
             inputs_layout = inputs_box.column()
 
-            for i_idx, inp in get_sorted_inputs(ng_ptr, node, node.inputs):
+            for i_idx, inp in enumerate(node.inputs):
                 input_layout = inputs_layout.column()
                 # Wrap in array to ensure rendering block triggers at least once even if 'values' logic is empty
                 values = inp.values if inp.values else [None]
@@ -2800,7 +2795,6 @@ class VIEW3D_PT_batch_export_stl_main(bpy.types.Panel):
 
     def draw_header_preset(self, context):
         layout = self.layout
-        scene = context.scene
         any_exporting = is_any_exporting()
 
         row = layout.row(align=True)
@@ -2908,7 +2902,7 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
             split.column()
             child_col = split.column()
             child_col.label(text="  • Shift + Add Input (+): Auto-populates all exposed inputs", icon=ICONS['ADD'])
-            child_col.label(text="  • Shift + Up/Down: Propagates override tier to all child tiers", icon=ICONS['UP'])
+            child_col.label(text="  • Shift + Up/Down: Move group to parent tier / copy to all child tiers", icon=ICONS['UP'])
             child_col.label(text="  • Copy/Paste/Import/Export: Transfer configurations seamlessly", icon=ICONS['COPY'])
             child_col.label(text="  • Instant Deletion: Empty a field & submit to delete it", icon=ICONS['DEL'])
             child_col.label(text="  • Validation: Invalid inputs are rejected and reset safely", icon=ICONS['CHECK_ON'])
@@ -3011,7 +3005,6 @@ class VIEW3D_PT_batch_export_stl_collections(bpy.types.Panel):
 
     def draw_header_preset(self, context):
         layout = self.layout
-        scene = context.scene
         any_exporting = is_any_exporting()
 
         row = layout.row(align=True)

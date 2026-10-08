@@ -8,7 +8,7 @@ A high-performance batch export pipeline and parametric permutation engine for B
 
 For in-depth architectural details, execution flowcharts, and engine design, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
-* **Blender Version Support:** Blender 5.2.0+ (Manifest schema v1.0.0, extension version 7.0.0).
+* **Blender Version Support:** Blender 5.2.0+ (Manifest schema v1.0.0, extension version 1.0.0).
 * **Package Format:** Blender 5.2 Extension (`blender_manifest.toml`).
 * **Design Philosophy:** Non-destructive execution, isolated subprocess execution for mutations, and zero undo-stack pollution.
 
@@ -26,7 +26,7 @@ For in-depth architectural details, execution flowcharts, and engine design, see
 * **Synchronous Bypass (Fast Path):** Exports without node overrides or parameter sweeps are evaluated natively in the current Blender process and written directly to disk.
 * **Headless Background Worker (Safe Isolation Path):** When geometry node overrides, modifier changes, or parameter sweeps are present:
   - Automatically creates a temporary copy of the `.blend` file.
-  - Spawns an isolated background Blender worker (`--factory-startup -b <temp.blend> -P ...`).
+  - Spawns an isolated background Blender worker (`--factory-startup --python-exit-code 1 -b <temp.blend> -P ...`).
   - Performs intelligent dependency graph culling (`lc.exclude`) so unneeded collections are ignored during geometry updates.
   - Restores baseline socket connections and values after export.
   - Keeps the main Blender viewport and UI completely responsive and interactive.
@@ -42,7 +42,7 @@ Define temporary parameter overrides and sweeps across an 8-tier hierarchy:
 
 ### 4. Parametric Sweeping & Combinatorial Engine
 Generate variant permutations across any socket:
-* **Float / Int Ranges: Define numeric sweeps via explicit Value start, Value step, and Number of steps controls, or string ranges.
+* **Float / Int Ranges:** Define numeric sweeps via explicit Value start, Value step, and Number of steps controls, or string ranges.
 * **Boolean & Menu Combinations:** Automatically iterates through `True`/`False` states or all enum options.
 * **Cartesian Product Generator:** Calculates multi-dimensional permutation matrices using `itertools.product`, ensuring all parameter combinations are generated systematically.
 
@@ -52,7 +52,7 @@ Generate variant permutations across any socket:
 * **Decoupled UI Cache:** Background timer cache (~10Hz) prevents UI stalls when evaluating large permutation matrices.
 
 ### 6. Power-User Shortcuts & Ergonomics
-* **Shift + Up/Down Arrows:** Moves a parameter tier up or down, automatically propagating and copying the node setup to all nested child tiers (e.g., from Preset down to Collections, or Collection down to Objects).
+* **Shift + Up/Down Arrows:** Shift + Up moves an override group to the parent tier (e.g., from Object up to its Collection). Shift + Down copies it to every nested child tier and removes it from the current one (e.g., from Preset down to all its Collections, or Collection down to all its Objects).
 * **Shift + Add Input (+):** Auto-populates all available and exposed inputs for the selected Geometry Node.
 * **Instant Deletion:** Emptying a Node Group, Node, Input, or Value field (and submitting) instantly deletes the iteration.
 * **Non-Destructive Clear (X):** Float and integer fields use unified strings with built-in clear ('X') buttons, maintaining safe, single-action undo stack operations.
@@ -63,6 +63,7 @@ Generate variant permutations across any socket:
 * **Real-Time Progress Streaming:** Non-blocking background worker output is piped directly into the Blender panel with operation counters and elapsed time display.
 * **Auto-View Switching:** Displays the directory tree during setup, flips to the live console on export start, and allows instant cancellation.
 * **Side Tool Column:** Clear the log or toggle Verbose output directly from the side column tools.
+* **Per-File Error Reporting:** A file that cannot be written (e.g. locked by a slicer) is logged as `FAILED` and the export continues with the next file.
 
 ### 8. Collection Mapping & Granular Exclusion Filters
 * **Collection Bindings:** Map multiple collections per preset, configure custom sub-folder destinations, and append collection tags.
@@ -87,4 +88,4 @@ Generate variant permutations across any socket:
 
 * **Blender:** 5.2.0 or newer.
 * **Dependencies:** Standard Blender Python environment (`numpy` is included with Blender).
-* **Installation:** Install as an extension from the Blender Preferences extensions menu or place `fast_batch_stl_export` into your Blender extensions directory.
+* **Installation:** Install as an extension from the Blender Preferences extensions menu or place the `combi_export` folder into your Blender extensions directory.

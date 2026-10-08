@@ -1,3 +1,7 @@
 __pycache__/
 .blender_ext/
 blender_mcp_addon/
+.ruff_cache/
+.agents/
+.delta/
+*.orig

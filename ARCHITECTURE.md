@@ -1,6 +1,6 @@
-# Architecture Overview: Fast Batch STL Exporter
+# Architecture Overview: Combi Export
 
-`Fast Batch STL Exporter` (`fast_batch_stl_exporter_dev`, v7.0.0) is a high-performance, parametric batch export add-on for Blender 5.2+. It combines vectorized binary STL generation, multi-tier geometry node / modifier socket overrides, combinatorial parametric sweeping, and a dual-path execution engine (in-process synchronous export vs. isolated headless subprocess export).
+`Combi Export` (`combi_export`, v1.0.0) is a high-performance, parametric batch export add-on for Blender 5.2+. It combines vectorized binary STL generation, multi-tier geometry node / modifier socket overrides, combinatorial parametric sweeping, and a dual-path execution engine (in-process synchronous export vs. isolated headless subprocess export).
 
 ---
 
@@ -9,7 +9,7 @@
 1. **Non-destructive & Isolated**: Overriding geometry nodes or modifier inputs must never corrupt the active project file, viewport state, or undo history.
 2. **Dual-Path Execution Model**:
    - **Direct Fast-Path**: Mesh objects without parameter permutations or overrides evaluate natively in the active scene using Blender's evaluated depsgraph and stream directly to disk.
-   - **Headless Worker Process**: When overrides or sweeps are active, the add-on forks an independent background Blender process (`--factory-startup -b <temp.blend> -P <script> -- --batch-stl-headless <job.json>`) on a temporary copy of the project file. The main Blender UI stays completely responsive and interactive.
+   - **Headless Worker Process**: When overrides or sweeps are active, the add-on forks an independent background Blender process (`--factory-startup --python-exit-code 1 -b <temp.blend> -P <script> -- --batch-stl-headless <job.json>`) on a temporary copy of the project file. The main Blender UI stays completely responsive and interactive.
 3. **Vectorized NumPy Disk I/O**: Direct memory extraction via `foreach_get` into contiguous NumPy structured arrays avoiding per-polygon Python iterations.
 4. **Predictive UI & Safety**: Cached calculation (~10Hz) of directory structures and STL filenames with collapsible nested box visualization and automatic collision detection before executing exports.
 
@@ -59,10 +59,10 @@ The add-on structures export configurations in a strictly scoped 8-tier hierarch
 
 `Global` → `Preset` → `Collection` → `Object` → `NodeGroup` → `Node` → `Input Socket` → `Value / Sweep`
 
-### Property Groups (`fast_batch_stl_export/__init__.py`)
+### Property Groups (`combi_export/__init__.py`)
 
 1. **`BatchSTLExportPreset`**:
-   - Holds preset name, root directory prefix (`preset_prefix`), progress indicators, execution status, and isolated execution logs (`console_logs`).
+   - Holds preset name, root directory prefix (`preset_prefix`) and the duration of the last export (`last_export_time`).
    - Owns a collection of `BatchSTLCollection` mappings and preset-level `BatchSTLNodeGroup` overrides.
 2. **`BatchSTLCollection`**:
    - Maps a Blender `bpy.data.collections` entry.
@@ -81,8 +81,11 @@ The add-on structures export configurations in a strictly scoped 8-tier hierarch
    - Unified string-based concrete parameter value (`value_string`) for Ints, Floats, and Strings, and `value_menu` for Enum/Booleans.
    - Sweep definitions using updated explicit terminology (`sweep_start`, `sweep_step`, `sweep_count`, `sweep_range`).
    - Configures naming tags (`use_tag`, `tag`) and subfolder routing (`use_dir`).
-8. **`BatchSTLLogLine`**:
-   - Discrete line items stored per-preset for live output display.
+8. **`BatchSTLJob`** (`WindowManager.batch_stl_jobs`):
+   - Runtime export state of one preset, keyed by `preset_index`: `is_exporting`, `cancel_export`, `export_progress`, `export_status` and the console log (`console_logs`).
+   - Lives on the WindowManager, so it is never saved to the `.blend` file nor rolled back by undo. Cleared on file load and whenever presets are removed or reordered.
+9. **`BatchSTLLogLine`**:
+   - Discrete line items of a job's console log (one entry per line, capped at 300).
 
 ### Scoping & Inheritance of Overrides
 
@@ -113,10 +116,10 @@ When generating variations for an object, overrides are gathered in hierarchical
      - Saves a snapshot of current memory to a temporary file via `bpy.ops.wm.save_as_mainfile(filepath=..., copy=True)`.
      - Writes a job manifest `job.json` containing preset index, root directory path, and flags.
   2. **Process Spawn**:
-     - Spawns background Blender: `[blender, "--factory-startup", "-b", temp_blend, "-P", script_file, "--", "--batch-stl-headless", job_json]`.
+     - Spawns background Blender: `[blender, "--factory-startup", "--python-exit-code", "1", ("--enable-autoexec",) "-b", temp_blend, "-P", script_file, "--", "--batch-stl-headless", job_json]`. `--enable-autoexec` is only added when the user allows Python auto-execution.
   3. **IPC & Streaming**:
      - A background reader thread drains worker `stdout` into a thread-safe `queue.Queue`.
-     - A Blender modal timer operator (`0.05s`) polls the queue, updates preset progress bars (`BATCH_STL_PROGRESS:X`), and logs stdout into the preset's console UI.
+     - A Blender modal timer operator (`0.1s`) polls the queue, updates preset progress bars (`BATCH_STL_PROGRESS:X`), and logs stdout into the preset's console UI.
   4. **Headless Execution Engine (`run_headless_export`)**:
      - **Phase 0 (Depsgraph Culling)**: Groups objects by override signature (`execution_batches`). Excludes unrelated layer collections (`lc.exclude = True`) to prevent Blender from evaluating unneeded geometry trees during node updates.
      - **Baseline Capture (`capture_baseline_states`)**: Caches baseline modifier socket values, internal node socket defaults, and node link connections.
@@ -124,11 +127,12 @@ When generating variations for an object, overrides are gathered in hierarchical
      - **Evaluation Loop**:
        - Applies overrides via `apply_overrides`.
        - Calls `bpy.context.view_layer.update()` and fetches updated depsgraph.
-       - Writes STL files via `write_object_stl`.
+       - Writes STL files via `export_object_stl` (a wrapper around `write_object_stl` that logs an unwritable file as `FAILED` and continues).
      - **Restoration (`revert_overrides`)**: Re-applies baseline values and links, restores layer collection exclusion states.
   5. **Teardown**:
      - Worker exits with code 0.
      - Main process modal handler catches `BATCH_STL_DONE`, stops modal timer, and removes temporary directory.
+     - A worker that exits without printing `BATCH_STL_DONE` is reported as a crash together with its exit code (1 for an uncaught Python error).
 
 ---
 
@@ -156,7 +160,8 @@ Instead of creating intermediate text or using standard single-threaded Python f
          ('attr', np.uint16)
      ])
      ```
-   - Written to disk in a single continuous binary block using `STL_HEADER + struct.pack('<I', num_tris) + data.tobytes()`.
+   - Written to disk as `STL_HEADER`, `struct.pack('<I', num_tris)`, then each record array (object mesh plus its instances) streamed with `ndarray.tofile()`, so the arrays are never concatenated in memory.
+   - The output folder is created only when there is geometry to write; objects with no triangles are skipped.
 
 ---
 
@@ -164,6 +169,7 @@ Instead of creating intermediate text or using standard single-threaded Python f
 
 ### UI Cache Engine (`rebuild_ui_cache_if_dirty`)
 - Driven by a background timer (`bpy.app.timers`) running at ~10Hz with a dirty flag (`mark_dirty()`).
+- The flag is set by property updates, undo/redo, and a `depsgraph_update_post` handler that reacts to collection changes (objects linked/unlinked) and to exclusion changes of mapped collections.
 - Recomputes statistics (preset counts, collections, exported object count, total permutation iterations).
 - Computes directory hierarchies and leaf files in advance. The UI displays this with an uncollapsable root directory and dedicated side-column toolbar buttons for toggling global view and bulk expanding/collapsing.
 - **Naming Collision Detection**: Analyzes all destination paths and flags collisions when two permutations or objects resolve to the identical output file path.
@@ -172,7 +178,8 @@ Instead of creating intermediate text or using standard single-threaded Python f
 - **Unified String Undo Isolation**: Float and integer properties map to a unified `value_string` defining a dummy search callback to inherit Blender's `UI_BUT_UNDO` exemption. Custom `@edit_callback` wrappers inject a strict 1-action limit to the undo stack, preventing Blender from logging partial keystrokes.
 - **Empty Field Deletion**: Submitting an empty field (`""`) triggers an automatic GC deletion routine for Node Groups, Nodes, Inputs, and Values.
 - **Validation Engine**: Real-time validation checks against depsgraph interfaces ensure node groups, nodes, and inputs exist. Invalid targets are visually flagged and gracefully rejected or reset to the last known valid state.
-- **Hierarchical Propagation**: Multi-level operations (like moving items up/down via Shift) use `operator_context = 'INVOKE_DEFAULT'` to intercept modifier keys and explicitly iterate down the hierarchy.
+- **Numeric Validation**: Float/Int values and sweep start/step must parse as numbers and the sweep step count must be at least 1; otherwise the field is flagged and export is blocked.
+- **Hierarchical Propagation**: Multi-level operations (Shift + Up moves a group to the parent tier, Shift + Down copies it to every child tier) use `operator_context = 'INVOKE_DEFAULT'` to intercept modifier keys and explicitly iterate down the hierarchy.
 - **Tree Expand Logic**: Complex layout logic (e.g., Expand Last) leverages recursive path traversal, resetting directory states and selectively expanding leaf nodes seamlessly without UI lockup.
 
 ---
