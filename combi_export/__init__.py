@@ -359,27 +359,7 @@ class MockOverride:
         self.level = level
 
 def get_sorted_inputs(ng_ptr, node_obj, inputs):
-    if not ng_ptr:
-        return list(enumerate(inputs))
-    
-    order_dict = {}
-    if not node_obj.name or node_obj.name == "<Modifier Interface>":
-        if hasattr(ng_ptr, "interface"):
-            idx = 0
-            for item in ng_ptr.interface.items_tree:
-                if getattr(item, "item_type", "SOCKET") == 'SOCKET' and getattr(item, "in_out", "INPUT") == 'INPUT':
-                    order_dict[item.name] = idx
-                    idx += 1
-    else:
-        target_n = ng_ptr.nodes.get(clean_node_name(node_obj.name))
-        if target_n:
-            for idx, i in enumerate(target_n.inputs):
-                if not getattr(i, "is_unavailable", False) and not getattr(i, "hide", False):
-                    order_dict[i.name] = idx
-    
-    indexed_inputs = list(enumerate(inputs))
-    indexed_inputs.sort(key=lambda x: order_dict.get(x[1].name, float('inf')))
-    return indexed_inputs
+    return list(enumerate(inputs))
 
 def get_sorted_values(ng_ptr, node_obj, inp, values):
     menu_order = {}
@@ -1487,14 +1467,41 @@ def sync_input_type(inp, scene, update_value=True):
 @edit_callback("Edit Override Input", "name", "prev_name")
 def on_input_name_update(self, context):
     is_duplicate = False
+    my_node = None
+    other_input = None
     if hasattr(context.scene, "batch_stl_presets"):
         for lvl, ng in HierarchyIterator.iterate(context.scene):
             for n in ng.nodes:
                 if self in n.inputs.values():
-                    is_duplicate = any(other != self and other.name == self.name for other in n.inputs) and self.name != ""
+                    my_node = n
+                    for other in n.inputs:
+                        if other != self and other.name == self.name and self.name != "":
+                            is_duplicate = True
+                            other_input = other
+                            break
                     break
+            if my_node: break
 
-    if is_duplicate or (self.name == "" and self.prev_name != ""):
+    if is_duplicate:
+        with raw_edits():
+            self.name = self.prev_name
+            
+        my_idx = -1
+        other_idx = -1
+        if my_node:
+            for i, inp in enumerate(my_node.inputs):
+                if inp == self: my_idx = i
+                elif inp == other_input: other_idx = i
+                
+            if my_idx != -1 and other_idx != -1:
+                i, j = my_idx, other_idx
+                if i > j:
+                    i, j = j, i
+                my_node.inputs.move(j, i)
+                my_node.inputs.move(i+1, j)
+        return
+
+    if self.name == "" and self.prev_name != "":
         with raw_edits(): self.name = self.prev_name
         return
 
@@ -1539,8 +1546,7 @@ def search_input_name_cb(self, context, edit_text):
     for lvl, ng in HierarchyIterator.iterate(context.scene):
         for n in ng.nodes:
             if self in n.inputs.values():
-                used = {i.name for i in n.inputs if i != self}
-                names = [s for s in get_supported_inputs(bpy.data.node_groups.get(ng.group_name), n.name) if s not in used]
+                names = get_supported_inputs(bpy.data.node_groups.get(ng.group_name), n.name)
                 return [s for s in names if edit_text.lower() in s.lower()] if edit_text else names
     return []
 
