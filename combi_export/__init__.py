@@ -1686,7 +1686,7 @@ def search_empty_cb(self, context, edit_text):
 class BatchSTLLogLine(bpy.types.PropertyGroup): text: bpy.props.StringProperty()
 class BatchSTLValue(bpy.types.PropertyGroup):
     prev_value_string: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    value_string: bpy.props.StringProperty(name="Value", default="", search=search_empty_cb, update=on_value_update("value_string"))
+    value_string: bpy.props.StringProperty(name="Value", default="", search=search_empty_cb, update=on_value_update("value_string", "Edit Override Value"))
     prev_value_menu: bpy.props.StringProperty(default="", options={'HIDDEN'})
     value_menu: bpy.props.StringProperty(name="Value", default="", search=search_menu_items_cb, update=on_value_update("value_menu", "Edit Override Value"))
     use_tag: bpy.props.BoolProperty(name="Use Tag", default=False, update=mark_dirty)
@@ -1696,11 +1696,11 @@ class BatchSTLValue(bpy.types.PropertyGroup):
     use_sweep: bpy.props.BoolProperty(name="Sweep", default=False, update=mark_dirty)
     sweep_range: bpy.props.StringProperty(name="Sweep Range", default="", update=mark_dirty)
     prev_sweep_start: bpy.props.StringProperty(default="0", options={'HIDDEN'})
-    sweep_start: bpy.props.StringProperty(name="Start", description="Value start", default="0", update=on_value_update("sweep_start", "Edit Sweep Start"))
+    sweep_start: bpy.props.StringProperty(name="Start", description="Value start", default="0", update=on_value_update("sweep_start"))
     prev_sweep_step: bpy.props.StringProperty(default="1", options={'HIDDEN'})
-    sweep_step: bpy.props.StringProperty(name="Step", description="Value step", default="1", update=on_value_update("sweep_step", "Edit Sweep Step"))
+    sweep_step: bpy.props.StringProperty(name="Step", description="Value step", default="1", update=on_value_update("sweep_step"))
     prev_sweep_count: bpy.props.StringProperty(default="2", options={'HIDDEN'})
-    sweep_count: bpy.props.StringProperty(name="Steps", description="Number of steps", default="2", update=on_value_update("sweep_count", "Edit Sweep Steps"))
+    sweep_count: bpy.props.StringProperty(name="Steps", description="Number of steps", default="2", update=on_value_update("sweep_count"))
 
 class BatchSTLInput(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty(name="Input Socket", default="", search=search_input_name_cb, update=on_input_name_update)
