@@ -42,26 +42,34 @@ Define temporary parameter overrides and sweeps across an 8-tier hierarchy:
 
 ### 4. Parametric Sweeping & Combinatorial Engine
 Generate variant permutations across any socket:
-* **Float / Int Ranges:** Define numeric sweeps via explicit start, step, and step-count controls, or string ranges.
+* **Float / Int Ranges: Define numeric sweeps via explicit Value start, Value step, and Number of steps controls, or string ranges.
 * **Boolean & Menu Combinations:** Automatically iterates through `True`/`False` states or all enum options.
 * **Cartesian Product Generator:** Calculates multi-dimensional permutation matrices using `itertools.product`, ensuring all parameter combinations are generated systematically.
 
 ### 5. Predictive Directory Tree & Overwrite Protection
-* **Interactive Nested UI Hierarchy:** Calculates permutations ahead of time and displays an interactive directory hierarchy using collapsible nested UI boxes and indentation (`batch_stl.toggle_dir_tree`; Shift-click to expand/collapse all child folders). Toolbar buttons expand all, collapse all, or expand the last subfolder of each open folder recursively (`batch_stl.tree_expansion`).
+* **Interactive Nested UI Hierarchy:** Calculates permutations ahead of time and displays an interactive directory hierarchy using collapsible nested UI boxes and indentation. Dedicated toolbar buttons let you quickly toggle the Global View, Expand All, Collapse All, or recursively Expand Last subdirectory.
 * **Pre-Export Clash Detection:** Instantly flags duplicate output file paths with visual alerts before export starts, preventing accidental file overwrites.
 * **Decoupled UI Cache:** Background timer cache (~10Hz) prevents UI stalls when evaluating large permutation matrices.
 
-### 6. Scoped Live Console & Progress Tracking
+### 6. Power-User Shortcuts & Ergonomics
+* **Shift + Up/Down Arrows:** Moves a parameter tier up or down, automatically propagating and copying the node setup to all nested child tiers (e.g., from Preset down to Collections, or Collection down to Objects).
+* **Shift + Add Input (+):** Auto-populates all available and exposed inputs for the selected Geometry Node.
+* **Instant Deletion:** Emptying a Node Group, Node, Input, or Value field (and submitting) instantly deletes the iteration.
+* **Non-Destructive Clear (X):** Float and integer fields use unified strings with built-in clear ('X') buttons, maintaining safe, single-action undo stack operations.
+* **Validation Check:** Real-time socket validation rejects invalid inputs/nodes and instantly reverts to the last known valid state.
+
+### 7. Scoped Live Console & Progress Tracking
 * **Preset-Isolated Logging:** Each export preset tracks its own console log and export duration.
 * **Real-Time Progress Streaming:** Non-blocking background worker output is piped directly into the Blender panel with operation counters and elapsed time display.
 * **Auto-View Switching:** Displays the directory tree during setup, flips to the live console on export start, and allows instant cancellation.
+* **Side Tool Column:** Clear the log or toggle Verbose output directly from the side column tools.
 
-### 7. Collection Mapping & Granular Exclusion Filters
+### 8. Collection Mapping & Granular Exclusion Filters
 * **Collection Bindings:** Map multiple collections per preset, configure custom sub-folder destinations, and append collection tags.
 * **Object-Level Filtering:** Enable or disable specific mesh objects within collections without affecting viewport visibility.
 * **Per-Object Overrides:** Assign distinct tags, sub-folders, and dedicated node override groups down to individual objects.
 
-### 8. Dynamic Tagging & Directory Formatting
+### 9. Dynamic Tagging & Directory Formatting
 * **Sub-Directory Creation (`FILE_FOLDER`):** Route variant exports into dedicated sub-folders per value iteration.
 * **Tagging Rules (`BOOKMARKS`):**
   - `tag`: Replaces the socket value label entirely (`tag`).
@@ -69,7 +77,7 @@ Generate variant permutations across any socket:
   - `_tag`: Appends the tag to the value (`15_tag`).
   - Blank: Defaults to the formatted parameter value.
 
-### 9. JSON Preset Portability & Clipboard Buffer
+### 10. JSON Preset Portability & Clipboard Buffer
 * **Import / Export Setup:** Save or restore presets, collections, object lists, exclusion states, and override matrices to external JSON files.
 * **Internal Clipboard:** Copy and paste presets, collections, and node groups between tiers with one click.
 

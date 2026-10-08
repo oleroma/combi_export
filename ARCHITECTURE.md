@@ -78,7 +78,8 @@ The add-on structures export configurations in a strictly scoped 8-tier hierarch
 6. **`BatchSTLInput`**:
    - Targets an input socket (`name`) and its inferred data type (`override_type`: `FLOAT`, `INT`, `BOOLEAN`, `STRING`, `MENU`).
 7. **`BatchSTLValue`**:
-   - Concrete parameter value or sweep definition (`use_sweep`, `sweep_start_*`, `sweep_step_*`, `sweep_count_*`, `sweep_range`).
+   - Unified string-based concrete parameter value (`value_string`) for Ints, Floats, and Strings, and `value_menu` for Enum/Booleans.
+   - Sweep definitions using updated explicit terminology (`sweep_start`, `sweep_step`, `sweep_count`, `sweep_range`).
    - Configures naming tags (`use_tag`, `tag`) and subfolder routing (`use_dir`).
 8. **`BatchSTLLogLine`**:
    - Discrete line items stored per-preset for live output display.
@@ -164,14 +165,15 @@ Instead of creating intermediate text or using standard single-threaded Python f
 ### UI Cache Engine (`rebuild_ui_cache_if_dirty`)
 - Driven by a background timer (`bpy.app.timers`) running at ~10Hz with a dirty flag (`mark_dirty()`).
 - Recomputes statistics (preset counts, collections, exported object count, total permutation iterations).
-- Computes directory hierarchies and leaf files in advance.
+- Computes directory hierarchies and leaf files in advance. The UI displays this with an uncollapsable root directory and dedicated side-column toolbar buttons for toggling global view and bulk expanding/collapsing.
 - **Naming Collision Detection**: Analyzes all destination paths and flags collisions when two permutations or objects resolve to the identical output file path.
 
-### Undo Stack Protection
-- Property edits made in the UI get Blender's native undo step; property `update` callbacks only call `mark_dirty()`. The list/table operators declare `'UNDO'` in `bl_options`. Internal syncs (`sync_collection_objects`, type inference) happen outside the UI edit path and push nothing.
-- Runtime export state (`is_exporting`, progress, status, cancel flag, console log) lives in `WindowManager.batch_stl_jobs` (`BatchSTLJob`, one entry per preset index), not on the Scene. It is therefore never saved in the `.blend` and never rolled back by undo; `load_post` clears it. Entries are created by operators (`get_job(..., create=True)`); draw code only reads them.
-- Jobs are keyed by preset index, so removing/reordering presets is refused while any export runs. Pressing undo during an export cancels it for the same reason.
-- The export modal never keeps an RNA pointer to a preset or job; it re-resolves them by index on every event because undo, file loads and collection growth invalidate pointers.
+### Undo Stack Protection & Validation
+- **Unified String Undo Isolation**: Float and integer properties map to a unified `value_string` defining a dummy search callback to inherit Blender's `UI_BUT_UNDO` exemption. Custom `@edit_callback` wrappers inject a strict 1-action limit to the undo stack, preventing Blender from logging partial keystrokes.
+- **Empty Field Deletion**: Submitting an empty field (`""`) triggers an automatic GC deletion routine for Node Groups, Nodes, Inputs, and Values.
+- **Validation Engine**: Real-time validation checks against depsgraph interfaces ensure node groups, nodes, and inputs exist. Invalid targets are visually flagged and gracefully rejected or reset to the last known valid state.
+- **Hierarchical Propagation**: Multi-level operations (like moving items up/down via Shift) use `operator_context = 'INVOKE_DEFAULT'` to intercept modifier keys and explicitly iterate down the hierarchy.
+- **Tree Expand Logic**: Complex layout logic (e.g., Expand Last) leverages recursive path traversal, resetting directory states and selectively expanding leaf nodes seamlessly without UI lockup.
 
 ---
 

@@ -2890,26 +2890,41 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
         tip_header = tip_box.row()
         icon_tip = ICONS['DOWN'] if scene.batch_stl_ui_tips else ICONS['RIGHT']
         tip_header.prop(scene, "batch_stl_ui_tips", text="", icon=icon_tip, emboss=False)
-        tip_header.label(text="OVERRIDE INFO", icon=ICONS['INFO'])
+        tip_header.label(text="EXTENSION GUIDE", icon=ICONS['INFO'])
 
         if scene.batch_stl_ui_tips:
             col = tip_box.column()
-            col.label(text="Hierarchy: Global > Preset > Collection > Object > NodeGroup > Node.", icon=ICONS['BLANK'])
-            col.label(text="For modifier targets, leave Node blank or set as <Modifier Interface>", icon=ICONS['BLANK'])
+            
+            col.label(text="Hierarchical Overrides (Priority):", icon=ICONS['OVR'])
+            col.label(text="  • Global > Preset > Collection > Object", icon=ICONS['BLANK'])
+            col.label(text="  • Modifiers: Leave Node empty or set to <Modifier Interface>", icon=ICONS['BLANK'])
             col.separator()
 
-            col.label(text="Sweep Mode (Shift-Click '+' button to toggle):", icon=ICONS['SWEEP'])
-            col.label(text="  • Floats/Ints: Define start, step, and count", icon=ICONS['BLANK'])
-            col.label(text="  • Menus/Bools: Auto-iterates all values", icon=ICONS['BLANK'])
-            col.label(text="  • Shift-Click when active to populate all sweep values", icon=ICONS['BLANK'])
+            col.label(text="Shortcuts & Ergonomics:", icon=ICONS['INFO'])
+            col.label(text="  • Shift + Add Input (+): Auto-populates all exposed inputs", icon=ICONS['ADD'])
+            col.label(text="  • Shift + Up/Down: Propagates override tier to all child tiers", icon=ICONS['UP'])
+            col.label(text="  • Copy/Paste/Import/Export: Transfer configurations seamlessly", icon=ICONS['COPY'])
+            col.label(text="  • Instant Deletion: Empty a field & submit to delete it", icon=ICONS['DEL'])
+            col.label(text="  • Validation: Invalid inputs are rejected and reset safely", icon=ICONS['CHECK_ON'])
             col.separator()
 
-            col.label(text="Export Tools (Per Value):", icon=ICONS['BLANK'])
-            col.label(text="  • Folder Icon: Save this value's exports into a subfolder", icon=ICONS['DIR'])
-            col.label(text="  • Bookmark Icon: Append/Prepend a tag to filename", icon=ICONS['TAG'])
+            col.label(text="Parametric Sweeping:", icon=ICONS['SWEEP'])
+            col.label(text="  • Float/Int Ranges: Define Start, Step, and Count", icon=ICONS['BLANK'])
+            col.label(text="  • Menus/Bools: Auto-iterates True/False and Enum options", icon=ICONS['BLANK'])
+            col.label(text="  • Shift + Sweep (+): Populates all menu/bool values automatically", icon=ICONS['SWEEP'])
+            col.separator()
 
-            col.label(text="Tag Formatting:", icon=ICONS['BLANK'])
-            col.label(text="  • [ tag ] replaces input value, [ _tag ] appends, [ tag_ ] prepends", icon=ICONS['BLANK'])
+            col.label(text="Directory & Naming Tags:", icon=ICONS['FILE'])
+            col.label(text="  • Directory (Folder): Routes variant to a dedicated sub-folder", icon=ICONS['DIR'])
+            col.label(text="  • Tag (Bookmark): Formats filename according to rules", icon=ICONS['TAG'])
+            col.label(text="  • Rules: [ tag ] = Replace, [ _tag ] = Append, [ tag_ ] = Prepend", icon=ICONS['BLANK'])
+            col.separator()
+
+            col.label(text="Tree View & Output Console:", icon=ICONS['TREE'])
+            col.label(text="  • Global View: Show all presets or isolate current", icon=ICONS['GLOBAL'])
+            col.label(text="  • Expand/Collapse All: Toggle full directory visibility", icon=ICONS['EXPAND_ALL'])
+            col.label(text="  • Expand Last: Collapses tree and expands only the last sub-folders", icon=ICONS['EXPAND_LAST'])
+            col.label(text="  • Verbose Console / Clear Log: Manage background worker output", icon=ICONS['CONSOLE'])
 
 
 class VIEW3D_PT_batch_export_stl_presets(bpy.types.Panel):
