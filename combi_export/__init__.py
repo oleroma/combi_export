@@ -2742,9 +2742,6 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
             layout.prop(scene, "batch_stl_verbose_console", toggle=True, icon=ICONS['CONSOLE'])
 
         elif scene.batch_stl_info_tab == 'TREE':
-            tree_tools = layout.row()
-            tree_tools.prop(scene, "batch_stl_info_global", text="Global Tree View", toggle=True, icon=ICONS['GLOBAL'])
-
             tree_dict, duplicates = _ui_cache.get("tree", ({}, set()))
             if duplicates:
                 warn_box = layout.box()
@@ -2756,6 +2753,8 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
             col = tree_row.column(align=True)
             draw_tree_dict(col, tree_dict, duplicates=duplicates)
             expand_tools = tree_row.column(align=True)
+            expand_tools.prop(scene, "batch_stl_info_global", text="", toggle=True, icon=ICONS['GLOBAL'])
+            expand_tools.separator()
             expand_tools.operator("batch_stl.tree_expansion", text="", icon=ICONS['EXPAND_ALL']).mode = 'EXPAND_ALL'
             expand_tools.operator("batch_stl.tree_expansion", text="", icon=ICONS['COLLAPSE_ALL']).mode = 'COLLAPSE_ALL'
             expand_tools.operator("batch_stl.tree_expansion", text="", icon=ICONS['EXPAND_LAST']).mode = 'EXPAND_LAST'
