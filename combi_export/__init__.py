@@ -118,11 +118,20 @@ def edit_callback(label, prop, prev_prop):
                 setattr(self, prev_prop, getattr(self, prop))
                 mark_dirty()
                 return
+            old_val = getattr(self, prev_prop)
             _undo_suppress_depth += 1
             try: update(self, context)
             finally: _undo_suppress_depth -= 1
             mark_dirty()
-            if label: push_search_undo(label)
+            if label:
+                is_deleted = False
+                try:
+                    new_val = getattr(self, prop)
+                except ReferenceError:
+                    is_deleted = True
+                
+                if not is_deleted and new_val != old_val:
+                    push_search_undo(label)
         return wrapper
     return decorate
 
@@ -273,9 +282,13 @@ def unset_modifier_input(mod, ident, default_val):
             prop_input.value = default_val
 
 def get_input_value(inp):
-    if inp.override_type == 'BOOLEAN': return inp.value_bool
-    elif inp.override_type == 'INT': return inp.value_int
-    elif inp.override_type == 'FLOAT': return inp.value_float
+    if inp.override_type == 'BOOLEAN': return inp.value_menu.lower() == 'true'
+    elif inp.override_type == 'INT':
+        try: return int(inp.value_string)
+        except ValueError: return 0
+    elif inp.override_type == 'FLOAT':
+        try: return float(inp.value_string)
+        except ValueError: return 0.0
     elif inp.override_type == 'STRING': return inp.value_string
     elif inp.override_type == 'MENU': return inp.value_menu
     return None
@@ -340,12 +353,6 @@ class MockInput:
         self._is_temp = is_temp
 
     @property
-    def value_bool(self): return self._val.value_bool if self._is_temp else bool(self._val)
-    @property
-    def value_int(self): return self._val.value_int if self._is_temp else (int(self._val) if self._val is not None else 0)
-    @property
-    def value_float(self): return self._val.value_float if self._is_temp else (float(self._val) if self._val is not None else 0.0)
-    @property
     def value_string(self): return self._val.value_string if self._is_temp else str(self._val)
     @property
     def value_menu(self): return self._val.value_menu if self._is_temp else str(self._val)
@@ -376,9 +383,13 @@ def get_sorted_values(ng_ptr, node_obj, inp, values):
             if inp.override_type == 'INT': return (val.sweep_start_int, idx)
             return (0, idx)
         else:
-            if inp.override_type == 'FLOAT': return (val.value_float, idx)
-            if inp.override_type == 'INT': return (val.value_int, idx)
-            if inp.override_type == 'MENU': return (menu_order.get(val.value_menu, float('inf')), idx)
+            if inp.override_type in ('FLOAT', 'INT'):
+                try:
+                    return (float(val.value_string), idx)
+                except ValueError:
+                    return (float('-inf'), idx)
+            if inp.override_type == 'STRING': return (val.value_string, idx)
+            if inp.override_type in ('MENU', 'BOOLEAN'): return (menu_order.get(val.value_menu, float('inf')), idx)
             return (0, idx)
 
     indexed_values = list(enumerate(values))
@@ -661,7 +672,7 @@ def evaluate_combo_naming(combo, freq_dict):
         param_key = override_param_key(ovr, inp.input_name)
         if param_key not in processed_params:
             val = get_input_value(inp)
-            val_str = f"{val:g}" if isinstance(val, float) else str(val)
+            val_str = f"{val:g}" if isinstance(val, float) else str(val).replace(" ", "_")
             naming_str = f"{val_str}{inp.tag}" if inp.tag.startswith("_") else (f"{inp.tag}{val_str}" if inp.tag.endswith("_") else inp.tag) if inp.tag else val_str
             naming_str = sanitize_name(naming_str)
 
@@ -1443,13 +1454,13 @@ def sync_input_type(inp, scene, update_value=True):
                         v.use_sweep = False
                         if default_val is not None:
                             if new_type == 'FLOAT':
-                                try: v.value_float = float(default_val)
+                                try: v.value_string = str(round(float(default_val), 4))
                                 except: pass
                             elif new_type == 'INT':
-                                try: v.value_int = int(default_val)
+                                try: v.value_string = str(int(default_val))
                                 except: pass
                             elif new_type == 'BOOLEAN':
-                                try: v.value_bool = bool(default_val)
+                                try: v.value_menu = str(bool(default_val))
                                 except: pass
                             elif new_type == 'STRING':
                                 try: v.value_string = str(default_val)
@@ -1467,13 +1478,16 @@ def sync_input_type(inp, scene, update_value=True):
 @edit_callback("Edit Override Input", "name", "prev_name")
 def on_input_name_update(self, context):
     is_duplicate = False
+    is_invalid = False
     my_node = None
+    my_ng = None
     other_input = None
     if hasattr(context.scene, "batch_stl_presets"):
         for lvl, ng in HierarchyIterator.iterate(context.scene):
             for n in ng.nodes:
                 if self in n.inputs.values():
                     my_node = n
+                    my_ng = ng
                     for other in n.inputs:
                         if other != self and other.name == self.name and self.name != "":
                             is_duplicate = True
@@ -1481,6 +1495,23 @@ def on_input_name_update(self, context):
                             break
                     break
             if my_node: break
+
+    if my_node and my_ng and self.name != "":
+        ng_ptr = bpy.data.node_groups.get(my_ng.group_name)
+        source_inputs = get_supported_inputs(ng_ptr, my_node.name)
+        if self.name not in source_inputs:
+            is_invalid = True
+
+    if self.name == "" and self.prev_name != "" and my_node and len(my_node.inputs) > 1:
+        for i, inp in enumerate(my_node.inputs):
+            if inp == self:
+                with raw_edits(): my_node.inputs.remove(i)
+                return
+
+    if is_invalid:
+        with raw_edits():
+            self.name = self.prev_name
+        return
 
     if is_duplicate:
         with raw_edits():
@@ -1556,8 +1587,11 @@ def search_menu_items_cb(self, context, edit_text):
         for n in ng.nodes:
             for i in n.inputs:
                 if self in i.values.values():
-                    ng_ptr = bpy.data.node_groups.get(ng.group_name)
-                    items = get_menu_switch_items(ng_ptr, n.name, i.name)
+                    if i.override_type == 'BOOLEAN':
+                        items = ['True', 'False']
+                    else:
+                        ng_ptr = bpy.data.node_groups.get(ng.group_name)
+                        items = get_menu_switch_items(ng_ptr, n.name, i.name) if ng_ptr else []
                     if edit_text == self.value_menu: edit_text = ""
                     return [item for item in items if edit_text.lower() in item.lower()] if edit_text else items
     return []
@@ -1566,37 +1600,67 @@ def on_value_update(prop_name, label=""):
     @edit_callback(label, prop_name, "prev_" + prop_name)
     def update(self, context):
         is_duplicate = False
+        is_invalid = False
+        my_input = None
         for lvl, ng in HierarchyIterator.iterate(context.scene):
             for n in ng.nodes:
                 for i in n.inputs:
                     if self in i.values.values():
+                        my_input = i
                         my_val = getattr(self, prop_name)
+                        
+                        if prop_name == "value_menu" and my_val != "":
+                            if i.override_type == 'BOOLEAN':
+                                items = ['True', 'False']
+                            else:
+                                ng_ptr = bpy.data.node_groups.get(ng.group_name)
+                                items = get_menu_switch_items(ng_ptr, n.name, i.name) if ng_ptr else []
+                            if my_val not in items:
+                                is_invalid = True
+
                         for other in i.values:
                             if other != self and getattr(other, prop_name) == my_val and not getattr(other, "use_sweep", False) and not getattr(self, "use_sweep", False):
                                 is_duplicate = True
                                 break
                         break
+                if my_input: break
+            if my_input: break
 
-        if is_duplicate:
+        my_val = getattr(self, prop_name)
+        if my_input and prop_name in ("value_string", "value_menu") and my_val == "":
+            if len(my_input.values) > 1:
+                for idx, val_item in enumerate(my_input.values):
+                    if val_item == self:
+                        with raw_edits(): my_input.values.remove(idx)
+                        return
+            else:
+                is_invalid = True
+
+        if is_invalid or is_duplicate:
             with raw_edits(): setattr(self, prop_name, getattr(self, "prev_" + prop_name))
         else:
             setattr(self, "prev_" + prop_name, getattr(self, prop_name))
     return update
 
+def on_no_spaces_update(prop_name, label=""):
+    @edit_callback(label, prop_name, "prev_" + prop_name)
+    def update(self, context):
+        val = getattr(self, prop_name)
+        if " " in val:
+            with raw_edits(): setattr(self, prop_name, getattr(self, "prev_" + prop_name))
+        else:
+            setattr(self, "prev_" + prop_name, val)
+    return update
+
 class BatchSTLLogLine(bpy.types.PropertyGroup): text: bpy.props.StringProperty()
 class BatchSTLValue(bpy.types.PropertyGroup):
-    prev_value_bool: bpy.props.BoolProperty(default=True, options={'HIDDEN'})
-    value_bool: bpy.props.BoolProperty(name="Value", default=True, update=on_value_update("value_bool"))
-    prev_value_int: bpy.props.IntProperty(default=0, options={'HIDDEN'})
-    value_int: bpy.props.IntProperty(name="Value", default=0, update=on_value_update("value_int"))
-    prev_value_float: bpy.props.FloatProperty(default=0.0, options={'HIDDEN'})
-    value_float: bpy.props.FloatProperty(name="Value", default=0.0, update=on_value_update("value_float"))
     prev_value_string: bpy.props.StringProperty(default="", options={'HIDDEN'})
     value_string: bpy.props.StringProperty(name="Value", default="", update=on_value_update("value_string"))
     prev_value_menu: bpy.props.StringProperty(default="", options={'HIDDEN'})
     value_menu: bpy.props.StringProperty(name="Value", default="", search=search_menu_items_cb, update=on_value_update("value_menu", "Edit Override Value"))
     use_tag: bpy.props.BoolProperty(name="Use Tag", default=False, update=mark_dirty)
-    tag: bpy.props.StringProperty(name="Tag", default="", update=mark_dirty)
+    prev_tag: bpy.props.StringProperty(default="", options={'HIDDEN'})
+    tag: bpy.props.StringProperty(name="Tag", default="", update=on_no_spaces_update("tag", "Edit Tag"))
     use_dir: bpy.props.BoolProperty(name="Use Dir", default=True, update=mark_dirty)
     use_sweep: bpy.props.BoolProperty(name="Sweep", default=False, update=mark_dirty)
     sweep_range: bpy.props.StringProperty(name="Sweep Range", default="", update=mark_dirty)
@@ -1616,6 +1680,7 @@ class BatchSTLInput(bpy.types.PropertyGroup):
 @edit_callback("Edit Override Node", "name", "prev_name")
 def on_node_name_update(self, context):
     is_duplicate = False
+    is_invalid = False
     my_ng = None
     for lvl, ng in HierarchyIterator.iterate(context.scene):
         if self in ng.nodes.values():
@@ -1623,7 +1688,19 @@ def on_node_name_update(self, context):
             is_duplicate = any(other != self and clean_node_name(other.name) == clean_node_name(self.name) for other in ng.nodes) and self.name != ""
             break
 
-    if is_duplicate or (self.name == "" and self.prev_name != ""):
+    if self.name == "" and self.prev_name != "" and my_ng and len(my_ng.nodes) > 1:
+        for i, n in enumerate(my_ng.nodes):
+            if n == self:
+                with raw_edits(): my_ng.nodes.remove(i)
+                return
+
+    if self.name != "" and my_ng:
+        ng_ptr = bpy.data.node_groups.get(my_ng.group_name)
+        targets = get_target_node_names(ng_ptr) if ng_ptr else []
+        if self.name not in targets:
+            is_invalid = True
+
+    if is_invalid or is_duplicate or (self.name == "" and self.prev_name != ""):
         with raw_edits(): self.name = self.prev_name
         return
 
@@ -1649,12 +1726,22 @@ class BatchSTLNode(bpy.types.PropertyGroup):
 @edit_callback("Edit Override Node Group", "group_name", "prev_group_name")
 def on_group_name_update(self, context):
     is_duplicate = False
+    my_container = None
     for lvl, container in HierarchyIterator.iterate_lists(context.scene):
         if self in container.values():
+            my_container = container
             is_duplicate = any(other != self and other.group_name == self.group_name for other in container) and self.group_name != ""
             break
 
-    if is_duplicate or (self.group_name == "" and self.prev_group_name != ""):
+    if self.group_name == "" and self.prev_group_name != "" and my_container:
+        for i, ng in enumerate(my_container):
+            if ng == self:
+                with raw_edits(): my_container.remove(i)
+                return
+
+    is_invalid = self.group_name != "" and not bpy.data.node_groups.get(self.group_name)
+
+    if is_invalid or is_duplicate or (self.group_name == "" and self.prev_group_name != ""):
         with raw_edits(): self.group_name = self.prev_group_name
         return
 
@@ -1669,16 +1756,24 @@ def on_group_name_update(self, context):
 
     self.prev_group_name = self.group_name
 
+def search_group_name_cb(self, context, edit_text):
+    if not context or not getattr(context, "scene", None): return []
+    if edit_text == getattr(self, "group_name", ""): edit_text = ""
+    res = [ng.name for ng in bpy.data.node_groups]
+    return [item for item in res if edit_text.lower() in item.lower()] if edit_text else res
+
 class BatchSTLNodeGroup(bpy.types.PropertyGroup):
-    group_name: bpy.props.StringProperty(name="Node Group", default="", update=on_group_name_update)
+    group_name: bpy.props.StringProperty(name="Node Group", default="", search=search_group_name_cb, update=on_group_name_update)
     prev_group_name: bpy.props.StringProperty(default="", options={'HIDDEN'})
     nodes: bpy.props.CollectionProperty(type=BatchSTLNode)
 
 class BatchSTLObject(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty()
     export: bpy.props.BoolProperty(default=True, update=mark_dirty)
-    tag: bpy.props.StringProperty(name="Tag", default="", update=mark_dirty)
-    sub_path: bpy.props.StringProperty(name="Sub-folder", default="", update=mark_dirty)
+    prev_tag: bpy.props.StringProperty(default="", options={'HIDDEN'})
+    tag: bpy.props.StringProperty(name="Tag", default="", update=on_no_spaces_update("tag", "Edit Tag"))
+    prev_sub_path: bpy.props.StringProperty(default="", options={'HIDDEN'})
+    sub_path: bpy.props.StringProperty(name="Sub-folder", default="", update=on_no_spaces_update("sub_path", "Edit Sub-folder"))
     nodegroups: bpy.props.CollectionProperty(type=BatchSTLNodeGroup)
 
 @edit_callback("Edit Collection", "collection_name", "prev_collection_name")
@@ -1696,8 +1791,10 @@ class BatchSTLCollection(bpy.types.PropertyGroup):
     collection_name: bpy.props.StringProperty(name="Collection", default="", update=on_collection_name_update)
     prev_collection_name: bpy.props.StringProperty(default="", options={'HIDDEN'})
     use_tag: bpy.props.BoolProperty(name="Use Tag", default=True, update=mark_dirty)
-    tag: bpy.props.StringProperty(name="Tag", default="", update=mark_dirty)
-    sub_path: bpy.props.StringProperty(name="Sub-folder", default="", update=mark_dirty)
+    prev_tag: bpy.props.StringProperty(default="", options={'HIDDEN'})
+    tag: bpy.props.StringProperty(name="Tag", default="", update=on_no_spaces_update("tag", "Edit Tag"))
+    prev_sub_path: bpy.props.StringProperty(default="", options={'HIDDEN'})
+    sub_path: bpy.props.StringProperty(name="Sub-folder", default="", update=on_no_spaces_update("sub_path", "Edit Sub-folder"))
     objects: bpy.props.CollectionProperty(type=BatchSTLObject)
     object_index: bpy.props.IntProperty(default=0, update=mark_dirty)
     nodegroups: bpy.props.CollectionProperty(type=BatchSTLNodeGroup)
@@ -1714,7 +1811,8 @@ class BatchSTLJob(bpy.types.PropertyGroup):
 
 class BatchSTLExportPreset(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty(name="Preset Name", default="New Preset", update=mark_dirty)
-    preset_prefix: bpy.props.StringProperty(name="Preset Root Directory", default="", update=mark_dirty)
+    prev_preset_prefix: bpy.props.StringProperty(default="", options={'HIDDEN'})
+    preset_prefix: bpy.props.StringProperty(name="Preset Root Directory", default="", update=on_no_spaces_update("preset_prefix", "Edit Prefix"))
     collections: bpy.props.CollectionProperty(type=BatchSTLCollection)
     collection_index: bpy.props.IntProperty(name="Collection Index", default=0, update=mark_dirty)
     nodegroups: bpy.props.CollectionProperty(type=BatchSTLNodeGroup)
@@ -2050,14 +2148,14 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
         elif self.action in ['ADD_VALUE', 'TOGGLE_SWEEP', 'VALUE_ACTION']:
             def add_smart_value():
                 if inp_obj.override_type == 'BOOLEAN':
-                    existing = {v.value_bool for v in vals if not v.use_sweep}
-                    if True not in existing:
+                    existing = {v.value_menu for v in vals if not v.use_sweep}
+                    if 'True' not in existing:
                         v = vals.add()
-                        v.value_bool = True
+                        v.value_menu = 'True'
                         return v
-                    elif False not in existing:
+                    elif 'False' not in existing:
                         v = vals.add()
-                        v.value_bool = False
+                        v.value_menu = 'False'
                         return v
                     return None
                 elif inp_obj.override_type == 'MENU':
@@ -2071,10 +2169,17 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
                             return v
                     return None
                 elif inp_obj.override_type in ('FLOAT', 'INT'):
-                    attr = 'value_float' if inp_obj.override_type == 'FLOAT' else 'value_int'
-                    existing = [getattr(v, attr) for v in vals if not v.use_sweep]
+                    existing = []
+                    for v in vals:
+                        if not v.use_sweep:
+                            try:
+                                existing.append(float(v.value_string))
+                            except ValueError:
+                                pass
                     v = vals.add()
-                    if existing: setattr(v, attr, max(existing) + 1)
+                    if existing:
+                        new_val = max(existing) + 1
+                        v.value_string = str(int(new_val) if inp_obj.override_type == 'INT' else round(new_val, 4))
                     return v
                 elif inp_obj.override_type == 'STRING':
                     # A blank string is invalid and would duplicate the previous blank one: fill it in first.
@@ -2553,11 +2658,10 @@ def draw_overrides_table(layout, scene, nodegroups, is_collection, is_open_prop,
             draw_op(ng_row, 'ADD_NODE', ICONS['ADD'], ng_idx=ng_idx)
         ng_sub = ng_row.row(align=True)
         ng_sub.alert = not is_override_group_valid(ng)
-        ng_sub.prop_search(ng, "group_name", bpy.data, "node_groups", text="")
+        ng_sub.prop(ng, "group_name", text="")
         draw_op(ng_row, 'MOVE_GROUP_UP', ICONS['UP'], ng_idx=ng_idx)
         draw_op(ng_row, 'MOVE_GROUP_DOWN', ICONS['DOWN'], ng_idx=ng_idx)
         draw_op(ng_row, 'COPY_GROUP', ICONS['COPY'], ng_idx=ng_idx)
-        draw_op(ng_row, 'DEL_GROUP', ICONS['DEL'], ng_idx=ng_idx)
 
         ng_ptr = bpy.data.node_groups.get(ng.group_name)
 
@@ -2583,7 +2687,6 @@ def draw_overrides_table(layout, scene, nodegroups, is_collection, is_open_prop,
             if len(ng.nodes) > 1:
                 draw_op(n_row, 'MOVE_NODE_UP', ICONS['UP'], ng_idx=ng_idx, n_idx=n_idx)
                 draw_op(n_row, 'MOVE_NODE_DOWN', ICONS['DOWN'], ng_idx=ng_idx, n_idx=n_idx)
-                draw_op(n_row, 'DEL_NODE', ICONS['DEL'], ng_idx=ng_idx, n_idx=n_idx)
 
             i_split = node_layout.split(factor=0.03)
             i_split.column()
@@ -2617,8 +2720,6 @@ def draw_overrides_table(layout, scene, nodegroups, is_collection, is_open_prop,
 
                     # Handing unpopulated values safely
                     if val is None:
-                        if len(node.inputs) > 1:
-                            draw_op(c_dir, 'DEL_INPUT', ICONS['DEL'], ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx)
                         continue
 
                     # Render Value Properties
@@ -2644,11 +2745,10 @@ def draw_overrides_table(layout, scene, nodegroups, is_collection, is_open_prop,
                                 n_items = len(get_menu_switch_items(ng_ptr, node.name, inp.name)) if ng_ptr else 0
                                 sub.label(text=f"{n_items} values")
                     else:
-                        prop_map = {'BOOLEAN': "value_bool", 'INT': "value_int", 'FLOAT': "value_float", 'STRING': "value_string", 'MENU': "value_menu"}
+                        prop_map = {'BOOLEAN': "value_menu", 'INT': "value_string", 'FLOAT': "value_string", 'STRING': "value_string", 'MENU': "value_menu"}
                         prop_name = prop_map.get(inp.override_type)
                         if prop_name:
-                            kwargs = {"text": "True" if val.value_bool else "False", "toggle": True} if prop_name == "value_bool" else {"text": ""}
-                            c_val_prop.prop(val, prop_name, **kwargs)
+                            c_val_prop.prop(val, prop_name, text="")
                         else:
                             c_val_prop.label(text="Unsupported socket type", icon=ICONS['ERROR'])
 
@@ -2658,13 +2758,6 @@ def draw_overrides_table(layout, scene, nodegroups, is_collection, is_open_prop,
                         draw_op(c_dir, 'TOGGLE_VALUE_USE_DIR', ICONS['DIR'], depress=val.use_dir, ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx, v_idx=v_idx)
                         draw_op(c_dir, 'TOGGLE_VALUE_USE_TAG', ICONS['TAG'], depress=val.use_tag, ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx, v_idx=v_idx)
                         c_dir.prop(val, "tag", text="")
-
-                    # Render Action Buttons
-                    if i_first:
-                        if len(node.inputs) > 1 or len(inp.values) > 1:
-                            draw_op(c_dir, 'DEL_VALUE_MIXED', ICONS['DEL'], ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx, v_idx=v_idx if val else 0)
-                    else:
-                        draw_op(c_dir, 'DEL_VALUE', ICONS['DEL'], ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx, v_idx=v_idx)
 
 
 class VIEW3D_PT_batch_export_stl_main(bpy.types.Panel):
