@@ -66,31 +66,36 @@ Generate variant permutations across any socket:
 * **Per-File Error Reporting:** A file that cannot be written (e.g. locked by a slicer) is logged as `FAILED` and the export continues with the next file.
 
 ### 8. Collection Mapping & Granular Exclusion Filters
-* **Collection Bindings:** Map multiple collections per preset, configure custom sub-folder destinations, and append collection tags.
+* **Collection Bindings:** Map multiple collections per preset, configure custom sub-folder destinations, and add collection tags to the filename.
 * **Object-Level Filtering:** Enable or disable specific mesh objects within collections without affecting viewport visibility.
 * **Per-Object Overrides:** Assign distinct tags, sub-folders, and dedicated node override groups down to individual objects.
 
 ### 9. Dynamic Tagging & Directory Formatting
+* **Filename Structure:** The object name followed by every tag token in hierarchy order, joined with `_`:
+  `Object` → Global override tags → Preset override tags → Collection tag → Collection override tags → Object tag → Object override tags.
+  Example: object `Box`, Global letter `A`, collection tag `v2`, Collection number `1`, object tag `lid` → `Box_A_v2_1_lid.stl`.
+* **Collection, Object, Node Group and Node Tags:** Plain filename tokens placed at their level (several tokens separated by `/`; leading/trailing `_` are ignored, so `_lid` and `lid` are the same). The object tag no longer renames the object.
 * **Two Separate Fields per Value:** Each value has a directory field and a filename-tag field side by side. Each toggle button enables only its own field (a disabled field is greyed out).
 * **Sub-Directory Creation (`FILE_FOLDER`):** Route variant exports into dedicated sub-folders per value iteration, named by the directory field.
 * **Filename Tag (`BOOKMARKS`):** Add the value to the exported filename, formatted by the tag field.
-* **Naming Rules (same for both fields):**
+* **Value Naming Rules (same for both value fields):**
   - `tag`: Replaces the socket value label entirely (`tag`).
   - `tag_`: Prepends the tag to the value (`tag_15`).
   - `_tag`: Appends the tag to the value (`15_tag`).
   - Blank: Defaults to the formatted parameter value.
 
 ### 10. Branch Merging
-Values with a folder create branches in the output tree, e.g. letters `A B C` × numbers `1 2 3` give `A/1 … C/3`. An override further down the stack can be attached to an existing branch instead of multiplying every permutation:
-* **Merge by Name:** When a node group sub-folder, node sub-folder, or value directory names a folder that already exists upstream, the override merges into it. Its own folders are created inside the branch, below the folders already there.
+Values with a folder or filename tag create branches, e.g. letters `A B C` × numbers `1 2 3` give `A/1 … C/3` (folders) or `Box_A_1 … Box_C_3` (names). An override further down the stack can be attached to an existing branch instead of multiplying every permutation:
+* **Merge by Folder:** When a node group sub-folder, node sub-folder, or value directory names a folder that already exists upstream, the override merges into it. Its own folders are created inside the branch, below the folders already there.
+* **Merge by Filename:** The same works with filename tokens. A node group tag, node tag, or value tag that names an upstream token only applies to the files that already contain it, and its own tokens are appended at the end of the name: tag `B` → `Box_B_1_X`, `Box_B_1_Y`, … while `Box_A_*` and `Box_C_*` stay as they are. `C/2` and `2` work like their folder counterparts. Folder and tag anchors of one block must both match.
   - Sub-folder `B` → only the B permutations get the new values: `B/1/X`, `B/1/Y`, … The A and C branches stay as they are.
   - Sub-folder `C/2` → only `C/2/X`, `C/2/Y`, …
   - Sub-folder `2` → every `2` branch: `A/2/X`, `B/2/X`, `C/2/X`, …
-* **Matching Rules:** A name may match any parent folder of the branch, not only the last one. Several names (`C/2`) must appear in that order. A branch name that is missing from a branch means the override does not apply there; any other name simply becomes a new folder.
-* **Upstream Suggestions:** Folder fields are searchable and list the folders that exist above them, each labelled as a *Branch* (created by a value) or a *Folder* (a plain sub-folder) with its source. Free text is still allowed. In sub-folder paths the suggestion completes the last part, so typing `C/` offers `C/1`, `C/2`, …
-* **Branch-Aware Predictions:** Suggestions only list folders that can exist together with the merges already made above the field. Inside a block merged into `C`, the alternatives `A` and `B` are not offered, and neither are folders that exist only under `A`.
-* **Merge Highlighting:** A node group or node that merges shows a blue *Merges into …* bar on top of its block, covering everything inside it. Its folder icon becomes a merge icon. A value whose folder merges shows the merge icon on its folder toggle. Hover the bar to see where each folder comes from.
-* **Dead Merge Warning:** If the chosen folders can never exist together (e.g. `C/X` when `X` only exists under `A`), the bar turns red (*Never applies*) because that block is never exported. A value with such a folder gets a red folder toggle.
+* **Matching Rules:** A name may match any parent folder (or any earlier token) of the branch, not only the last one. Several names (`C/2`) must appear in that order. A branch name that is missing from a branch means the override does not apply there; any other name simply becomes a new folder.
+* **Upstream Suggestions:** Folder and tag fields are searchable and list the folders / name tokens that exist above them, labelled *Branch* / *Name branch* (created by a value) or *Folder* / *Tag* (a plain sub-folder or block tag) with their source. Free text is still allowed. In sub-folder paths the suggestion completes the last part, so typing `C/` offers `C/1`, `C/2`, …
+* **Branch-Aware Predictions:** Suggestions only list names that can exist together with the merges already made above the field, across folders and tags: inside a block placed in folder `C`, the alternatives `A` and `B` are not offered, and neither are folders or tokens that only exist under `A`.
+* **Merge Highlighting:** A node group or node that merges shows a blue *Merges into …* bar on top of its block (folders first, then `name …` for tokens), covering everything inside it. The merging field's icon becomes a merge icon. A value whose folder or tag merges shows the merge icon on that toggle. Hover the bar to see where each folder comes from.
+* **Dead Merge Warning:** If the chosen folders can never exist together (e.g. `C/X` when `X` only exists under `A`), the bar turns red (*Never applies*) because that block is never exported. A value with such a folder or tag gets a red toggle.
 
 ### 11. JSON Preset Portability & Clipboard Buffer
 * **Import / Export Setup:** Save or restore presets, collections, object lists, exclusion states, and override matrices to external JSON files. Presets saved before directory and tag were split into two fields reuse their old tag as the directory name, so their folders keep their names.
