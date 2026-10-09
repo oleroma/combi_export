@@ -43,7 +43,7 @@ ICONS = {
     'TIME': 'TIME', 'MODIFIER': 'MODIFIER', 'TREE': 'OUTLINER_OB_EMPTY', 'ERROR': 'ERROR',
     'RIGHT': 'TRIA_RIGHT', 'BLANK': 'BLANK1', 'FILE': 'FILE_3D',
     'EXPAND_ALL': 'FULLSCREEN_ENTER', 'COLLAPSE_ALL': 'FULLSCREEN_EXIT', 'EXPAND_LAST': 'TRIA_DOWN_BAR',
-    'COMBINE': 'LINKED'
+    'COMBINE': 'LINKED', 'MERGE': 'AUTOMERGE_ON'
 }
 
 SUPPORTED_OBJECT_TYPES = {"MESH", "CURVE", "SURFACE", "META", "FONT"}
@@ -1880,6 +1880,37 @@ def on_no_spaces_update(prop_name, label=""):
 
 _PATH_STEP = re.compile(r"(\w+)\[(\d+)\]")
 
+# A "dir scope" is {folder name: description} of the folders that exist at a point of the override stack.
+def _scope_add_parts(scope, text, desc):
+    for name in split_path_parts(text):
+        scope.setdefault(name, desc)
+
+def _value_folder_names(ng_ptr, node, inp, val):
+    """Folder names one UI value creates (sweep steps included)."""
+    target = 'MODIFIER' if not node.name or node.name == "<Modifier Interface>" else 'NODE'
+    tmp = MockInput(inp, val, is_temp=True)
+    return value_dir_names(MockOverride(target, ng_ptr, node.name, [tmp]), tmp)
+
+def _group_folder_desc(ng): return f"Folder · {ng.group_name}"
+def _node_folder_desc(ng, node): return f"Folder · {ng.group_name} › {clean_node_name(node.name) or 'Modifier'}"
+
+def _scope_add_input(scope, ng, ng_ptr, node, inp):
+    for val in inp.values:
+        for name in _value_folder_names(ng_ptr, node, inp, val):
+            scope.setdefault(name, f"Branch · {ng.group_name} › {inp.name}")
+
+def merge_hits(names, scope):
+    """The names that merge into a folder already in `scope`, in order, without repeats."""
+    return [n for n in dict.fromkeys(names) if n in scope]
+
+def merge_tooltip(hits, scope):
+    lines = [f"{name}  ({scope[name]})" for name in hits]
+    if any(scope[name].startswith("Branch") for name in hits):
+        lines.append("This block and everything inside it only applies to the branches that contain these folders")
+    else:
+        lines.append("This block and everything inside it is placed inside these existing folders")
+    return "\n".join(lines)
+
 def upstream_dir_suggestions(item):
     """Folder names defined above `item` in the override stack, in export order, as {name: description}.
 
@@ -1904,26 +1935,15 @@ def upstream_dir_suggestions(item):
     own = lists[-1]
 
     out = {}
-    def add_parts(text, desc):
-        for name in split_path_parts(text):
-            out.setdefault(name, desc)
-
-    def add_values(ng, ng_ptr, node, inp):
-        target = 'MODIFIER' if not node.name or node.name == "<Modifier Interface>" else 'NODE'
-        for val in inp.values:
-            tmp = MockInput(inp, val, is_temp=True)
-            for name in value_dir_names(MockOverride(target, ng_ptr, node.name, [tmp]), tmp):
-                out.setdefault(name, f"Branch · {ng.group_name} › {inp.name}")
-
     def add_node(ng, ng_ptr, node, input_limit=None):
-        add_parts(node.sub_path, f"Folder · {ng.group_name} › {clean_node_name(node.name) or 'Modifier'}")
+        _scope_add_parts(out, node.sub_path, _node_folder_desc(ng, node))
         for i_idx, inp in enumerate(node.inputs):
             if input_limit is not None and i_idx >= input_limit: break
-            add_values(ng, ng_ptr, node, inp)
+            _scope_add_input(out, ng, ng_ptr, node, inp)
 
     def add_group(ng, node_limit=None, input_limit=None):
         ng_ptr = bpy.data.node_groups.get(ng.group_name)
-        add_parts(ng.sub_path, f"Folder · {ng.group_name}")
+        _scope_add_parts(out, ng.sub_path, _group_folder_desc(ng))
         for n_idx, node in enumerate(ng.nodes):
             if node_limit is not None and n_idx >= node_limit:
                 if input_limit is not None and n_idx == node_limit: add_node(ng, ng_ptr, node, input_limit)
@@ -1939,7 +1959,7 @@ def upstream_dir_suggestions(item):
         ng = own[g]
         if isinstance(item, BatchSTLNode):
             # The node's own group sub-folder already exists when the node is evaluated.
-            add_parts(ng.sub_path, f"Folder · {ng.group_name}")
+            _scope_add_parts(out, ng.sub_path, _group_folder_desc(ng))
             for node in list(ng.nodes)[:pos.get("nodes", 0)]: add_node(ng, bpy.data.node_groups.get(ng.group_name), node)
         else:
             add_group(ng, node_limit=pos.get("nodes", 0), input_limit=pos.get("inputs", 0))
@@ -2620,6 +2640,20 @@ class BATCH_STL_OT_tree_expansion(bpy.types.Operator):
         save_toggled_dirs(scene, toggled)
         return {'FINISHED'}
 
+class BATCH_STL_OT_merge_info(bpy.types.Operator):
+    """Highlight bar of an override block that merges into an upstream folder; the tooltip explains the merge."""
+    bl_idname = "batch_stl.merge_info"
+    bl_label = "Merged Branch"
+    bl_options = {'INTERNAL'}
+    info: bpy.props.StringProperty(options={'HIDDEN', 'SKIP_SAVE'})
+
+    @classmethod
+    def description(cls, context, properties):
+        return properties.info
+
+    def execute(self, context):
+        return {'CANCELLED'}
+
 class BATCH_STL_OT_cancel_export(bpy.types.Operator):
     bl_idname = "batch_stl.cancel_export"
     bl_label = "Cancel Export"
@@ -2981,9 +3015,20 @@ def draw_overrides_table(layout, scene, nodegroups, is_collection, is_open_prop,
         content_col.label(text="No overrides defined.")
         return
 
+    def draw_merge_bar(parent, hits):
+        """Blue bar on top of a block whose sub-folder merges into upstream folders: marks the block and its children."""
+        op = parent.row(align=True).operator("batch_stl.merge_info", text="Merges into " + " / ".join(hits), icon=ICONS['MERGE'], depress=True)
+        op.info = merge_tooltip(hits, scope)
+
+    # Folders that exist so far, built in export order while drawing (same order as upstream_dir_suggestions)
+    scope = dict(upstream_dir_suggestions(nodegroups[0]))
+
     for ng_idx, ng in enumerate(nodegroups):
         ng_box = content_col.box()
         ng_layout = ng_box.column()
+        ng_hits = merge_hits(split_path_parts(ng.sub_path), scope)
+        if ng_hits: draw_merge_bar(ng_layout, ng_hits)
+        _scope_add_parts(scope, ng.sub_path, _group_folder_desc(ng))
         ng_row = ng_layout.row(align=True)
 
         if ng.group_name:
@@ -2992,7 +3037,7 @@ def draw_overrides_table(layout, scene, nodegroups, is_collection, is_open_prop,
         ng_sub.alert = not is_override_group_valid(ng)
         ng_sub.prop(ng, "group_name", text="")
         ng_row.prop(ng, "use_combine", text="", icon=ICONS['COMBINE'])
-        ng_row.prop(ng, "sub_path", text="", icon=ICONS['DIR'])
+        ng_row.prop(ng, "sub_path", text="", icon=ICONS['MERGE'] if ng_hits else ICONS['DIR'])
         draw_op(ng_row, 'MOVE_GROUP_UP', ICONS['UP'], ng_idx=ng_idx)
         draw_op(ng_row, 'MOVE_GROUP_DOWN', ICONS['DOWN'], ng_idx=ng_idx)
         draw_op(ng_row, 'COPY_GROUP', ICONS['COPY'], ng_idx=ng_idx)
@@ -3011,13 +3056,16 @@ def draw_overrides_table(layout, scene, nodegroups, is_collection, is_open_prop,
         for n_idx, node in enumerate(ng.nodes):
             node_container = nodes_layout.box()
             node_layout = node_container.column()
+            n_hits = merge_hits(split_path_parts(node.sub_path), scope)
+            if n_hits: draw_merge_bar(node_layout, n_hits)
+            _scope_add_parts(scope, node.sub_path, _node_folder_desc(ng, node))
 
             n_row = node_layout.row(align=True)
             draw_op(n_row, 'ADD_INPUT', ICONS['ADD'], ng_idx=ng_idx, n_idx=n_idx)
             n_sub = n_row.row(align=True)
             n_sub.alert = not is_override_node_valid(ng_ptr, node)
             n_sub.prop(node, "name", text="", icon=ICONS['NODE'])
-            n_row.prop(node, "sub_path", text="", icon=ICONS['DIR'])
+            n_row.prop(node, "sub_path", text="", icon=ICONS['MERGE'] if n_hits else ICONS['DIR'])
 
             if len(ng.nodes) > 1:
                 draw_op(n_row, 'MOVE_NODE_UP', ICONS['UP'], ng_idx=ng_idx, n_idx=n_idx)
@@ -3083,16 +3131,20 @@ def draw_overrides_table(layout, scene, nodegroups, is_collection, is_open_prop,
                         else:
                             c_val_prop.label(text="Unsupported socket type", icon=ICONS['ERROR'])
 
-                    # Directory and filename tag: each toggle drives only its own field
+                    # Directory and filename tag: each toggle drives only its own field.
+                    # A folder that merges into an upstream one shows the merge icon on its toggle.
+                    v_hits = merge_hits(_value_folder_names(ng_ptr, node, inp, val), scope)
                     s_dir_tag = c_dir.split(factor=0.5, align=True)
                     c_d = s_dir_tag.row(align=True)
-                    draw_op(c_d, 'TOGGLE_VALUE_USE_DIR', ICONS['DIR'], depress=val.use_dir, ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx, v_idx=v_idx)
+                    draw_op(c_d, 'TOGGLE_VALUE_USE_DIR', ICONS['MERGE'] if v_hits else ICONS['DIR'], depress=val.use_dir, ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx, v_idx=v_idx)
                     c_d_field = c_d.row(align=True); c_d_field.active = val.use_dir
                     c_d_field.prop(val, "dir_tag", text="")
                     c_t = s_dir_tag.row(align=True)
                     draw_op(c_t, 'TOGGLE_VALUE_USE_TAG', ICONS['TAG'], depress=val.use_tag, ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx, v_idx=v_idx)
                     c_t_field = c_t.row(align=True); c_t_field.active = val.use_tag
                     c_t_field.prop(val, "tag", text="")
+
+                _scope_add_input(scope, ng, ng_ptr, node, inp)
 
 
 class VIEW3D_PT_batch_export_stl_main(bpy.types.Panel):
@@ -3435,7 +3487,7 @@ def reset_batch_stl_state(*args):
 classes = (
     BatchSTLLogLine, BatchSTLJob, BatchSTLValue, BatchSTLInput, BatchSTLNode, BatchSTLNodeGroup, BatchSTLObject, BatchSTLCollection, BatchSTLExportPreset,
     BATCH_STL_UL_presets, BATCH_STL_UL_collections, BATCH_STL_UL_objects, BATCH_STL_UL_console_logs,
-    BATCH_STL_OT_clear_console, BATCH_STL_OT_preset_actions, BATCH_STL_OT_collection_actions, BATCH_STL_OT_table_action, BATCH_STL_OT_toggle_dir_tree, BATCH_STL_OT_tree_expansion, BATCH_STL_OT_cancel_export, BATCH_STL_OT_export_presets_json, BATCH_STL_OT_import_presets_json, EXPORT_OT_batch_stl_multi,
+    BATCH_STL_OT_clear_console, BATCH_STL_OT_preset_actions, BATCH_STL_OT_collection_actions, BATCH_STL_OT_table_action, BATCH_STL_OT_toggle_dir_tree, BATCH_STL_OT_tree_expansion, BATCH_STL_OT_merge_info, BATCH_STL_OT_cancel_export, BATCH_STL_OT_export_presets_json, BATCH_STL_OT_import_presets_json, EXPORT_OT_batch_stl_multi,
     VIEW3D_PT_batch_export_stl_main, VIEW3D_PT_batch_export_stl_info, VIEW3D_PT_batch_export_stl_presets, VIEW3D_PT_batch_export_stl_collections, VIEW3D_PT_batch_export_stl_objects
 )
 
