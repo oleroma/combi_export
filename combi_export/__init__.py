@@ -42,7 +42,8 @@ ICONS = {
     'CHECK_OFF': 'CHECKBOX_DEHLT', 'OVR': 'DECORATE_OVERRIDE', 'NODE': 'NODETREE',
     'TIME': 'TIME', 'MODIFIER': 'MODIFIER', 'TREE': 'OUTLINER_OB_EMPTY', 'ERROR': 'ERROR',
     'RIGHT': 'TRIA_RIGHT', 'BLANK': 'BLANK1', 'FILE': 'FILE_3D',
-    'EXPAND_ALL': 'FULLSCREEN_ENTER', 'COLLAPSE_ALL': 'FULLSCREEN_EXIT', 'EXPAND_LAST': 'TRIA_DOWN_BAR'
+    'EXPAND_ALL': 'FULLSCREEN_ENTER', 'COLLAPSE_ALL': 'FULLSCREEN_EXIT', 'EXPAND_LAST': 'TRIA_DOWN_BAR',
+    'COMBINE': 'LINKED'
 }
 
 SUPPORTED_OBJECT_TYPES = {"MESH", "CURVE", "SURFACE", "META", "FONT"}
@@ -324,6 +325,8 @@ LEVEL_RANK = {"NONE": -1, "GLOBAL": 0, "PRESET": 1, "COLLECTION": 2, "OBJECT": 3
 def override_param_key(ovr, input_name):
     """Identity of one overridden socket, independent of the hierarchy level that defines it."""
     pg_name = ovr.parent_group_ptr.name if ovr.parent_group_ptr else ""
+    if getattr(ovr, "use_combine", False):
+        pg_name = ""
     node = clean_node_name(ovr.node_name) if ovr.override_target == 'NODE' else ""
     return (ovr.override_target, pg_name, node, input_name)
 
@@ -340,7 +343,7 @@ def resolve_overrides(overrides):
     for ovr in overrides:
         rank = LEVEL_RANK.get(ovr.level, -1)
         kept = [inp for inp in ovr.inputs if best_rank[override_param_key(ovr, inp.input_name)] == rank]
-        if kept: resolved.append(MockOverride(ovr.override_target, ovr.parent_group_ptr, ovr.node_name, kept, ovr.level))
+        if kept or not ovr.inputs: resolved.append(MockOverride(ovr.override_target, ovr.parent_group_ptr, ovr.node_name, kept, ovr.level, getattr(ovr, "use_combine", False), getattr(ovr, "ng_sub_path", ""), getattr(ovr, "node_sub_path", "")))
     return resolved
 
 def get_override_signature(overrides):
@@ -379,12 +382,15 @@ class MockInput:
     def value_menu(self): return self._val.value_menu if self._is_temp else str(self._val)
 
 class MockOverride:
-    def __init__(self, target, ptr, node_name, inputs, level="NONE"):
+    def __init__(self, target, ptr, node_name, inputs, level="NONE", use_combine=False, ng_sub_path="", node_sub_path=""):
         self.override_target = target
         self.parent_group_ptr = ptr
         self.node_name = node_name
         self.inputs = inputs
         self.level = level
+        self.use_combine = use_combine
+        self.ng_sub_path = ng_sub_path
+        self.node_sub_path = node_sub_path
 
 def get_sorted_values(ng_ptr, node_obj, inp, values):
     menu_order = {}
@@ -429,8 +435,8 @@ def get_flat_overrides(nodegroups, level="NONE"):
                 for _, val in get_sorted_values(ng_ptr, node, inp, inp.values):
                     temp_inputs.append(MockInput(inp, val, is_temp=True))
                     
-            if temp_inputs:
-                overrides.append(MockOverride(target, ng_ptr, node.name, temp_inputs, level))
+            if temp_inputs or getattr(ng, "sub_path", "") or getattr(node, "sub_path", ""):
+                overrides.append(MockOverride(target, ng_ptr, node.name, temp_inputs, level, getattr(ng, "use_combine", False), getattr(ng, "sub_path", ""), getattr(node, "sub_path", "")))
     return overrides
 
 def parse_sweep_values(ovr, inp):
@@ -487,21 +493,88 @@ def _build_override_pools(overrides):
     return pools
 
 def count_override_combinations(overrides):
-    return math.prod(len(pool) for pool in _build_override_pools(overrides))
+    count = 0
+    for _ in generate_override_combinations(overrides):
+        count += 1
+        if count > 5000: return count
+    return count
 
 def generate_override_combinations(overrides):
-    """Lazily yield every combination (a list of (override, input) pairs); use count_override_combinations() for the
-    total, so large sweeps are never held in memory at once."""
+    ovr_prev_dirs = {}
+    prev_dirs = set()
+    for ovr in overrides:
+        ovr_prev_dirs[id(ovr)] = set(prev_dirs)
+        for inp in ovr.inputs:
+            if getattr(inp, "use_dir", False):
+                val = get_input_value(inp)
+                val_str = f"{val:.10g}" if isinstance(val, float) else str(val).replace(" ", "_")
+                naming_str = sanitize_name(apply_tag(val_str, getattr(inp, "tag", "")))
+                dir_part = naming_str.strip(" .")
+                if dir_part:
+                    prev_dirs.add(dir_part)
+                  
     pools = _build_override_pools(overrides)
-    if not pools: return iter([[]])
-    return ([var for variation in combo for var in variation] for combo in itertools.product(*pools))
+    if not pools:
+        yield []
+        return
+        
+    def recurse(pool_idx, current_combo, current_parent_dir):
+        if pool_idx == len(pools):
+            yield current_combo
+            return
+            
+        pool = pools[pool_idx]
+        has_yielded = False
+        
+        for variation in pool:
+            active_variation = []
+            var_final_parent = current_parent_dir
+            
+            for ovr, inp in variation:
+                prev_dirs_for_ovr = ovr_prev_dirs[id(ovr)]
+                temp_parent = current_parent_dir
+                
+                paths = split_path_parts(getattr(ovr, "ng_sub_path", "")) + split_path_parts(getattr(ovr, "node_sub_path", ""))
+                
+                inp_dir_part = ""
+                if getattr(inp, "use_dir", False):
+                    val = get_input_value(inp)
+                    val_str = f"{val:.10g}" if isinstance(val, float) else str(val).replace(" ", "_")
+                    naming_str = sanitize_name(apply_tag(val_str, getattr(inp, "tag", "")))
+                    inp_dir_part = naming_str.strip(" .")
+                    
+                if inp_dir_part:
+                    paths.extend(split_path_parts(inp_dir_part))
+                    
+                is_active = True
+                for p in paths:
+                    if p in prev_dirs_for_ovr:
+                        if p != temp_parent:
+                            is_active = False
+                            break
+                    temp_parent = p
+                    
+                if not is_active:
+                    continue
+                    
+                active_variation.append((ovr, inp))
+                var_final_parent = temp_parent
+                        
+            if active_variation:
+                yield from recurse(pool_idx + 1, current_combo + active_variation, var_final_parent)
+                has_yielded = True
+                
+        if not has_yielded:
+            yield from recurse(pool_idx + 1, current_combo, current_parent_dir)
+            
+    yield from recurse(0, [], None)
 
 def reconstruct_overrides_for_combo(combo):
     grouped = {}
     for ovr, inp in combo:
-        target_key = (ovr.override_target, ovr.parent_group_ptr, ovr.node_name, getattr(ovr, "level", "NONE"))
+        target_key = (ovr.override_target, ovr.parent_group_ptr, ovr.node_name, getattr(ovr, "level", "NONE"), getattr(ovr, "use_combine", False))
         grouped.setdefault(target_key, []).append(inp)
-    return [MockOverride(tgt, ptr, name, inputs, lvl) for (tgt, ptr, name, lvl), inputs in grouped.items()]
+    return [MockOverride(tgt, ptr, name, inputs, lvl, use_combine) for (tgt, ptr, name, lvl, use_combine), inputs in grouped.items()]
 
 def capture_baseline_states(overrides, target_objects):
     global_states, mod_states = [], []
@@ -676,7 +749,8 @@ def build_export_dir_parts(preset_prefix, col_sub_path, obj_sub_path, paths_by_l
     c_parts = split_path_parts(col_sub_path)
     o_parts = split_path_parts(obj_sub_path)
     p_prefix = split_path_parts(preset_prefix)
-    return (
+    
+    raw_parts = (
         paths_by_level.get("GLOBAL", []) +
         p_prefix +
         paths_by_level.get("PRESET", []) +
@@ -686,32 +760,94 @@ def build_export_dir_parts(preset_prefix, col_sub_path, obj_sub_path, paths_by_l
         paths_by_level.get("OBJECT", []) +
         paths_by_level.get("NONE", [])
     )
+    
+    final_parts = []
+    for part in raw_parts:
+        if not final_parts or final_parts[-1] != part:
+            final_parts.append(part)
+    return final_parts
 
-def compute_override_freq_dict(overrides):
-    freq_dict = {}
-    for o in overrides:
-        for i in o.inputs:
-            key = override_param_key(o, i.input_name)
-            freq_dict[key] = freq_dict.get(key, 0) + (2 if getattr(i, "use_sweep", False) else 1)
-    return freq_dict
-
-def evaluate_combo_naming(combo, freq_dict):
+def evaluate_combo_naming(combo, all_overrides=None):
     combo_suffix = ""
     paths_by_level = {"GLOBAL": [], "PRESET": [], "COLLECTION": [], "OBJECT": [], "NONE": []}
+    
+    active_inputs_by_ovr = {}
+    for c_ovr, c_inp in combo:
+        active_inputs_by_ovr.setdefault(id(c_ovr), []).append(c_inp)
+        
     processed_params = set()
+    processed_ovrs = set()
+    processed_ngs = set()
 
-    for ovr, inp in combo:
-        param_key = override_param_key(ovr, inp.input_name)
-        if param_key not in processed_params:
-            val = get_input_value(inp)
-            val_str = f"{val:.10g}" if isinstance(val, float) else str(val).replace(" ", "_")
-            naming_str = sanitize_name(apply_tag(val_str, inp.tag))
-
-            if freq_dict.get(param_key, 0) > 1:
-                if getattr(inp, "use_tag", False): combo_suffix += f"_{naming_str}"
+    source_overrides = all_overrides if all_overrides else [c_ovr for c_ovr, c_inp in combo]
+    
+    ovr_prev_dirs = {}
+    prev_dirs = set()
+    for ovr in source_overrides:
+        ovr_prev_dirs[id(ovr)] = set(prev_dirs)
+        for inp in ovr.inputs:
+            if getattr(inp, "use_dir", False):
+                val = get_input_value(inp)
+                val_str = f"{val:.10g}" if isinstance(val, float) else str(val).replace(" ", "_")
+                naming_str = sanitize_name(apply_tag(val_str, getattr(inp, "tag", "")))
                 dir_part = naming_str.strip(" .")
-                if getattr(inp, "use_dir", False) and dir_part: paths_by_level[getattr(ovr, "level", "NONE")].append(dir_part)
-            processed_params.add(param_key)
+                if dir_part:
+                    prev_dirs.add(dir_part)
+                
+    current_parent_dir = None
+
+    for ovr in source_overrides:
+        level = getattr(ovr, "level", "NONE")
+        prev_dirs_for_ovr = ovr_prev_dirs[id(ovr)]
+        
+        paths = split_path_parts(getattr(ovr, "ng_sub_path", "")) + split_path_parts(getattr(ovr, "node_sub_path", ""))
+        
+        temp_parent = current_parent_dir
+        is_active = True
+        for p in paths:
+            if p in prev_dirs_for_ovr:
+                if p != temp_parent:
+                    is_active = False
+                    break
+            temp_parent = p
+            
+        if not is_active:
+            continue
+        
+        ng_key = (id(ovr.parent_group_ptr), ovr.override_target, level)
+        if ng_key not in processed_ngs:
+            processed_ngs.add(ng_key)
+            if getattr(ovr, "ng_sub_path", ""):
+                parts = split_path_parts(ovr.ng_sub_path)
+                paths_by_level[level].extend(parts)
+                if parts: current_parent_dir = parts[-1]
+                
+        if ovr not in processed_ovrs:
+            processed_ovrs.add(ovr)
+            if getattr(ovr, "node_sub_path", ""):
+                parts = split_path_parts(ovr.node_sub_path)
+                paths_by_level[level].extend(parts)
+                if parts: current_parent_dir = parts[-1]
+
+        combo_inps = active_inputs_by_ovr.get(id(ovr), [])
+        for base_inp in ovr.inputs:
+            matched_inp = next((i for i in combo_inps if getattr(i, "input_name", "") == getattr(base_inp, "input_name", "")), None)
+            if not matched_inp: continue
+
+            param_key = override_param_key(ovr, getattr(matched_inp, "input_name", ""))
+            if param_key not in processed_params:
+                processed_params.add(param_key)
+                val = get_input_value(matched_inp)
+                val_str = f"{val:.10g}" if isinstance(val, float) else str(val).replace(" ", "_")
+                naming_str = sanitize_name(apply_tag(val_str, getattr(matched_inp, "tag", "")))
+
+                if getattr(matched_inp, "use_tag", False): combo_suffix += f"_{naming_str}"
+                dir_part = naming_str.strip(" .")
+                if getattr(matched_inp, "use_dir", False) and dir_part: 
+                    parts = split_path_parts(dir_part)
+                    paths_by_level[level].extend(parts)
+                    if parts: current_parent_dir = parts[-1]
+                        
     return combo_suffix, paths_by_level
 
 def sync_collection_objects(col_prop, col_ptr=None):
@@ -860,10 +996,10 @@ def copy_input_to_dict(i):
     return {"name": i.name, "override_type": i.override_type, "values": [copy_val_to_dict(v) for v in i.values]}
 
 def copy_node_to_dict(n):
-    return {"name": n.name, "inputs": [copy_input_to_dict(i) for i in n.inputs]}
+    return {"name": n.name, "sub_path": getattr(n, "sub_path", ""), "inputs": [copy_input_to_dict(i) for i in n.inputs]}
 
 def copy_ng_to_dict(ng):
-    return {"group": ng.group_name, "nodes": [copy_node_to_dict(n) for n in ng.nodes]}
+    return {"group": ng.group_name, "sub_path": getattr(ng, "sub_path", ""), "nodes": [copy_node_to_dict(n) for n in ng.nodes]}
 
 def copy_obj_to_dict(o):
     return {"name": o.name, "export": o.export, "tag": getattr(o, "tag", ""), "sub_path": getattr(o, "sub_path", ""), "nodegroups": [copy_ng_to_dict(ng) for ng in o.nodegroups]}
@@ -889,7 +1025,8 @@ def paste_input_from_dict(new_i, data):
     for v_data in data.get("values", []): paste_val_from_dict(new_i.values.add(), v_data)
 
 def paste_node_from_dict(new_n, data):
-    new_n.name = data["name"]
+    new_n.name = data.get("name", "")
+    new_n.sub_path = data.get("sub_path", "")
     for i_data in data.get("inputs", []): paste_input_from_dict(new_n.inputs.add(), i_data)
 
 def paste_ng_from_dict(ng_list, data):
@@ -900,6 +1037,7 @@ def paste_ng_from_dict(ng_list, data):
     with raw_edits():
         new_ng = ng_list.add()
         new_ng.group_name = group
+        new_ng.sub_path = data.get("sub_path", "")
         for n_data in data.get("nodes", []): paste_node_from_dict(new_ng.nodes.add(), n_data)
 
 def paste_obj_from_dict(new_o, data):
@@ -1213,9 +1351,8 @@ def build_tree_dict(context, excluded_cache=None, is_global=False):
                 if len(all_filepaths) + combo_count > 5000:
                     return {root_name: {"_files": [f"Tree preview limited (>{5000} files)"]}}, set()
 
-                freq_dict = compute_override_freq_dict(all_overrides)
                 for combo in generate_override_combinations(all_overrides):
-                    combo_suffix, paths_by_level = evaluate_combo_naming(combo, freq_dict)
+                    combo_suffix, paths_by_level = evaluate_combo_naming(combo, all_overrides)
                     full_dir_parts = build_export_dir_parts(preset.preset_prefix, c.sub_path, obj_prop.sub_path, paths_by_level)
 
                     combo_root = tree
@@ -1364,7 +1501,6 @@ def run_headless_export(job_file_path):
 
     for signature, batch_items in execution_batches.items():
         all_overrides = batch_overrides[signature]
-        freq_dict = compute_override_freq_dict(all_overrides)
         num_combinations = batch_counts[signature]
         batch_objects = {item[2] for item in batch_items}
 
@@ -1392,7 +1528,7 @@ def run_headless_export(job_file_path):
                     print(f"=== Headless init took {time.time() - start_time_unix:.2f} s to start first export ===", flush=True)
                     first_export_started = True
 
-                combo_suffix, paths_by_level = evaluate_combo_naming(combo, freq_dict)
+                combo_suffix, paths_by_level = evaluate_combo_naming(combo, all_overrides)
 
                 apply_overrides(reconstruct_overrides_for_combo(combo), batch_objects)
                 bpy.context.view_layer.update()
@@ -1588,10 +1724,12 @@ def on_input_name_update(self, context):
         if self.name not in source_inputs:
             is_invalid = True
 
-    if self.name == "" and my_node and len(my_node.inputs) > 1:
+    if self.name == "" and my_node:
         for i, inp in enumerate(my_node.inputs):
             if inp == self:
                 with raw_edits(): my_node.inputs.remove(i)
+                if len(my_node.inputs) == 0:
+                    my_node.name = ""
                 return DELETED
 
     if is_invalid:
@@ -1730,13 +1868,12 @@ def on_value_update(prop_name, label=""):
 
         my_val = getattr(self, prop_name)
         if my_input and prop_name in ("value_string", "value_menu") and my_val == "":
-            if len(my_input.values) > 1:
-                for idx, val_item in enumerate(my_input.values):
-                    if val_item == self:
-                        with raw_edits(): my_input.values.remove(idx)
-                        return DELETED
-            else:
-                is_invalid = True
+            for idx, val_item in enumerate(my_input.values):
+                if val_item == self:
+                    with raw_edits(): my_input.values.remove(idx)
+                    if len(my_input.values) == 0:
+                        my_input.name = ""
+                    return DELETED
 
         if is_invalid or is_duplicate:
             with raw_edits(): setattr(self, prop_name, getattr(self, "prev_" + prop_name))
@@ -1793,10 +1930,12 @@ def on_node_name_update(self, context):
             is_duplicate = any(other != self and clean_node_name(other.name) == clean_node_name(self.name) for other in ng.nodes) and self.name != ""
             break
 
-    if self.name == "" and my_ng and len(my_ng.nodes) > 1:
+    if self.name == "" and my_ng:
         for i, n in enumerate(my_ng.nodes):
             if n == self:
                 with raw_edits(): my_ng.nodes.remove(i)
+                if len(my_ng.nodes) == 0:
+                    my_ng.group_name = ""
                 return DELETED
 
     if self.name != "" and my_ng:
@@ -1826,6 +1965,8 @@ def on_node_name_update(self, context):
 class BatchSTLNode(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty(name="Target Node", default="", search=search_target_node_cb, update=on_node_name_update, description="Select <Modifier Interface> to target the modifier directly")
     prev_name: bpy.props.StringProperty(default="", options={'HIDDEN'})
+    prev_sub_path: bpy.props.StringProperty(default="", options={'HIDDEN'})
+    sub_path: bpy.props.StringProperty(name="Sub-folder", default="", update=on_no_spaces_update("sub_path"))
     inputs: bpy.props.CollectionProperty(type=BatchSTLInput)
 
 @edit_callback("Edit Override Node Group", "group_name", "prev_group_name")
@@ -1870,6 +2011,9 @@ def search_group_name_cb(self, context, edit_text):
 class BatchSTLNodeGroup(bpy.types.PropertyGroup):
     group_name: bpy.props.StringProperty(name="Node Group", default="", search=search_group_name_cb, update=on_group_name_update)
     prev_group_name: bpy.props.StringProperty(default="", options={'HIDDEN'})
+    use_combine: bpy.props.BoolProperty(name="Combine Overrides", description="Combine overrides of different nodegroups that share the same inner node and socket paths", default=False, update=mark_dirty)
+    prev_sub_path: bpy.props.StringProperty(default="", options={'HIDDEN'})
+    sub_path: bpy.props.StringProperty(name="Sub-folder", default="", update=on_no_spaces_update("sub_path"))
     nodes: bpy.props.CollectionProperty(type=BatchSTLNode)
 
 class BatchSTLObject(bpy.types.PropertyGroup):
@@ -1884,14 +2028,7 @@ class BatchSTLObject(bpy.types.PropertyGroup):
 
 @edit_callback("Edit Collection", "collection_name", "prev_collection_name")
 def on_collection_name_update(self, context):
-    preset = get_active_preset(context.scene)
-    is_duplicate = bool(preset) and self in preset.collections.values() and self.collection_name != "" and \
-        any(other != self and other.collection_name == self.collection_name for other in preset.collections)
-
-    if is_duplicate:
-        with raw_edits(): self.collection_name = self.prev_collection_name
-    else:
-        self.prev_collection_name = self.collection_name
+    self.prev_collection_name = self.collection_name
 
 class BatchSTLCollection(bpy.types.PropertyGroup):
     collection_name: bpy.props.StringProperty(name="Collection", default="", update=on_collection_name_update)
@@ -2197,6 +2334,8 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
                 
         elif self.action == 'DEL_NODE' and 0 <= self.n_idx < len(nodes):
             nodes.remove(self.n_idx)
+            if len(nodes) == 0:
+                ng_list.remove(self.ng_idx)
         elif self.action == 'MOVE_NODE_UP' and 0 < self.n_idx < len(nodes):
             nodes.move(self.n_idx, self.n_idx - 1)
         elif self.action == 'MOVE_NODE_DOWN' and 0 <= self.n_idx < len(nodes) - 1:
@@ -2233,8 +2372,10 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
                 inputs.add().values.add()
                 
         elif self.action == 'DEL_INPUT' and 0 <= self.i_idx < len(inputs):
-            if len(inputs) > 1:
-                inputs.remove(self.i_idx)
+            inputs.remove(self.i_idx)
+            if len(inputs) == 0:
+                self.action = 'DEL_NODE'
+                self._handle_node_action(ng_list)
 
     def _handle_value_action(self, ng_list):
         if not (0 <= self.ng_idx < len(ng_list)): return
@@ -2244,13 +2385,11 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
         if not (0 <= self.i_idx < len(node.inputs)): return
         inp_obj = node.inputs[self.i_idx]
         vals = inp_obj.values
-        if self.action == 'DEL_VALUE' and 0 <= self.v_idx < len(vals):
+        if self.action in ('DEL_VALUE', 'DEL_VALUE_MIXED') and 0 <= self.v_idx < len(vals):
             vals.remove(self.v_idx)
-        elif self.action == 'DEL_VALUE_MIXED':
-            if len(vals) > 1 and 0 <= self.v_idx < len(vals):
-                vals.remove(self.v_idx)
-            elif len(node.inputs) > 1:
-                node.inputs.remove(self.i_idx)
+            if len(vals) == 0:
+                self.action = 'DEL_INPUT'
+                self._handle_input_action(ng_list)
         elif self.action in ['ADD_VALUE', 'TOGGLE_SWEEP', 'VALUE_ACTION']:
             def add_smart_value():
                 if inp_obj.override_type == 'BOOLEAN':
@@ -2780,6 +2919,8 @@ def draw_overrides_table(layout, scene, nodegroups, is_collection, is_open_prop,
         ng_sub = ng_row.row(align=True)
         ng_sub.alert = not is_override_group_valid(ng)
         ng_sub.prop(ng, "group_name", text="")
+        ng_row.prop(ng, "use_combine", text="", icon=ICONS['COMBINE'])
+        ng_row.prop(ng, "sub_path", text="", icon=ICONS['DIR'])
         draw_op(ng_row, 'MOVE_GROUP_UP', ICONS['UP'], ng_idx=ng_idx)
         draw_op(ng_row, 'MOVE_GROUP_DOWN', ICONS['DOWN'], ng_idx=ng_idx)
         draw_op(ng_row, 'COPY_GROUP', ICONS['COPY'], ng_idx=ng_idx)
@@ -2804,6 +2945,7 @@ def draw_overrides_table(layout, scene, nodegroups, is_collection, is_open_prop,
             n_sub = n_row.row(align=True)
             n_sub.alert = not is_override_node_valid(ng_ptr, node)
             n_sub.prop(node, "name", text="", icon=ICONS['NODE'])
+            n_row.prop(node, "sub_path", text="", icon=ICONS['DIR'])
 
             if len(ng.nodes) > 1:
                 draw_op(n_row, 'MOVE_NODE_UP', ICONS['UP'], ng_idx=ng_idx, n_idx=n_idx)
@@ -2870,11 +3012,9 @@ def draw_overrides_table(layout, scene, nodegroups, is_collection, is_open_prop,
                             c_val_prop.label(text="Unsupported socket type", icon=ICONS['ERROR'])
 
                     # Render Directory/Tag controls for permutations
-                    is_permutation = len(inp.values) > 1 or any(getattr(v, "use_sweep", False) for v in inp.values)
-                    if is_permutation:
-                        draw_op(c_dir, 'TOGGLE_VALUE_USE_DIR', ICONS['DIR'], depress=val.use_dir, ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx, v_idx=v_idx)
-                        draw_op(c_dir, 'TOGGLE_VALUE_USE_TAG', ICONS['TAG'], depress=val.use_tag, ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx, v_idx=v_idx)
-                        c_dir.prop(val, "tag", text="")
+                    draw_op(c_dir, 'TOGGLE_VALUE_USE_DIR', ICONS['DIR'], depress=val.use_dir, ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx, v_idx=v_idx)
+                    draw_op(c_dir, 'TOGGLE_VALUE_USE_TAG', ICONS['TAG'], depress=val.use_tag, ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx, v_idx=v_idx)
+                    c_dir.prop(val, "tag", text="")
 
 
 class VIEW3D_PT_batch_export_stl_main(bpy.types.Panel):
