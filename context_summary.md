@@ -84,6 +84,8 @@ They are still branch names that blocks anchor to.
 - `draw_overrides_table` builds the scope incrementally (cheap). Merging block → blue `batch_stl.merge_info` bar on
   top of its box ("Merges into C / 2 · name B"), field icon `AUTOMERGE_ON` (`ICONS['MERGE']`). Impossible merge →
   red "Never applies" bar. Value merge → merge icon on the DIR/TAG toggle; dead → red toggle. Tooltip lists sources.
+- Collapsed table with inputs = clear view: only input/value rows (same walk, block rows skipped); the hidden
+  blocks' merge bars become one merge_info icon at the input row start (red if dead, tooltips joined).
 - `BATCH_STL_OT_merge_info`: INTERNAL no-op operator, `description()` returns the tooltip.
 
 ## 4. Other changes

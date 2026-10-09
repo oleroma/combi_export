@@ -2090,9 +2090,11 @@ def _value_names(ng_ptr, node, inp, val):
         dirs.extend(d); tags.extend(t)
     return dirs, tags
 
+def _block_where(ng, node=None):
+    return ng.group_name if node is None else f"{ng.group_name} › {clean_node_name(node.name) or 'Modifier'}"
+
 def _block_desc(kind, ng, node=None):
-    where = ng.group_name if node is None else f"{ng.group_name} › {clean_node_name(node.name) or 'Modifier'}"
-    return f"{'Folder' if kind == 'dir' else 'Tag'} · {where}"
+    return f"{'Folder' if kind == 'dir' else 'Tag'} · {_block_where(ng, node)}"
 
 class BranchScope:
     def __init__(self):
@@ -3284,7 +3286,10 @@ def _draw_overrides_table(layout, wm, nodegroups, is_collection, is_open_prop, t
     draw_op(op_row, 'ADD_GROUP', ICONS['ADD'])
     draw_op(op_row, 'PASTE_GROUP', ICONS['PASTE'])
 
-    if not is_open:
+    # Collapsed, a table with inputs switches to the clear view: only the inputs and their values, without the node
+    # group / node rows around them. Without inputs it collapses completely.
+    clear = not is_open
+    if clear and not any(node.inputs for ng in nodegroups for node in ng.nodes):
         return
 
     content_col = box.column()
@@ -3302,158 +3307,190 @@ def _draw_overrides_table(layout, wm, nodegroups, is_collection, is_open_prop, t
             res[kind] = (hits, dead)
         return ctx, res
 
-    def draw_merge_bar(parent, res):
-        """Bar on top of a block whose sub-folder or tag merges into upstream names: marks the block and its children.
-        Blue for a merge, red when the chosen names can never exist together (the block never applies)."""
+    def merge_state(res):
+        """(dead, text, tooltip) of a block whose sub-folder or tag merges into upstream names, else None. Dead when
+        the chosen names can never exist together (the block never applies). The tooltip is taken now: names added
+        further down the stack must not change it."""
         hits = [(k, n) for k in SCOPE_KINDS for n in res[k][0]]
         dead = [(k, n) for k in SCOPE_KINDS for n in res[k][1]]
-        if not hits and not dead: return
+        if not hits and not dead: return None
         segments = []
         d_names, t_names = res["dir"][0] + res["dir"][1], res["tag"][0] + res["tag"][1]
         if d_names: segments.append(" / ".join(d_names))
         if t_names: segments.append("name " + " + ".join(t_names))
-        row = parent.row(align=True)
-        row.alert = bool(dead)
         text = ("Never applies: " if dead else "Merges into ") + " · ".join(segments)
-        op = row.operator("batch_stl.merge_info", text=text, icon=ICONS['ERROR'] if dead else ICONS['MERGE'], depress=not dead)
-        op.info = merge_tooltip(hits, dead, scope)
+        return bool(dead), text, merge_tooltip(hits, dead, scope)
+
+    def draw_merge_bar(parent, state):
+        """Bar on top of a merging block: marks the block and its children. Blue for a merge, red when it is dead."""
+        if not state: return
+        dead, text, tooltip = state
+        row = parent.row(align=True)
+        row.alert = dead
+        row.operator("batch_stl.merge_info", text=text, icon=ICONS['ERROR'] if dead else ICONS['MERGE'], depress=not dead).info = tooltip
+
+    def draw_merge_icon(parent, merges):
+        """Clear view: the merge bars of an input's hidden node group / node as one icon at the start of its row.
+        `merges` is [(block name, merge_state)]; without merges the slot stays blank, so the names line up."""
+        if merges:
+            dead = any(state[0] for _where, state in merges)
+            row = parent.row(align=True)
+            row.alert = dead
+            op = row.operator("batch_stl.merge_info", text="", icon=ICONS['ERROR'] if dead else ICONS['MERGE'], depress=not dead)
+            op.info = "\n\n".join(f"{where}: {text}\n{tooltip}" for where, (_dead, text, tooltip) in merges)
+        else:
+            parent.label(text="", icon=ICONS['BLANK'])
+        parent.separator(factor=0.5)
 
     def merged(res, kind): return bool(res[kind][0] or res[kind][1])
 
-    # Folders / filename tokens that exist so far and their branch contexts, built in export order while drawing
+    def draw_input(parent, ng_idx, ng, ng_ptr, n_idx, node, n_ctx, i_idx, inp, merges=None):
+        """Rows of one input (its first value on the input's row, the others below), then record what it creates.
+        `merges` is given in the clear view only (see draw_merge_icon)."""
+        input_layout = parent.column()
+        # Wrap in array to ensure rendering block triggers at least once even if 'values' logic is empty
+        values = inp.values if inp.values else [None]
+
+        for visual_v, (v_idx, val) in enumerate(get_sorted_values(ng_ptr, node, inp, values)):
+            i_first = (visual_v == 0)
+            i_row = input_layout.row(align=True)
+
+            s_main = i_row.split(factor=0.35, align=False)
+            c_inp = s_main.row(align=True)
+
+            if i_first:
+                if merges is not None: draw_merge_icon(c_inp, merges)
+                action_icon = ICONS['SWEEP'] if val and getattr(val, "use_sweep", False) else ICONS['ADD']
+                draw_op(c_inp, 'VALUE_ACTION', action_icon, depress=(action_icon == ICONS['SWEEP']),
+                        ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx, v_idx=v_idx if val else -1)
+                draw_input_name(c_inp, inp, ng, node)
+            else:
+                c_inp.alignment = 'RIGHT'
+
+            s_val = s_main.split(factor=0.5, align=False)
+            c_val = s_val.row(align=True)
+            c_dir = s_val.row(align=True)
+
+            # Handing unpopulated values safely
+            if val is None:
+                continue
+
+            # Render Value Properties
+            val_valid = is_override_val_valid(inp, val, ng_ptr, node)
+            c_val_prop = c_val.row(align=True)
+            c_val_prop.alert = not val_valid
+            if getattr(val, "use_sweep", False):
+                if inp.override_type in ('FLOAT', 'INT'):
+                    c_val_prop.prop(val, "sweep_start", text="")
+                    c_val_prop.prop(val, "sweep_step", text="")
+                    c_val_prop.prop(val, "sweep_count", text="")
+                elif inp.override_type == 'STRING':
+                    c_val_prop.prop(val, "sweep_range", text="")
+                elif inp.override_type in ['BOOLEAN', 'MENU']:
+                    sub = c_val_prop.row(align=True); sub.active = False
+                    if inp.override_type == 'BOOLEAN':
+                        sub.label(text="True & False")
+                    else:
+                        n_items = len(get_menu_switch_items(ng_ptr, node.name, inp.name)) if ng_ptr else 0
+                        sub.label(text=f"{n_items} values")
+            else:
+                prop_map = {'BOOLEAN': "value_menu", 'INT': "value_string", 'FLOAT': "value_string", 'STRING': "value_string", 'MENU': "value_menu"}
+                prop_name = prop_map.get(inp.override_type)
+                if prop_name:
+                    c_val_prop.prop(val, prop_name, text="")
+                    if prop_name == "value_string":
+                        # Plain text fields have no built-in clear button (only search fields do), so add one
+                        op = c_val_prop.operator("batch_stl.table_action", text="", icon='PANEL_CLOSE', emboss=False)
+                        op.action, op.is_collection, op.is_preset, op.is_global = 'CLEAR_VALUE_STRING', is_collection, is_preset, is_global
+                        op.ng_idx, op.n_idx, op.i_idx, op.v_idx = ng_idx, n_idx, i_idx, v_idx
+                else:
+                    c_val_prop.label(text="Unsupported socket type", icon=ICONS['ERROR'])
+
+            # Directory and filename tag: each toggle drives only its own field.
+            # A folder / token that merges into an upstream one shows the merge icon on its toggle; red when
+            # it cannot exist in this block's branch (the value never applies).
+            v_dirs, v_tags = _value_names(ng_ptr, node, inp, val)
+            v_res = scope.resolve_value(val, v_dirs, v_tags, n_ctx)[1]
+            (vd_hits, vd_dead), (vt_hits, vt_dead) = v_res["dir"], v_res["tag"]
+            s_dir_tag = c_dir.split(factor=0.5, align=True)
+            c_d = s_dir_tag.row(align=True)
+            c_d.alert = bool(vd_dead)
+            draw_op(c_d, 'TOGGLE_VALUE_USE_DIR', ICONS['MERGE'] if vd_hits or vd_dead else ICONS['DIR'], depress=val.use_dir, ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx, v_idx=v_idx)
+            c_d_field = c_d.row(align=True); c_d_field.active = val.use_dir
+            c_d_field.prop(val, "dir_tag", text="")
+            c_t = s_dir_tag.row(align=True)
+            c_t.alert = bool(vt_dead)
+            draw_op(c_t, 'TOGGLE_VALUE_USE_TAG', ICONS['MERGE'] if vt_hits or vt_dead else ICONS['TAG'], depress=val.use_tag, ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx, v_idx=v_idx)
+            c_t_field = c_t.row(align=True); c_t_field.active = val.use_tag
+            c_t_field.prop(val, "tag", text="")
+
+        scope.add_input(ng, ng_ptr, node, inp, n_ctx)
+
+    # Folders / filename tokens that exist so far and their branch contexts, built in export order while drawing.
+    # The clear view walks the same blocks (it needs their context and names) without drawing their rows.
     scope = upstream_scope(nodegroups[0])[0]
+    clear_layout = content_col.box().column() if clear else None
 
     for ng_idx, ng in enumerate(nodegroups):
-        ng_box = content_col.box()
-        ng_layout = ng_box.column()
-        ng_ctx, ng_res = resolve_block(ng, frozenset(), ng)
-        draw_merge_bar(ng_layout, ng_res)
-        ng_row = ng_layout.row(align=True)
-
-        if ng.group_name:
-            draw_op(ng_row, 'ADD_NODE', ICONS['ADD'], ng_idx=ng_idx)
-        ng_sub = ng_row.row(align=True)
-        ng_sub.alert = not is_override_group_valid(ng)
-        ng_sub.prop(ng, "group_name", text="")
-        ng_row.prop(ng, "sub_path", text="", icon=ICONS['MERGE'] if merged(ng_res, "dir") else ICONS['DIR'])
-        ng_row.prop(ng, "tag", text="", icon=ICONS['MERGE'] if merged(ng_res, "tag") else ICONS['TAG'])
-        draw_op(ng_row, 'MOVE_GROUP_UP', ICONS['UP'], ng_idx=ng_idx)
-        draw_op(ng_row, 'MOVE_GROUP_DOWN', ICONS['DOWN'], ng_idx=ng_idx)
-        draw_op(ng_row, 'COPY_GROUP', ICONS['COPY'], ng_idx=ng_idx)
-
         ng_ptr = bpy.data.node_groups.get(ng.group_name)
+        ng_ctx, ng_res = resolve_block(ng, frozenset(), ng)
+        ng_merge = merge_state(ng_res)
 
-        if not ng.nodes:
-            continue
+        if not clear:
+            ng_layout = content_col.box().column()
+            draw_merge_bar(ng_layout, ng_merge)
+            ng_row = ng_layout.row(align=True)
 
-        n_split = ng_layout.split(factor=0.03)
-        n_split.column()
-        nodes_col = n_split.column()
-        nodes_box = nodes_col.box() if len(ng.nodes) > 1 else nodes_col
-        nodes_layout = nodes_box.column()
+            if ng.group_name:
+                draw_op(ng_row, 'ADD_NODE', ICONS['ADD'], ng_idx=ng_idx)
+            ng_sub = ng_row.row(align=True)
+            ng_sub.alert = not is_override_group_valid(ng)
+            ng_sub.prop(ng, "group_name", text="")
+            ng_row.prop(ng, "sub_path", text="", icon=ICONS['MERGE'] if merged(ng_res, "dir") else ICONS['DIR'])
+            ng_row.prop(ng, "tag", text="", icon=ICONS['MERGE'] if merged(ng_res, "tag") else ICONS['TAG'])
+            draw_op(ng_row, 'MOVE_GROUP_UP', ICONS['UP'], ng_idx=ng_idx)
+            draw_op(ng_row, 'MOVE_GROUP_DOWN', ICONS['DOWN'], ng_idx=ng_idx)
+            draw_op(ng_row, 'COPY_GROUP', ICONS['COPY'], ng_idx=ng_idx)
+
+            if not ng.nodes:
+                continue
+
+            n_split = ng_layout.split(factor=0.03)
+            n_split.column()
+            nodes_col = n_split.column()
+            nodes_box = nodes_col.box() if len(ng.nodes) > 1 else nodes_col
+            nodes_layout = nodes_box.column()
 
         for n_idx, node in enumerate(ng.nodes):
-            node_container = nodes_layout.box()
-            node_layout = node_container.column()
             n_ctx, n_res = resolve_block(node, ng_ctx, ng, node)
-            draw_merge_bar(node_layout, n_res)
+            n_merge = merge_state(n_res)
 
-            n_row = node_layout.row(align=True)
-            draw_op(n_row, 'ADD_INPUT', ICONS['ADD'], ng_idx=ng_idx, n_idx=n_idx)
-            n_sub = n_row.row(align=True)
-            n_sub.alert = not is_override_node_valid(ng_ptr, node)
-            n_sub.prop(node, "name", text="", icon=ICONS['NODE'])
-            n_row.prop(node, "sub_path", text="", icon=ICONS['MERGE'] if merged(n_res, "dir") else ICONS['DIR'])
-            n_row.prop(node, "tag", text="", icon=ICONS['MERGE'] if merged(n_res, "tag") else ICONS['TAG'])
+            if clear:
+                inputs_layout = clear_layout
+                merges = [(where, state) for where, state in ((_block_where(ng), ng_merge), (_block_where(ng, node), n_merge)) if state]
+            else:
+                node_layout = nodes_layout.box().column()
+                draw_merge_bar(node_layout, n_merge)
 
-            if len(ng.nodes) > 1:
-                draw_op(n_row, 'MOVE_NODE_UP', ICONS['UP'], ng_idx=ng_idx, n_idx=n_idx)
-                draw_op(n_row, 'MOVE_NODE_DOWN', ICONS['DOWN'], ng_idx=ng_idx, n_idx=n_idx)
+                n_row = node_layout.row(align=True)
+                draw_op(n_row, 'ADD_INPUT', ICONS['ADD'], ng_idx=ng_idx, n_idx=n_idx)
+                n_sub = n_row.row(align=True)
+                n_sub.alert = not is_override_node_valid(ng_ptr, node)
+                n_sub.prop(node, "name", text="", icon=ICONS['NODE'])
+                n_row.prop(node, "sub_path", text="", icon=ICONS['MERGE'] if merged(n_res, "dir") else ICONS['DIR'])
+                n_row.prop(node, "tag", text="", icon=ICONS['MERGE'] if merged(n_res, "tag") else ICONS['TAG'])
 
-            i_split = node_layout.split(factor=0.03)
-            i_split.column()
-            inputs_col = i_split.column()
-            inputs_box = inputs_col.box()
-            inputs_layout = inputs_box.column()
+                if len(ng.nodes) > 1:
+                    draw_op(n_row, 'MOVE_NODE_UP', ICONS['UP'], ng_idx=ng_idx, n_idx=n_idx)
+                    draw_op(n_row, 'MOVE_NODE_DOWN', ICONS['DOWN'], ng_idx=ng_idx, n_idx=n_idx)
+
+                i_split = node_layout.split(factor=0.03)
+                i_split.column()
+                inputs_layout = i_split.column().box().column()
+                merges = None
 
             for i_idx, inp in enumerate(node.inputs):
-                input_layout = inputs_layout.column()
-                # Wrap in array to ensure rendering block triggers at least once even if 'values' logic is empty
-                values = inp.values if inp.values else [None]
-
-                for visual_v, (v_idx, val) in enumerate(get_sorted_values(ng_ptr, node, inp, values)):
-                    i_first = (visual_v == 0)
-                    i_row = input_layout.row(align=True)
-
-                    s_main = i_row.split(factor=0.35, align=False)
-                    c_inp = s_main.row(align=True)
-
-                    if i_first:
-                        action_icon = ICONS['SWEEP'] if val and getattr(val, "use_sweep", False) else ICONS['ADD']
-                        draw_op(c_inp, 'VALUE_ACTION', action_icon, depress=(action_icon == ICONS['SWEEP']),
-                                ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx, v_idx=v_idx if val else -1)
-                        draw_input_name(c_inp, inp, ng, node)
-                    else:
-                        c_inp.alignment = 'RIGHT'
-
-                    s_val = s_main.split(factor=0.5, align=False)
-                    c_val = s_val.row(align=True)
-                    c_dir = s_val.row(align=True)
-
-                    # Handing unpopulated values safely
-                    if val is None:
-                        continue
-
-                    # Render Value Properties
-                    val_valid = is_override_val_valid(inp, val, ng_ptr, node)
-                    c_val_prop = c_val.row(align=True)
-                    c_val_prop.alert = not val_valid
-                    if getattr(val, "use_sweep", False):
-                        if inp.override_type in ('FLOAT', 'INT'):
-                            c_val_prop.prop(val, "sweep_start", text="")
-                            c_val_prop.prop(val, "sweep_step", text="")
-                            c_val_prop.prop(val, "sweep_count", text="")
-                        elif inp.override_type == 'STRING':
-                            c_val_prop.prop(val, "sweep_range", text="")
-                        elif inp.override_type in ['BOOLEAN', 'MENU']:
-                            sub = c_val_prop.row(align=True); sub.active = False
-                            if inp.override_type == 'BOOLEAN':
-                                sub.label(text="True & False")
-                            else:
-                                n_items = len(get_menu_switch_items(ng_ptr, node.name, inp.name)) if ng_ptr else 0
-                                sub.label(text=f"{n_items} values")
-                    else:
-                        prop_map = {'BOOLEAN': "value_menu", 'INT': "value_string", 'FLOAT': "value_string", 'STRING': "value_string", 'MENU': "value_menu"}
-                        prop_name = prop_map.get(inp.override_type)
-                        if prop_name:
-                            c_val_prop.prop(val, prop_name, text="")
-                            if prop_name == "value_string":
-                                # Plain text fields have no built-in clear button (only search fields do), so add one
-                                op = c_val_prop.operator("batch_stl.table_action", text="", icon='PANEL_CLOSE', emboss=False)
-                                op.action, op.is_collection, op.is_preset, op.is_global = 'CLEAR_VALUE_STRING', is_collection, is_preset, is_global
-                                op.ng_idx, op.n_idx, op.i_idx, op.v_idx = ng_idx, n_idx, i_idx, v_idx
-                        else:
-                            c_val_prop.label(text="Unsupported socket type", icon=ICONS['ERROR'])
-
-                    # Directory and filename tag: each toggle drives only its own field.
-                    # A folder / token that merges into an upstream one shows the merge icon on its toggle; red when
-                    # it cannot exist in this block's branch (the value never applies).
-                    v_dirs, v_tags = _value_names(ng_ptr, node, inp, val)
-                    v_res = scope.resolve_value(val, v_dirs, v_tags, n_ctx)[1]
-                    (vd_hits, vd_dead), (vt_hits, vt_dead) = v_res["dir"], v_res["tag"]
-                    s_dir_tag = c_dir.split(factor=0.5, align=True)
-                    c_d = s_dir_tag.row(align=True)
-                    c_d.alert = bool(vd_dead)
-                    draw_op(c_d, 'TOGGLE_VALUE_USE_DIR', ICONS['MERGE'] if vd_hits or vd_dead else ICONS['DIR'], depress=val.use_dir, ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx, v_idx=v_idx)
-                    c_d_field = c_d.row(align=True); c_d_field.active = val.use_dir
-                    c_d_field.prop(val, "dir_tag", text="")
-                    c_t = s_dir_tag.row(align=True)
-                    c_t.alert = bool(vt_dead)
-                    draw_op(c_t, 'TOGGLE_VALUE_USE_TAG', ICONS['MERGE'] if vt_hits or vt_dead else ICONS['TAG'], depress=val.use_tag, ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx, v_idx=v_idx)
-                    c_t_field = c_t.row(align=True); c_t_field.active = val.use_tag
-                    c_t_field.prop(val, "tag", text="")
-
-                scope.add_input(ng, ng_ptr, node, inp, n_ctx)
+                draw_input(inputs_layout, ng_idx, ng, ng_ptr, n_idx, node, n_ctx, i_idx, inp, merges)
 
 
 class VIEW3D_PT_batch_export_stl_main(bpy.types.Panel):
@@ -3614,6 +3651,7 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
             child_col.label(text="  • Folder/tag fields list upstream names that fit the current branch", icon=ICONS['DIR'])
             child_col.label(text="  • Blue bar: block and children merge (hover for sources)", icon=ICONS['MERGE'])
             child_col.label(text="  • Red bar: names never exist together, block never applies", icon=ICONS['ERROR'])
+            child_col.label(text="  • Collapsed table: inputs only, a merging group / node shows at the row start", icon=ICONS['RIGHT'])
             box_col.separator()
 
             box_col.label(text="Tree View & Output Console:", icon=ICONS['TREE'])
@@ -3901,7 +3939,10 @@ def register():
     WM = bpy.types.WindowManager
     WM.batch_stl_jobs = bpy.props.CollectionProperty(type=BatchSTLJob)
     WM.batch_stl_verbose_console = bpy.props.BoolProperty(name="Verbose Console Output", default=False)
-    for prop in UI_OPEN_PROPS: setattr(WM, prop, bpy.props.BoolProperty(default=True))
+    for prop in UI_OPEN_PROPS:
+        setattr(WM, prop, bpy.props.BoolProperty(name="Show Node Groups & Nodes", default=True, description=(
+            "Show the node group and node rows. Collapsed, only the inputs and their values are listed, "
+            "and an input whose node group or node merges into an upstream branch shows the merge icon at its row start")))
     WM.batch_stl_ui_tips = bpy.props.BoolProperty(default=False)
     WM.batch_stl_collapsed_dirs = bpy.props.StringProperty(default="[]")
     WM.batch_stl_info_tab = bpy.props.EnumProperty(items=[('LOG', "Console Log", "", ICONS['CONSOLE'], 0), ('TREE', "Tree View", "", ICONS['TREE'], 1)], name="Info Tab", default='LOG', update=lambda s, c: mark_dirty())

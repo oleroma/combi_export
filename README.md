@@ -58,6 +58,7 @@ Generate variant permutations across any socket:
 * **Instant Deletion:** Emptying a Node Group, Node, Input, or Value field (and submitting) instantly deletes the iteration.
 * **Clear Button (X):** Float, integer and string value fields have an inline clear button that deletes the value (and the input when it was the last value) in a single undo step. Menu and boolean values keep Blender's own clear button.
 * **Validation Check:** Real-time socket validation rejects invalid inputs/nodes and instantly reverts to the last known valid state.
+* **Clear View:** The arrow of an override table that has inputs collapses only its node group and node rows: the inputs and their values stay listed and editable. An input whose node group or node merges shows the merge icon at the start of its row (red when that block never applies); hover it for the merge details.
 
 ### 7. Scoped Live Console & Progress Tracking
 * **Preset-Isolated Logging:** Each export preset tracks its own console log and export duration.
