@@ -12,8 +12,10 @@ import json
 import time
 import contextlib
 import functools
+import itertools
 import math
 import re
+import uuid
 import threading
 import queue
 import subprocess
@@ -54,11 +56,19 @@ STL_DTYPE = np.dtype([
 
 STL_HEADER = b'Batch STL Fast Export' + b'\x00' * 59
 
+MAX_SWEEP_STEPS = 1000
+# Counting variants by enumeration (only needed when values apply to some branches only) stops above this, and so does
+# the tree preview. The export's collision check has no limit.
+COUNT_LIMIT = 5000
+# Temp folders of a crashed export are removed at startup once they are this old; a younger one may belong to an
+# export running in another Blender instance.
+STALE_TEMP_AGE = 24 * 3600
+
 _clipboard = {"preset": None, "collection": None, "nodegroup": None}
 
 _ui_cache = {
     "is_dirty": True,
-    "excluded": {},
+    "live": set(),
     "stats": {"global": {"presets": 0, "cols": 0, "objs": 0, "exp": 0}, "presets": {}, "cols": {}},
     "tree": ({}, set()),
     "preset_metrics": {},
@@ -199,29 +209,21 @@ def is_group_used_by_object(group, obj, override_target):
 def filter_overrides_for_object(overrides, bl_obj):
     return [o for o in overrides if is_group_used_by_object(o.parent_group_ptr, bl_obj, getattr(o, "override_target", "NODE"))]
 
-def is_collection_excluded(context, target_collection):
-    if not target_collection: return True
-    view_layer = getattr(context, "view_layer", None)
-    if not view_layer: return False
-    found_any_visible = False
-    found_any = False
+def live_collection_names(view_layer):
+    """Names of the collections Blender evaluates in `view_layer`: not excluded and not disabled in viewports, and
+    neither are their parents. A collection linked in several places is live if one occurrence is. Objects outside
+    them are not evaluated, so exporting them would write the mesh without its modifiers."""
+    live = set()
+    def traverse(layer_collection):
+        if layer_collection.exclude or layer_collection.collection.hide_viewport: return
+        live.add(layer_collection.collection.name)
+        for child in layer_collection.children: traverse(child)
+    if view_layer: traverse(view_layer.layer_collection)
+    return live
 
-    def traverse(layer_collection, parent_excluded=False):
-        nonlocal found_any_visible, found_any
-        if found_any_visible: return
-        current_excluded = parent_excluded or layer_collection.exclude
-        if layer_collection.collection == target_collection:
-            found_any = True
-            if not current_excluded:
-                found_any_visible = True
-                return
-        for child in layer_collection.children:
-            traverse(child, current_excluded)
-            if found_any_visible: return
-
-    traverse(view_layer.layer_collection)
-    if not found_any: return True
-    return not found_any_visible
+def is_object_live(obj, live):
+    """Whether Blender evaluates `obj` (see live_collection_names); hiding with the eye icon still evaluates."""
+    return not obj.hide_viewport and any(c.name in live for c in obj.users_collection)
 
 def find_interface_input(node_group, socket_name):
     """The node group's interface input socket named `socket_name` (older API: node_group.inputs), or None."""
@@ -241,24 +243,46 @@ def get_modifier_socket_identifier(node_group, socket_name):
 def get_modifier_socket_default(node_group, socket_name):
     return getattr(find_interface_input(node_group, socket_name), "default_value", None)
 
+# Menu items come from scanning node trees, which the panels would otherwise repeat several times per menu value on
+# every redraw. Inside cached_menu_items() the results are reused; node trees cannot change during that scope.
+_menu_items_cache = None
+
+@contextlib.contextmanager
+def cached_menu_items():
+    global _menu_items_cache
+    if _menu_items_cache is not None:  # nested: the outer scope owns the cache
+        yield
+        return
+    _menu_items_cache = {}
+    try: yield
+    finally: _menu_items_cache = None
+
 def get_menu_switch_items(node_group, node_name, input_name):
+    """Item names of the menu behind a menu socket. The returned list may be shared: do not modify it."""
+    if _menu_items_cache is None: return _scan_menu_switch_items(node_group, node_name, input_name)
+    key = (getattr(node_group, "name_full", None), node_name, input_name)
+    items = _menu_items_cache.get(key)
+    if items is None: items = _menu_items_cache[key] = _scan_menu_switch_items(node_group, node_name, input_name)
+    return items
+
+def _scan_menu_switch_items(node_group, node_name, input_name):
     if not node_group: return []
-    is_mod = not node_name or node_name == "<Modifier Interface>"
-    if is_mod and hasattr(node_group, "interface"):
-        for item in node_group.interface.items_tree:
-            if getattr(item, "item_type", "") == 'SOCKET' and item.name == input_name and hasattr(item, "enum_items"):
-                return [getattr(ei, 'identifier', getattr(ei, 'name', '')) for ei in item.enum_items]
+    if not node_name or node_name == "<Modifier Interface>":
+        items = modifier_menu_items(node_group, input_name)
+        return items if items is not None else _linked_menu_switch_items(node_group.nodes, input_name)
+    target_n = node_group.nodes.get(clean_node_name(node_name))
+    if not target_n: return []
+    if target_n.type == 'MENU_SWITCH' and hasattr(target_n, 'enum_items'):
+        return [getattr(item, 'identifier', getattr(item, 'name', '')) for item in target_n.enum_items]
+    sock = target_n.inputs.get(input_name)
+    items = socket_menu_items(target_n, sock) if sock else None
+    if items is None and target_n.type == 'GROUP' and getattr(target_n, 'node_tree', None):
+        items = _linked_menu_switch_items(target_n.node_tree.nodes, input_name)
+    return items or []
 
-    nodes_to_search = node_group.nodes if is_mod else []
-    if not nodes_to_search and node_name:
-        target_n = node_group.nodes.get(clean_node_name(node_name))
-        if target_n:
-            if target_n.type == 'MENU_SWITCH' and hasattr(target_n, 'enum_items'):
-                return [getattr(item, 'identifier', getattr(item, 'name', '')) for item in target_n.enum_items]
-            elif target_n.type == 'GROUP' and hasattr(target_n, 'node_tree') and target_n.node_tree:
-                nodes_to_search = target_n.node_tree.nodes
-
-    for node in nodes_to_search:
+def _linked_menu_switch_items(nodes, input_name):
+    """Items of a Menu Switch fed directly by the group input `input_name` (no reroutes, no nested groups)."""
+    for node in nodes:
         if node.type == 'MENU_SWITCH' and hasattr(node, 'enum_items'):
             for sock in node.inputs:
                 for link in sock.links:
@@ -266,45 +290,49 @@ def get_menu_switch_items(node_group, node_name, input_name):
                         return [getattr(item, 'identifier', getattr(item, 'name', '')) for item in node.enum_items]
     return []
 
-def get_modifier_input(mod, ident):
-    try:
-        if mod.is_property_set(ident): return mod[ident], True
-    except Exception: pass
+def modifier_menu_items(node_group, input_name):
+    """Items of a menu on the modifier interface, read from a modifier that uses the group: the interface socket does
+    not list them, the modifier input does (also through reroutes and nested groups). None when no object uses it."""
+    ident = get_modifier_socket_identifier(node_group, input_name)
+    if not ident: return None
+    for obj in bpy.data.objects:
+        for mod in obj.modifiers:
+            if mod.type == 'NODES' and mod.node_group == node_group:
+                prop_input = modifier_input(mod, ident)
+                if prop_input is not None:
+                    return [e.identifier for e in prop_input.bl_rna.properties["value"].enum_items]
+    return None
 
-    if hasattr(mod, "properties") and hasattr(mod.properties, "inputs"):
-        prop_input = getattr(mod.properties.inputs, ident, None)
-        if prop_input is not None and hasattr(prop_input, "value"):
-            return prop_input.value, True
-    return None, False
+# Last items found per node menu socket, for draw code (see socket_menu_items).
+_socket_menu_memo = {}
+
+def socket_menu_items(node, sock):
+    """Items of a node's menu socket (built-in nodes, group nodes). Blender has no API that lists them, but assigning
+    an unknown name is rejected, without changing anything, by an error that lists them. Draw code may not write
+    data, so it gets the last list found (the UI cache rebuild refreshes it), or None."""
+    if sock.type != 'MENU': return None
+    key = (node.id_data.name_full, node.name, sock.identifier)
+    try: sock.default_value = "\x01"
+    except TypeError as e:
+        listed = re.search(r"not found in \((.*)\)\s*$", str(e))
+        if listed:
+            items = _socket_menu_memo[key] = re.findall(r"'([^']*)'", listed.group(1))
+            return items
+    except (AttributeError, RuntimeError): pass  # drawing, or linked (read-only) data
+    return _socket_menu_memo.get(key)
+
+def modifier_input(mod, ident):
+    """The input struct of a Geometry Nodes modifier for a group socket identifier (`.value` holds the value)."""
+    inputs = getattr(getattr(mod, "properties", None), "inputs", None)
+    return getattr(inputs, ident, None) if inputs is not None else None
+
+def get_modifier_input(mod, ident):
+    prop_input = modifier_input(mod, ident)
+    return prop_input.value if prop_input is not None else None
 
 def set_modifier_input(mod, ident, value):
-    try:
-        mod[ident] = value
-        return
-    except Exception: pass
-    if hasattr(mod, "properties") and hasattr(mod.properties, "inputs"):
-        prop_input = getattr(mod.properties.inputs, ident, None)
-        if prop_input is not None and hasattr(prop_input, "value"):
-            prop_input.value = value
-
-def unset_modifier_input(mod, ident, default_val):
-    try:
-        mod.property_unset(ident)
-        return
-    except Exception: pass
-    try:
-        del mod[ident]
-        return
-    except Exception: pass
-    if default_val is not None:
-        try:
-            mod[ident] = default_val
-            return
-        except Exception: pass
-    if hasattr(mod, "properties") and hasattr(mod.properties, "inputs"):
-        prop_input = getattr(mod.properties.inputs, ident, None)
-        if prop_input is not None and hasattr(prop_input, "value") and default_val is not None:
-            prop_input.value = default_val
+    prop_input = modifier_input(mod, ident)
+    if prop_input is not None: prop_input.value = value
 
 def get_input_value(inp):
     if inp.override_type == 'BOOLEAN': return inp.value_menu.lower() == 'true'
@@ -466,7 +494,7 @@ def parse_sweep_values(ovr, inp):
 
         try: count = int(count_str)
         except ValueError: count = 2
-        count = min(count, 1000)
+        count = min(count, MAX_SWEEP_STEPS)  # validation flags larger counts; this only guards imported data
 
         if count <= 0:
             vals.append(round(start, 8) if is_float else int(start))
@@ -496,12 +524,69 @@ def _build_override_pools(overrides):
         if value_groups: pools.append(list(value_groups.values()))
     return pools
 
-def count_override_combinations(overrides):
-    count = 0
-    for _ in generate_override_combinations(overrides):
-        count += 1
-        if count > 5000: return count
+def count_override_combinations(overrides, cache=None, limit=COUNT_LIMIT):
+    """Number of variants. When no value can fall outside a branch, every combination of values is a variant and the
+    count is the product of the parameter pool sizes. Otherwise the variants are enumerated, which stops above `limit`
+    (the result is then limit + 1; None counts them all). With `cache` (a dict), objects with the same overrides are
+    counted once."""
+    sig = None
+    if cache is not None:
+        sig = get_override_signature(overrides)
+        if sig in cache: return cache[sig]
+    known_before = _known_branch_dirs(overrides)
+    if _has_branch_anchors(overrides, known_before):
+        count = 0
+        for _ in generate_named_combinations(overrides, known_before):
+            count += 1
+            if limit is not None and count > limit: break
+    else:
+        count = math.prod(len(pool) for pool in _build_override_pools(overrides))
+    if cache is not None: cache[sig] = count
     return count
+
+def _has_branch_anchors(overrides, known_before):
+    """Whether a block or an explicitly named value names a branch name created above it. Only then can a value be
+    inactive in some branches (see walk_override_branch)."""
+    for ovr in overrides:
+        known = known_before.get(id(ovr), frozenset())
+        block_dirs, block_tags = _block_name_parts(ovr)
+        if any(("dir", n) in known for n in block_dirs) or any(("tag", n) in known for n in block_tags): return True
+        for inp in ovr.inputs:
+            known_inp = known_before.get((id(ovr), inp.input_name), known)
+            if is_explicit_name(inp.dir_tag) and any(("dir", n) in known_inp for n in value_dir_names(ovr, inp)): return True
+            if is_explicit_name(inp.tag) and any(("tag", n) in known_inp for n in value_tag_names(ovr, inp)): return True
+    return False
+
+# The walker runs once or more per variant, so what it derives from an override or a pool value (which never change
+# during a generation) is cached on the MockOverride / MockInput.
+def _cached(obj, attr, compute):
+    value = obj.__dict__.get(attr)
+    if value is None: value = obj.__dict__[attr] = compute()
+    return value
+
+def _block_name_parts(ovr):
+    """(folder names, filename tokens) of an override's node group and node sub-folders and tags."""
+    return _cached(ovr, "_block_parts", lambda: (
+        split_path_parts(ovr.ng_sub_path) + split_path_parts(ovr.node_sub_path),
+        split_tag_parts(ovr.ng_tag) + split_tag_parts(ovr.node_tag)))
+
+def _input_names(ovr):
+    return _cached(ovr, "_input_names", lambda: list(dict.fromkeys(i.input_name for i in ovr.inputs)))
+
+def _param_key(ovr, input_name):
+    keys = _cached(ovr, "_param_keys", dict)
+    key = keys.get(input_name)
+    if key is None: key = keys[input_name] = override_param_key(ovr, input_name)
+    return key
+
+def _value_name_parts(inp):
+    """(folder names, filename tokens) one pool value contributes."""
+    def compute():
+        val = get_input_value(inp)
+        dirs = split_path_parts(value_dir_label(val, inp.dir_tag).strip(" .")) if inp.use_dir else []
+        token = value_dir_label(val, inp.tag) if inp.use_tag else ""
+        return dirs, [token] if token else []
+    return _cached(inp, "_name_parts", compute)
 
 def value_dir_label(val, tag):
     """Name a value contributes to a filename or folder (tag rules applied, made filesystem-safe)."""
@@ -522,6 +607,12 @@ def value_tag_names(ovr, inp):
     if not getattr(inp, "use_tag", False): return []
     vals = parse_sweep_values(ovr, inp) if getattr(inp, "use_sweep", False) else [get_input_value(inp)]
     return [t for t in (value_dir_label(val, getattr(inp, "tag", "")) for val in vals) if t]
+
+def is_explicit_name(field):
+    """A value folder / tag field that names the folder or token outright ('tag', the replace rule) can anchor into an
+    existing branch. Names derived from the value itself ('', '_tag', 'tag_') are always new: two independent inputs
+    that happen to share a value (1, True, a menu item) must multiply, not merge into each other."""
+    return bool(field) and not field.startswith("_") and not field.endswith("_")
 
 def split_tag_parts(text):
     """Split a literal tag field into filename tokens: '/' separates tokens, edge spaces and '_' are dropped."""
@@ -589,26 +680,27 @@ def walk_override_branch(overrides, combo, known_before=None):
         level = getattr(ovr, "level", "NONE")
         known = known_before.get(id(ovr), frozenset())
 
-        new_dirs = _place_dir_parts(split_path_parts(getattr(ovr, "ng_sub_path", "")) + split_path_parts(getattr(ovr, "node_sub_path", "")), dir_branch, known, "dir")
-        new_tags = _place_dir_parts(split_tag_parts(getattr(ovr, "ng_tag", "")) + split_tag_parts(getattr(ovr, "node_tag", "")), tag_branch, known, "tag")
+        block_dirs, block_tags = _block_name_parts(ovr)
+        new_dirs = _place_dir_parts(block_dirs, dir_branch, known, "dir")
+        new_tags = _place_dir_parts(block_tags, tag_branch, known, "tag")
         if new_dirs is None or new_tags is None: continue
         dir_branch.extend(new_dirs); paths_by_level[level].extend(new_dirs)
         tag_branch.extend(new_tags); tags_by_level[level].extend(new_tags)
 
-        ovr_chosen = chosen.get(id(ovr), {})
-        for input_name in dict.fromkeys(getattr(i, "input_name", "") for i in ovr.inputs):
+        ovr_chosen = chosen.get(id(ovr))
+        if not ovr_chosen: continue
+        for input_name in _input_names(ovr):
             inp = ovr_chosen.get(input_name)
             if inp is None: continue
             known_inp = known_before.get((id(ovr), input_name), known)
-            val = get_input_value(inp)
-            dir_parts = split_path_parts(value_dir_label(val, getattr(inp, "dir_tag", "")).strip(" .")) if getattr(inp, "use_dir", False) else []
-            token = value_dir_label(val, getattr(inp, "tag", "")) if getattr(inp, "use_tag", False) else ""
-            new_dirs = _place_dir_parts(dir_parts, dir_branch, known_inp, "dir")
-            new_tags = _place_dir_parts([token] if token else [], tag_branch, known_inp, "tag")
+            dir_parts, tag_parts = _value_name_parts(inp)
+            # Only explicitly named folders / tokens anchor; names derived from the value are always new
+            new_dirs = _place_dir_parts(dir_parts, dir_branch, known_inp, "dir") if is_explicit_name(inp.dir_tag) else dir_parts
+            new_tags = _place_dir_parts(tag_parts, tag_branch, known_inp, "tag") if is_explicit_name(inp.tag) else tag_parts
             if new_dirs is None or new_tags is None: continue
             active.add(id(inp))
 
-            param_key = override_param_key(ovr, input_name)
+            param_key = _param_key(ovr, input_name)
             if param_key in processed_params: continue
             processed_params.add(param_key)
             dir_branch.extend(new_dirs); paths_by_level[level].extend(new_dirs)
@@ -616,29 +708,36 @@ def walk_override_branch(overrides, combo, known_before=None):
 
     return active, tags_by_level, paths_by_level
 
-def generate_override_combinations(overrides):
+def generate_named_combinations(overrides, known_before=None):
+    """Yield (combo, tags_by_level, paths_by_level) for every variant. The naming comes from the same walk that decides
+    which values are active, so it costs nothing extra."""
+    if known_before is None: known_before = _known_branch_dirs(overrides)
     pools = _build_override_pools(overrides)
     if not pools:
-        yield []
+        _, tags_by_level, paths_by_level = walk_override_branch(overrides, [], known_before)
+        yield [], tags_by_level, paths_by_level
         return
-    known_before = _known_branch_dirs(overrides)
+    # Without anchors every value applies to every branch: no pruning walks, and every combination is unique.
+    anchors = _has_branch_anchors(overrides, known_before)
     seen = set()
 
     def recurse(pool_idx, combo):
         if pool_idx == len(pools):
-            active = walk_override_branch(overrides, combo, known_before)[0]
+            active, tags_by_level, paths_by_level = walk_override_branch(overrides, combo, known_before)
+            if not anchors:
+                yield combo, tags_by_level, paths_by_level
+                return
             final = [(o, i) for o, i in combo if id(i) in active]
             key = tuple((id(o), getattr(i, "input_name", ""), repr(get_input_value(i))) for o, i in final)
             if key not in seen:
                 seen.add(key)
-                yield final
+                yield final, tags_by_level, paths_by_level
             return
 
         any_active = False
         for variation in pools[pool_idx]:
             trial = combo + variation
-            active = walk_override_branch(overrides, trial, known_before)[0]
-            if any(id(i) in active for _, i in variation):
+            if not anchors or any(id(i) in walk_override_branch(overrides, trial, known_before)[0] for _, i in variation):
                 any_active = True
                 yield from recurse(pool_idx + 1, trial)
         if not any_active:
@@ -677,27 +776,24 @@ def capture_baseline_states(overrides, target_objects):
             for inp in ovr.inputs:
                 ident = get_modifier_socket_identifier(ovr.parent_group_ptr, inp.input_name)
                 if not ident: continue
-                default_val = get_modifier_socket_default(ovr.parent_group_ptr, inp.input_name)
                 for obj in target_objects:
                     for mod in obj.modifiers:
                         if mod.type == 'NODES' and mod.node_group == ovr.parent_group_ptr:
                             key = (obj.name, mod.name, ident)
-                            if key not in processed_mod_sockets:
-                                orig_val, is_set = get_modifier_input(mod, ident)
-                                if hasattr(orig_val, "copy"):
-                                    orig_val = orig_val.copy()
-                                mod_states.append((mod, ident, is_set, orig_val, default_val))
+                            orig_val = get_modifier_input(mod, ident)
+                            if key not in processed_mod_sockets and orig_val is not None:
+                                mod_states.append((mod, ident, orig_val))
                                 processed_mod_sockets.add(key)
     return global_states, mod_states
 
-def menu_value_for_modifier(mod, ident, group, node_name, input_name, value):
-    """Menu inputs can be stored on the modifier as an item number instead of the item name."""
-    current, is_set = get_modifier_input(mod, ident)
-    if not is_set: current = get_modifier_socket_default(group, input_name)
-    if isinstance(current, int) and not isinstance(current, bool):
-        items = get_menu_switch_items(group, node_name, input_name)
-        if value in items: return items.index(value)
-    return value
+_reported_failures = set()
+
+def report_apply_failure(target, input_name, value, error):
+    """Log a value Blender rejects (e.g. a menu item that no longer exists) once instead of exporting silently."""
+    msg = f"WARNING: could not set {target} > {input_name} to {value!r} ({error}); the file keeps its current value"
+    if msg not in _reported_failures:
+        _reported_failures.add(msg)
+        print(msg, flush=True)
 
 def apply_overrides(overrides, target_objects):
     trees_to_update, objects_to_update = set(), set()
@@ -716,7 +812,7 @@ def apply_overrides(overrides, target_objects):
                         if socket.default_value != val:
                             socket.default_value = val
                             trees_to_update.add(parent_tree)
-                    except (TypeError, ValueError): pass
+                    except (TypeError, ValueError) as e: report_apply_failure(f"{parent_tree.name} > {target_node.name}", inp.input_name, val, e)
 
         elif override.override_target == 'MODIFIER' and override.parent_group_ptr:
             for inp in override.inputs:
@@ -725,33 +821,37 @@ def apply_overrides(overrides, target_objects):
                 if not ident or val is None: continue
                 for obj in target_objects:
                     for mod in obj.modifiers:
-                        if mod.type == 'NODES' and mod.node_group == override.parent_group_ptr:
-                            mod_val = val
-                            if inp.override_type == 'MENU':
-                                mod_val = menu_value_for_modifier(mod, ident, override.parent_group_ptr, override.node_name, inp.input_name, val)
-                            orig_val, is_set = get_modifier_input(mod, ident)
-                            if not is_set or orig_val != mod_val:
-                                set_modifier_input(mod, ident, mod_val)
-                                objects_to_update.add(obj)
+                        if mod.type == 'NODES' and mod.node_group == override.parent_group_ptr and get_modifier_input(mod, ident) != val:
+                            try: set_modifier_input(mod, ident, val)
+                            except (TypeError, ValueError) as e:
+                                report_apply_failure(f"{obj.name} > {mod.name}", inp.input_name, val, e)
+                                continue
+                            objects_to_update.add(obj)
     for tree in trees_to_update: tree.update_tag()
     # Setting modifier inputs from Python does not reliably re-evaluate the object, so tag it explicitly.
     for obj in objects_to_update: obj.update_tag()
 
-def revert_overrides(global_states, mod_states, target_objects):
-    objects_to_update = set()
-    for mod, ident, is_set, orig_val, default_val in mod_states:
-        try:
-            curr_val, curr_is_set = get_modifier_input(mod, ident)
-            if is_set and orig_val is not None:
-                is_diff = not curr_is_set or (curr_val != orig_val)
-                if hasattr(is_diff, "__iter__"): is_diff = any(is_diff)
-                if is_diff:
-                    set_modifier_input(mod, ident, orig_val)
-                    objects_to_update.add(mod.id_data)
+def override_targets(overrides):
+    """Keys of the sockets an override list writes, matching the baseline states revert_overrides() restores."""
+    keys = set()
+    for ovr in overrides:
+        if not ovr.parent_group_ptr: continue
+        for inp in ovr.inputs:
+            if ovr.override_target == 'NODE':
+                keys.add(('NODE', ovr.parent_group_ptr.name, clean_node_name(ovr.node_name), inp.input_name))
             else:
-                if curr_is_set:
-                    unset_modifier_input(mod, ident, default_val)
-                    objects_to_update.add(mod.id_data)
+                keys.add(('MODIFIER', ovr.parent_group_ptr.name, get_modifier_socket_identifier(ovr.parent_group_ptr, inp.input_name)))
+    return keys
+
+def revert_overrides(global_states, mod_states, target_objects, skip=frozenset()):
+    """Restore the baseline values and links; sockets whose override_targets() key is in `skip` are left alone."""
+    objects_to_update = set()
+    for mod, ident, orig_val in mod_states:
+        try:
+            if skip and ('MODIFIER', mod.node_group.name, ident) in skip: continue
+            if get_modifier_input(mod, ident) != orig_val:
+                set_modifier_input(mod, ident, orig_val)
+                objects_to_update.add(mod.id_data)
         except Exception: pass
     for obj in objects_to_update:
         try: obj.update_tag()
@@ -762,6 +862,7 @@ def revert_overrides(global_states, mod_states, target_objects):
         if state[0] == 'SOCKET':
             _, socket, original_val, link_from, parent_tree = state
             try:
+                if skip and ('NODE', parent_tree.name, socket.node.name, socket.name) in skip: continue
                 is_diff = (socket.default_value != original_val)
                 if hasattr(is_diff, "__iter__"): is_diff = any(is_diff)
                 if is_diff:
@@ -787,17 +888,43 @@ def get_active_collection(preset):
 def get_active_object(collection):
     return collection.objects[collection.object_index] if collection and collection.objects and 0 <= collection.object_index < len(collection.objects) else None
 
-def get_job(preset_index, create=False):
-    """Runtime export state of a preset (keyed by its index). Creating requires an operator context, not a draw call."""
-    jobs = bpy.context.window_manager.batch_stl_jobs
-    scene_name = getattr(bpy.context.scene, "name", "")
-    for job in jobs:
-        if job.preset_index == preset_index and getattr(job, "scene_name", "") == scene_name: return job
-    if not create: return None
-    job = jobs.add()
-    job.preset_index = preset_index
-    if scene_name: job.scene_name = scene_name
+# Export jobs are keyed by the preset's uid and its scene's session_uid: unlike indices, pointers and names, both
+# survive undo, reordering, renaming and switching scenes while an export runs.
+def ensure_preset_uids(scene):
+    """Give every preset of `scene` a unique uid (new presets, older files, duplicated scenes or presets)."""
+    seen = set()
+    for preset in scene.batch_stl_presets:
+        if not preset.uid or preset.uid in seen: preset.uid = uuid.uuid4().hex
+        seen.add(preset.uid)
+
+def find_preset(scene_uid, preset_uid):
+    for scene in bpy.data.scenes:
+        if scene.session_uid == scene_uid:
+            return next((p for p in scene.batch_stl_presets if p.uid == preset_uid), None)
+    return None
+
+def find_job(scene_uid, preset_uid):
+    if not preset_uid: return None
+    for job in bpy.context.window_manager.batch_stl_jobs:
+        if job.preset_uid == preset_uid and job.scene_uid == scene_uid: return job
+    return None
+
+def get_job(preset, create=False):
+    """Runtime export state of a preset. Creating requires an operator context, not a draw call."""
+    if preset is None or not preset.uid: return None
+    scene_uid = preset.id_data.session_uid
+    job = find_job(scene_uid, preset.uid)
+    if job or not create: return job
+    job = bpy.context.window_manager.batch_stl_jobs.add()
+    job.preset_uid, job.scene_uid = preset.uid, scene_uid
     return job
+
+def remove_job(scene_uid, preset_uid):
+    jobs = bpy.context.window_manager.batch_stl_jobs
+    for i, job in enumerate(jobs):
+        if job.preset_uid == preset_uid and job.scene_uid == scene_uid:
+            jobs.remove(i)
+            return
 
 def is_any_exporting():
     return any(job.is_exporting for job in bpy.context.window_manager.batch_stl_jobs)
@@ -817,92 +944,146 @@ def apply_tag(base, tag):
     if tag.endswith("_"): return f"{tag}{base}"
     return tag
 
+def join_name_segments(segments):
+    """Concatenate (names, is_fixed) segments of folders or filename tokens. Fixed segments come from plain fields
+    (preset prefix, collection / object sub-folder or tag) that the override walker does not see, so a fixed name equal
+    to its neighbour collapses into it. Two neighbouring override names stay: the walker already merged what merges,
+    and A=1, B=1 must give 1/1, not 1."""
+    out, out_fixed = [], []
+    for names, fixed in segments:
+        for n in names:
+            if out and out[-1] == n and (fixed or out_fixed[-1]): continue
+            out.append(n); out_fixed.append(fixed)
+    return out
+
 def format_export_filename(bl_obj_name, obj_tag, col_use_tag, col_tag, tags_by_level=None):
     """Object name followed by every filename token in hierarchy order:
     Global overrides, Preset overrides, Collection tag, Collection overrides, Object tag, Object overrides."""
     if tags_by_level is None: tags_by_level = {}
-    raw = (
-        tags_by_level.get("GLOBAL", []) +
-        tags_by_level.get("PRESET", []) +
-        (split_tag_parts(col_tag) if col_use_tag else []) +
-        tags_by_level.get("COLLECTION", []) +
-        split_tag_parts(obj_tag) +
-        tags_by_level.get("OBJECT", []) +
-        tags_by_level.get("NONE", [])
-    )
-    tokens = []
-    for t in raw:
-        if not tokens or tokens[-1] != t: tokens.append(t)
+    tokens = join_name_segments([
+        (tags_by_level.get("GLOBAL", []), False),
+        (tags_by_level.get("PRESET", []), False),
+        (split_tag_parts(col_tag) if col_use_tag else [], True),
+        (tags_by_level.get("COLLECTION", []), False),
+        (split_tag_parts(obj_tag), True),
+        (tags_by_level.get("OBJECT", []), False),
+        (tags_by_level.get("NONE", []), False),
+    ])
     safe_name = sanitize_name(bl_obj_name).strip(" .")
     return safe_name + "".join(f"_{t}" for t in tokens) + ".stl"
 
 def build_export_dir_parts(preset_prefix, col_sub_path, obj_sub_path, paths_by_level=None):
     if paths_by_level is None: paths_by_level = {}
-    c_parts = split_path_parts(col_sub_path)
-    o_parts = split_path_parts(obj_sub_path)
-    p_prefix = split_path_parts(preset_prefix)
-
-    raw_parts = (
-        paths_by_level.get("GLOBAL", []) +
-        p_prefix +
-        paths_by_level.get("PRESET", []) +
-        c_parts +
-        paths_by_level.get("COLLECTION", []) +
-        o_parts +
-        paths_by_level.get("OBJECT", []) +
-        paths_by_level.get("NONE", [])
-    )
-
-    final_parts = []
-    for part in raw_parts:
-        if not final_parts or final_parts[-1] != part:
-            final_parts.append(part)
-    return final_parts
-
-def evaluate_combo_naming(combo, all_overrides=None):
-    source_overrides = all_overrides if all_overrides else list(dict.fromkeys(c_ovr for c_ovr, _ in combo))
-    _, tags_by_level, paths_by_level = walk_override_branch(source_overrides, combo)
-    return tags_by_level, paths_by_level
+    return join_name_segments([
+        (paths_by_level.get("GLOBAL", []), False),
+        (split_path_parts(preset_prefix), True),
+        (paths_by_level.get("PRESET", []), False),
+        (split_path_parts(col_sub_path), True),
+        (paths_by_level.get("COLLECTION", []), False),
+        (split_path_parts(obj_sub_path), True),
+        (paths_by_level.get("OBJECT", []), False),
+        (paths_by_level.get("NONE", []), False),
+    ])
 
 def sync_collection_objects(col_prop, col_ptr=None):
+    """Match the object entries of a mapped collection to its objects: drop entries of objects that left, add entries
+    for new ones (in the collection's order) and follow renames, so a renamed object keeps its settings."""
     if not col_ptr: col_ptr = bpy.data.collections.get(col_prop.collection_name)
     if not col_ptr: return
 
     # A list (not a set) keeps new objects in the collection's own order.
     actual_objs = [obj for obj in col_ptr.all_objects if obj.type in SUPPORTED_OBJECT_TYPES]
-    actual_names = [obj.name for obj in actual_objs]
-    actual_set = set(actual_names)
+    by_name = {obj.name: obj for obj in actual_objs}
+    by_uid = {obj.session_uid: obj for obj in actual_objs}
+    entry_names = {entry.name for entry in col_prop.objects}
 
-    # First pass: try to detect renamed objects using the pointer
-    for obj_prop in col_prop.objects:
-        if obj_prop.obj_ptr and obj_prop.obj_ptr.name != obj_prop.name:
-            if obj_prop.obj_ptr.name in actual_set:
-                obj_prop.name = obj_prop.obj_ptr.name
+    # Entries remember their object's session_uid; an ID pointer would add a user to the object, so deleting the
+    # object would only unlink it. An entry whose name is gone follows the uid to the renamed object. Otherwise the name
+    # wins: uids change when a file is loaded (restamp_object_uids() refreshes them) and can be stale in appended data.
+    orphans = []
+    for entry in col_prop.objects:
+        obj = by_name.get(entry.name)
+        if obj is None:
+            obj = by_uid.get(entry.obj_uid) if entry.obj_uid else None
+            if obj is None or obj.name in entry_names:
+                orphans.append(entry)
+                continue
+            entry.name = obj.name
+            entry_names.add(obj.name)
+        if entry.obj_uid != obj.session_uid: entry.obj_uid = obj.session_uid
 
-    existing_names = {obj.name for obj in col_prop.objects}
-    missing_names = actual_set - existing_names
-    removed_names = existing_names - actual_set
-
-    if len(missing_names) == 1 and len(removed_names) == 1:
-        old_name = removed_names.pop()
-        new_name = missing_names.pop()
-        for obj_prop in col_prop.objects:
-            if obj_prop.name == old_name:
-                obj_prop.name = new_name
-                if col_ptr.all_objects.get(new_name):
-                    obj_prop.obj_ptr = col_ptr.all_objects.get(new_name)
-                break
-        existing_names = {obj.name for obj in col_prop.objects}
+    # A rename the uid cannot follow (made while the add-on was off): one entry lost its object, which no longer exists,
+    # and one object has no entry.
+    new_objs = [obj for obj in actual_objs if obj.name not in entry_names]
+    if len(orphans) == 1 and len(new_objs) == 1:
+        entry, obj = orphans[0], new_objs[0]
+        if not entry.obj_uid or not any(o.session_uid == entry.obj_uid for o in bpy.data.objects):
+            entry.name, entry.obj_uid = obj.name, obj.session_uid
+            entry_names.add(obj.name)
 
     for i in reversed(range(len(col_prop.objects))):
-        if col_prop.objects[i].name not in actual_set: col_prop.objects.remove(i)
+        if col_prop.objects[i].name not in by_name: col_prop.objects.remove(i)
 
-    for name in actual_names:
-        if name not in existing_names:
-            new_obj = col_prop.objects.add()
-            new_obj.name = name
-            new_obj.export = True
-            new_obj.obj_ptr = col_ptr.all_objects.get(name)
+    for obj in actual_objs:
+        if obj.name not in entry_names:
+            entry = col_prop.objects.add()
+            entry.name = obj.name  # `export` defaults to True; setting it would mark the cache dirty again
+            entry.obj_uid = obj.session_uid
+
+def restamp_object_uids(scene):
+    """Session uids change when a file is loaded: point the object entries at their objects again, by name."""
+    for preset in scene.batch_stl_presets:
+        for col in preset.collections:
+            col_ptr = bpy.data.collections.get(col.collection_name)
+            for entry in col.objects:
+                obj = col_ptr.all_objects.get(entry.name) if col_ptr else None
+                uid = obj.session_uid if obj else 0
+                if entry.obj_uid != uid: entry.obj_uid = uid
+
+# --- EXPORT TARGETS ---
+def export_file_parts(preset, c, obj_prop, bl_obj, tags_by_level=None, paths_by_level=None):
+    """(folder names below the root, filename) of one exported file."""
+    return (build_export_dir_parts(preset.preset_prefix, c.sub_path, obj_prop.sub_path, paths_by_level),
+            format_export_filename(bl_obj.name, obj_prop.tag, c.use_tag, c.tag, tags_by_level))
+
+def iter_export_objects(scene, preset, live, global_ovrs=None):
+    """(collection index, collection entry, object entry, object, resolved overrides) of every object the preset
+    exports: in a mapped collection that Blender evaluates (`live`, see live_collection_names), marked for export, and
+    evaluated itself. Call sync_collection_objects() first."""
+    if global_ovrs is None: global_ovrs = get_flat_overrides(scene.batch_stl_global_nodegroups, "GLOBAL")
+    preset_ovrs = global_ovrs + get_flat_overrides(preset.nodegroups, "PRESET")
+    for c_idx, c in enumerate(preset.collections):
+        c_ptr = bpy.data.collections.get(c.collection_name)
+        if not c_ptr or c_ptr.name not in live: continue
+        col_ovrs = preset_ovrs + get_flat_overrides(c.nodegroups, "COLLECTION")
+        for obj_prop in c.objects:
+            if not obj_prop.export: continue
+            bl_obj = c_ptr.all_objects.get(obj_prop.name)
+            if not bl_obj or bl_obj.type not in SUPPORTED_OBJECT_TYPES or not is_object_live(bl_obj, live): continue
+            ovrs = resolve_overrides(col_ovrs + get_flat_overrides(obj_prop.nodegroups, "OBJECT"))
+            yield c_idx, c, obj_prop, bl_obj, filter_overrides_for_object(ovrs, bl_obj)
+
+def group_by_signature(export_objects):
+    """{override signature: (overrides, [(collection entry, object entry, object)])}: objects with the same overrides
+    share their variants, which are generated once (and evaluated in one depsgraph pass in the worker)."""
+    batches = {}
+    for _c_idx, c, obj_prop, bl_obj, ovrs in export_objects:
+        batches.setdefault(get_override_signature(ovrs), (ovrs, []))[1].append((c, obj_prop, bl_obj))
+    return batches
+
+def find_export_clashes(scene, preset, live, root):
+    """{clash key: path} of the output paths that more than one file of the preset would be written to. No limit:
+    every collision overwrites a file."""
+    seen, clashes = set(), {}
+    for ovrs, items in group_by_signature(iter_export_objects(scene, preset, live)).values():
+        for _combo, tags_by_level, paths_by_level in generate_named_combinations(ovrs):
+            for c, obj_prop, bl_obj in items:
+                dir_parts, filename = export_file_parts(preset, c, obj_prop, bl_obj, tags_by_level, paths_by_level)
+                path = os.path.join(root, *dir_parts, filename)
+                key = clash_key(path)
+                if key in seen: clashes.setdefault(key, path)
+                else: seen.add(key)
+    return clashes
 
 # --- BINARY STL WRITER ---
 def mesh_to_stl_array(mesh, matrix_world):
@@ -965,9 +1146,12 @@ def collect_instance_arrays(depsgraph, target_objects):
     return result
 
 def write_object_stl(filepath, bl_obj, depsgraph, instance_arrays=()):
-    """Write the evaluated object (plus its pre-collected instances) as one binary STL. Returns the triangle count."""
+    """Write the evaluated object (plus its pre-collected instances) as one binary STL. Returns the triangle count, or
+    None when the depsgraph does not evaluate the object (e.g. its collection is disabled in viewports): its mesh would
+    lack every modifier and override."""
     arrays = []
     obj_eval = bl_obj.evaluated_get(depsgraph)
+    if not obj_eval.is_evaluated: return None
     try: mesh = obj_eval.to_mesh()
     except RuntimeError: mesh = None
     if mesh:
@@ -992,6 +1176,7 @@ def export_object_stl(filepath, bl_obj, depsgraph, instance_arrays=()):
     slicer) is reported instead of aborting the whole export."""
     try: num_tris = write_object_stl(filepath, bl_obj, depsgraph, instance_arrays)
     except OSError as e: return f"FAILED ({e.strerror or e}): {filepath}"
+    if num_tris is None: return f"SKIPPED (not evaluated, disabled in viewports): {filepath}"
     return filepath if num_tris else f"SKIPPED (no geometry): {filepath}"
 
 # --- JSON UTILS ---
@@ -1013,7 +1198,7 @@ def copy_node_to_dict(n):
     return {"name": n.name, "sub_path": getattr(n, "sub_path", ""), "tag": getattr(n, "tag", ""), "inputs": [copy_input_to_dict(i) for i in n.inputs]}
 
 def copy_ng_to_dict(ng):
-    return {"group": ng.group_name, "sub_path": getattr(ng, "sub_path", ""), "tag": getattr(ng, "tag", ""), "nodes": [copy_node_to_dict(n) for n in ng.nodes]}
+    return {"group": ng.group_name, "use_combine": ng.use_combine, "sub_path": getattr(ng, "sub_path", ""), "tag": getattr(ng, "tag", ""), "nodes": [copy_node_to_dict(n) for n in ng.nodes]}
 
 def copy_obj_to_dict(o):
     return {"name": o.name, "export": o.export, "tag": getattr(o, "tag", ""), "sub_path": getattr(o, "sub_path", ""), "nodegroups": [copy_ng_to_dict(ng) for ng in o.nodegroups]}
@@ -1024,21 +1209,40 @@ def copy_collection_to_dict(c):
 def copy_preset_to_dict(src):
     return {"name": src.name, "preset_prefix": src.preset_prefix, "collections": [copy_collection_to_dict(c) for c in src.collections], "nodegroups": [copy_ng_to_dict(ng) for ng in src.nodegroups]}
 
-def paste_val_from_dict(new_v, data):
+# v1.0.0 kept numbers and booleans in typed fields, with typed sweep fields; they are all text now.
+LEGACY_VALUE_KEYS = ("value_bool", "value_int", "value_float", "sweep_start_float", "sweep_step_float", "sweep_count_float",
+                     "sweep_start_int", "sweep_step_int", "sweep_count_int")
+
+def legacy_number_text(value, kind):
+    return str(int(value)) if kind == "int" else f"{float(value):.7g}"
+
+def migrate_legacy_value(v, legacy, override_type, fill_defaults=False):
+    """Move a value's v1.0.0 typed fields (read with `legacy(key)`, None when absent) into the text fields of its input
+    type. With `fill_defaults` a missing typed value gets its old default: .blend files do not store unedited fields."""
+    kind = "int" if override_type == 'INT' else "float"
+    if override_type in ('INT', 'FLOAT') and not v.value_string:
+        old = legacy(f"value_{kind}")
+        if old is None and fill_defaults: old = 0
+        if old is not None: v.value_string = legacy_number_text(old, kind)
+    elif override_type == 'BOOLEAN' and not v.value_menu:
+        old = legacy("value_bool")
+        if old is None and fill_defaults: old = True
+        if old is not None: v.value_menu = str(bool(old))
+    for field in ("start", "step", "count"):
+        old = legacy(f"sweep_{field}_{kind}")
+        if old is not None: setattr(v, f"sweep_{field}", legacy_number_text(old, "int" if field == "count" else kind))
+
+def paste_val_from_dict(new_v, data, override_type='FLOAT'):
     for k, v in data.items():
         if hasattr(new_v, k): setattr(new_v, k, v)
     # Presets saved before the split used one tag for both the filename and the folder
     if "dir_tag" not in data: new_v.dir_tag = data.get("tag", "")
-    # Migrate legacy properties to value_string
-    if not new_v.value_string:
-        if "value_float" in data: new_v.value_string = str(data["value_float"])
-        elif "value_int" in data: new_v.value_string = str(data["value_int"])
-        elif "value_bool" in data: new_v.value_string = str(data["value_bool"])
+    migrate_legacy_value(new_v, data.get, override_type)
 
 def paste_input_from_dict(new_i, data):
     new_i.name = data["name"]
     new_i.override_type = data.get("override_type", 'FLOAT')
-    for v_data in data.get("values", []): paste_val_from_dict(new_i.values.add(), v_data)
+    for v_data in data.get("values", []): paste_val_from_dict(new_i.values.add(), v_data, new_i.override_type)
 
 def paste_node_from_dict(new_n, data):
     new_n.name = data.get("name", "")
@@ -1054,6 +1258,7 @@ def paste_ng_from_dict(ng_list, data):
     with raw_edits():
         new_ng = ng_list.add()
         new_ng.group_name = group
+        new_ng.use_combine = data.get("use_combine", False)
         new_ng.sub_path = data.get("sub_path", "")
         new_ng.tag = data.get("tag", "")
         for n_data in data.get("nodes", []): paste_node_from_dict(new_ng.nodes.add(), n_data)
@@ -1112,7 +1317,7 @@ def is_override_val_valid(inp, val, ng_ptr=None, node=None):
             try:
                 parse(val.sweep_start)
                 parse(val.sweep_step)
-                return int(getattr(val, "sweep_count", "2")) >= 1
+                return 1 <= int(getattr(val, "sweep_count", "2")) <= MAX_SWEEP_STEPS
             except ValueError: return False
         elif inp.override_type == 'STRING':
             return bool(val.sweep_range and val.sweep_range.strip())
@@ -1194,93 +1399,75 @@ def rebuild_ui_cache_if_dirty():
     _ui_cache["is_dirty"] = False
 
     try:
-        context = bpy.context
-        if not hasattr(context, "scene") or not context.scene:
-            _ui_cache["is_dirty"] = True
-            return 0.1
-
-        scene = context.scene
-        _ui_cache["objects_state"] = mapped_objects_state(scene)
-
-        gho, ghp = check_ng_for_overrides(scene.batch_stl_global_nodegroups)
-        preset_metrics = {}
-        for p_idx, p in enumerate(scene.batch_stl_presets):
-            ho, hp = _get_preset_status(scene, p, gho, ghp)
-            preset_metrics[p_idx] = {"has_ovr": ho, "has_perm": hp}
-        _ui_cache["preset_metrics"] = preset_metrics
-
-        # {collection name: excluded}; a collection linked in several places is excluded only if every occurrence is,
-        # and one missing from the view layer counts as excluded (look it up with .get(name, True)).
-        excluded = {}
-        if hasattr(context, "view_layer") and context.view_layer:
-            def traverse(layer_collection, parent_excluded=False):
-                current_excluded = parent_excluded or layer_collection.exclude
-                if layer_collection.collection:
-                    cname = layer_collection.collection.name
-                    excluded[cname] = excluded.get(cname, True) and current_excluded
-                for child in layer_collection.children: traverse(child, current_excluded)
-            traverse(context.view_layer.layer_collection)
-        _ui_cache["excluded"] = excluded
-
-        preset = get_active_preset(scene)
-        total_presets = len(scene.batch_stl_presets)
-        g_cols, g_objs, g_exp = 0, 0, 0
-        preset_stats, col_stats = {}, {}
-
-        global_ovrs = get_flat_overrides(scene.batch_stl_global_nodegroups, "GLOBAL")
-
-        for p_idx, p in enumerate(scene.batch_stl_presets):
-            p_cols, p_objs, p_exp = len(p.collections), 0, 0
-            preset_ovrs = global_ovrs + get_flat_overrides(p.nodegroups, "PRESET")
-
-            for c_idx, c in enumerate(p.collections):
-                c_ptr = bpy.data.collections.get(c.collection_name)
-                sync_collection_objects(c, c_ptr)
-                c_objs, c_exp = 0, 0
-
-                if c_ptr and not excluded.get(c.collection_name, True):
-                    c_pinned_ovrs = preset_ovrs + get_flat_overrides(c.nodegroups, "COLLECTION")
-                    for obj_prop in c.objects:
-                        if not obj_prop.export: continue
-                        bl_obj = c_ptr.all_objects.get(obj_prop.name)
-                        if bl_obj and bl_obj.type in SUPPORTED_OBJECT_TYPES and not bl_obj.hide_viewport:
-                            c_objs += 1
-                            p_objs += 1
-                            obj_ovrs = resolve_overrides(c_pinned_ovrs + get_flat_overrides(obj_prop.nodegroups, "OBJECT"))
-                            obj_ovrs = filter_overrides_for_object(obj_ovrs, bl_obj)
-                            c_exp += count_override_combinations(obj_ovrs)
-
-                p_exp += c_exp
-                col_stats[(p_idx, c_idx)] = {"objs": c_objs, "exp": c_exp}
-
-            g_cols += p_cols; g_objs += p_objs; g_exp += p_exp
-            preset_stats[p_idx] = {"cols": p_cols, "objs": p_objs, "exp": p_exp}
-
-        _ui_cache["stats"] = {"global": {"presets": total_presets, "cols": g_cols, "objs": g_objs, "exp": g_exp}, "presets": preset_stats, "cols": col_stats}
-
-        info_tab = getattr(scene, "batch_stl_info_tab", 'LOG')
-
-        if info_tab != 'TREE':
-            redraw_sidebars(context)
-            return 0.1
-
-        is_global = getattr(scene, "batch_stl_info_global", False)
-
-        if not preset and not is_global:
-            _ui_cache["tree"] = ({}, set())
-        else:
-            _ui_cache["tree"] = build_tree_dict(context, excluded, is_global)
-
-        redraw_sidebars(context)
-        return 0.1
+        with cached_menu_items(): return _rebuild_ui_cache()
     except Exception:
         _ui_cache["is_dirty"] = True  # retry, otherwise the UI shows stale data until the next unrelated edit
         try:
-            if bpy.context.scene.batch_stl_verbose_console:
+            if bpy.context.window_manager.batch_stl_verbose_console:
                 traceback.print_exc()
         except Exception:
             pass
         return 0.25
+
+def _rebuild_ui_cache():
+    context = bpy.context
+    if not hasattr(context, "scene") or not context.scene:
+        _ui_cache["is_dirty"] = True
+        return 0.1
+
+    scene, wm = context.scene, context.window_manager
+    stamp_data_version(scene)
+    ensure_preset_uids(scene)
+    refresh_menu_items(scene)
+    _ui_cache["objects_state"] = mapped_objects_state(scene)
+
+    gho, ghp = check_ng_for_overrides(scene.batch_stl_global_nodegroups)
+    preset_metrics = {}
+    for p_idx, p in enumerate(scene.batch_stl_presets):
+        ho, hp = _get_preset_status(scene, p, gho, ghp)
+        preset_metrics[p_idx] = {"has_ovr": ho, "has_perm": hp}
+    _ui_cache["preset_metrics"] = preset_metrics
+
+    live = _ui_cache["live"] = live_collection_names(context.view_layer)
+
+    # "capped": a count stopped at COUNT_LIMIT, so the number is a lower bound
+    g_stats = {"presets": len(scene.batch_stl_presets), "cols": 0, "objs": 0, "exp": 0, "capped": False}
+    preset_stats, col_stats = {}, {}
+    global_ovrs = get_flat_overrides(scene.batch_stl_global_nodegroups, "GLOBAL")
+    count_cache = {}  # objects with identical overrides have the same number of variants
+
+    for p_idx, p in enumerate(scene.batch_stl_presets):
+        for c in p.collections: sync_collection_objects(c)
+        p_stats = preset_stats[p_idx] = {"cols": len(p.collections), "objs": 0, "exp": 0, "capped": False}
+        for c_idx in range(len(p.collections)): col_stats[(p_idx, c_idx)] = {"objs": 0, "exp": 0, "capped": False}
+        for c_idx, _c, _obj_prop, _bl_obj, ovrs in iter_export_objects(scene, p, live, global_ovrs):
+            n = count_override_combinations(ovrs, count_cache)
+            for stats in (col_stats[(p_idx, c_idx)], p_stats, g_stats):
+                stats["objs"] += 1
+                stats["exp"] += min(n, COUNT_LIMIT)
+                stats["capped"] |= n > COUNT_LIMIT
+        g_stats["cols"] += p_stats["cols"]
+
+    _ui_cache["stats"] = {"global": g_stats, "presets": preset_stats, "cols": col_stats}
+
+    if wm.batch_stl_info_tab == 'TREE':
+        preset = get_active_preset(scene)
+        is_global = wm.batch_stl_info_global
+        _ui_cache["tree"] = build_tree_dict(context, live, is_global) if (preset or is_global) else ({}, set())
+
+    redraw_sidebars(context)
+    return 0.1
+
+def refresh_menu_items(scene):
+    """Look up the items of every overridden menu socket outside of drawing: draw code cannot run the lookup of
+    socket_menu_items() and reuses what this finds."""
+    for nodegroups in iter_scene_nodegroup_lists(scene):
+        for ng in nodegroups:
+            ng_ptr = bpy.data.node_groups.get(ng.group_name)
+            if not ng_ptr: continue
+            for node in ng.nodes:
+                for inp in node.inputs:
+                    if inp.override_type == 'MENU': get_menu_switch_items(ng_ptr, node.name, inp.name)
 
 def mapped_objects_state(scene):
     """(collection, object name, hidden) of every supported object in a mapped collection: renaming or hiding one
@@ -1293,17 +1480,13 @@ def mapped_objects_state(scene):
 
 @persistent
 def batch_stl_undo_handler(*args):
+    # A running export carries on: its worker exports from its own copy of the file, and its job is found by preset uid.
     mark_dirty()
-    try:
-        for job in bpy.context.window_manager.batch_stl_jobs:
-            job.cancel_export = True
-    except Exception: pass
 
 @persistent
 def batch_stl_depsgraph_handler(scene, depsgraph):
     if _ui_cache.get("is_dirty", False): return
-    mapped = {c.collection_name for p in scene.batch_stl_presets for c in p.collections if c.collection_name}
-    if not mapped: return
+    if not any(c.collection_name for p in scene.batch_stl_presets for c in p.collections): return
 
     # Objects linked to / unlinked from collections change the object lists, counts and tree.
     if depsgraph.id_type_updated('COLLECTION'):
@@ -1313,89 +1496,59 @@ def batch_stl_depsgraph_handler(scene, depsgraph):
     if not depsgraph.id_type_updated('OBJECT') and not depsgraph.id_type_updated('SCENE'):
         return
 
-    if mapped_objects_state(scene) != _ui_cache.get("objects_state"):
-        mark_dirty()
-        return
-
-    context = bpy.context
-    if not getattr(context, "view_layer", None): return
-
-    # Combined like the cache: a collection linked in several places counts as excluded only if every occurrence is.
-    excluded = {}
-    def traverse(layer_collection, parent_excluded=False):
-        current_excluded = parent_excluded or layer_collection.exclude
-        if layer_collection.collection:
-            cname = layer_collection.collection.name
-            if cname in mapped: excluded[cname] = excluded.get(cname, True) and current_excluded
-        for child in layer_collection.children: traverse(child, current_excluded)
-
-    traverse(context.view_layer.layer_collection)
-    cached = _ui_cache.get("excluded", {})
-    if any(cached.get(name, True) != excluded.get(name, True) for name in mapped):
+    # Renamed or hidden objects; excluded or re-included collections
+    if (mapped_objects_state(scene) != _ui_cache.get("objects_state")
+            or live_collection_names(bpy.context.view_layer) != _ui_cache.get("live")):
         mark_dirty()
 
 # --- TREE VISUALIZER LOGIC ---
-def build_tree_dict(context, excluded_cache=None, is_global=False):
+def build_tree_dict(context, live=None, is_global=False):
+    """Folder tree of the files the active preset (or every preset) writes, and the clash keys of paths written more
+    than once. Stops above COUNT_LIMIT files; the export runs its own collision check without a limit."""
     scene = context.scene
-    root_name = bpy.path.abspath(scene.batch_stl_root_dir) if scene.batch_stl_root_dir else "//"
-    root_name = os.path.normpath(root_name)
+    if live is None: live = live_collection_names(context.view_layer)
+    root_name = os.path.normpath(bpy.path.abspath(scene.batch_stl_root_dir) if scene.batch_stl_root_dir else "//")
     tree, all_filepaths, duplicates = {}, set(), set()
+    file_count = 0
     global_ovrs = get_flat_overrides(scene.batch_stl_global_nodegroups, "GLOBAL")
-    target_presets = scene.batch_stl_presets if is_global else ([get_active_preset(scene)] if get_active_preset(scene) else [])
+    active = get_active_preset(scene)
+    target_presets = scene.batch_stl_presets if is_global else ([active] if active else [])
+    variants_by_sig = {}  # objects with identical overrides share their variants
 
     for preset in target_presets:
-        if not preset: continue
-        preset_ovrs = get_flat_overrides(preset.nodegroups, "PRESET")
+        for _c_idx, c, obj_prop, bl_obj, ovrs in iter_export_objects(scene, preset, live, global_ovrs):
+            sig = get_override_signature(ovrs)
+            variants = variants_by_sig.get(sig)
+            if variants is None:
+                named = itertools.islice(generate_named_combinations(ovrs), COUNT_LIMIT + 1)
+                variants = variants_by_sig[sig] = [(tags, paths) for _combo, tags, paths in named]
+            for tags_by_level, paths_by_level in variants:
+                file_count += 1
+                if file_count > COUNT_LIMIT:
+                    return {root_name: {"_files": [f"Tree preview limited to {COUNT_LIMIT} files (the export still checks every file for collisions)"]}}, set()
+                full_dir_parts, filename = export_file_parts(preset, c, obj_prop, bl_obj, tags_by_level, paths_by_level)
 
-        for c in preset.collections:
-            c_ptr = bpy.data.collections.get(c.collection_name)
-            if not c_ptr: continue
-            if excluded_cache is not None:
-                if excluded_cache.get(c.collection_name, True): continue
-            elif is_collection_excluded(context, c_ptr): continue
+                combo_root = tree
+                for part in full_dir_parts:
+                    combo_root = combo_root.setdefault(part, {})
+                combo_root.setdefault('_files', []).append(filename)
 
-            col_ovrs = get_flat_overrides(c.nodegroups, "COLLECTION")
-
-            for obj_prop in c.objects:
-                if not obj_prop.export: continue
-                bl_obj = c_ptr.all_objects.get(obj_prop.name)
-                if not bl_obj or bl_obj.hide_viewport or bl_obj.type not in SUPPORTED_OBJECT_TYPES: continue
-
-                obj_ovrs = get_flat_overrides(obj_prop.nodegroups, "OBJECT")
-                all_overrides = resolve_overrides(global_ovrs + preset_ovrs + col_ovrs + obj_ovrs)
-                all_overrides = filter_overrides_for_object(all_overrides, bl_obj)
-
-                combo_count = count_override_combinations(all_overrides)
-                if len(all_filepaths) + combo_count > 5000:
-                    return {root_name: {"_files": [f"Tree preview limited (>{5000} files)"]}}, set()
-
-                for combo in generate_override_combinations(all_overrides):
-                    tags_by_level, paths_by_level = evaluate_combo_naming(combo, all_overrides)
-                    full_dir_parts = build_export_dir_parts(preset.preset_prefix, c.sub_path, obj_prop.sub_path, paths_by_level)
-
-                    combo_root = tree
-                    for part in full_dir_parts:
-                        combo_root = combo_root.setdefault(part, {})
-
-                    filename = format_export_filename(bl_obj.name, obj_prop.tag, getattr(c, 'use_tag', False), c.tag, tags_by_level)
-                    combo_root.setdefault('_files', []).append(filename)
-
-                    full_path_key = clash_key(os.path.join(root_name, *full_dir_parts, filename))
-                    if full_path_key in all_filepaths:
-                        duplicates.add(full_path_key)
-                    else:
-                        all_filepaths.add(full_path_key)
+                full_path_key = clash_key(os.path.join(root_name, *full_dir_parts, filename))
+                if full_path_key in all_filepaths:
+                    duplicates.add(full_path_key)
+                else:
+                    all_filepaths.add(full_path_key)
 
     return {root_name: tree}, duplicates
 
-# Expansion state: `batch_stl_collapsed_dirs` stores the directory paths whose state is flipped from the default.
-# The root folder starts expanded and everything below it collapsed.
-def load_toggled_dirs(scene):
-    try: return set(json.loads(scene.batch_stl_collapsed_dirs))
+# Expansion state: `WindowManager.batch_stl_collapsed_dirs` stores the directory paths whose state is flipped from the
+# default. The root folder starts expanded and everything below it collapsed.
+def load_toggled_dirs(wm):
+    try: return set(json.loads(wm.batch_stl_collapsed_dirs))
     except Exception: return set()
 
-def save_toggled_dirs(scene, toggled):
-    scene.batch_stl_collapsed_dirs = json.dumps(sorted(toggled))
+def save_toggled_dirs(wm, toggled):
+    wm.batch_stl_collapsed_dirs = json.dumps(sorted(toggled))
 
 def is_dir_collapsed(toggled, dir_path, is_root):
     return (dir_path in toggled) if is_root else (dir_path not in toggled)
@@ -1422,7 +1575,7 @@ def expand_last_dirs(tree_node, toggled, current_path=""):
         expand_last_dirs(tree_node[k], toggled, dir_path)
 
 def draw_tree_dict(layout, tree_node, current_path="", toggled_list=None, duplicates=None, actual_path=""):
-    if toggled_list is None: toggled_list = load_toggled_dirs(bpy.context.scene)
+    if toggled_list is None: toggled_list = load_toggled_dirs(bpy.context.window_manager)
     if duplicates is None: duplicates = set()
 
     dirs = [k for k in tree_node.keys() if k != '_files']
@@ -1463,39 +1616,26 @@ def run_headless_export(job_file_path):
     try:
         with open(job_file_path, 'r', encoding="utf-8") as f: job_data = json.load(f)
         preset_index, root_dir, start_time_unix, skip_direct = job_data["preset_index"], job_data["root_dir"], job_data.get("start_time", time.time()), job_data.get("skip_direct", False)
+        preset_uid = job_data.get("preset_uid", "")
     except Exception as e:
         print(f"ERROR: Failed to load job manifest: {e}", flush=True)
         sys.exit(1)
 
     scene = bpy.context.scene
-    if preset_index < 0 or preset_index >= len(scene.batch_stl_presets):
-        print("ERROR: Invalid preset index", flush=True)
+    presets = scene.batch_stl_presets
+    preset = next((p for p in presets if preset_uid and p.uid == preset_uid), None)
+    if preset is None and 0 <= preset_index < len(presets): preset = presets[preset_index]
+    if preset is None:
+        print("ERROR: Preset not found", flush=True)
         sys.exit(1)
 
-    preset = scene.batch_stl_presets[preset_index]
     print("\n  [Phase 0] Evaluating Targets and Building Depsgraph Culling Maps...", flush=True)
     t_phase0_start = time.perf_counter()
 
     # Objects whose effective overrides are identical share one batch (one set of variants, one depsgraph pass).
-    execution_batches, batch_overrides = {}, {}
-    preset_ovrs = get_flat_overrides(scene.batch_stl_global_nodegroups, "GLOBAL") + get_flat_overrides(preset.nodegroups, "PRESET")
-
-    for c in preset.collections:
-        c_ptr = bpy.data.collections.get(c.collection_name)
-        if not c_ptr or is_collection_excluded(bpy.context, c_ptr): continue
-        pinned_ovrs = preset_ovrs + get_flat_overrides(c.nodegroups, "COLLECTION")
-
-        for obj_prop in c.objects:
-            if not obj_prop.export: continue
-            bl_obj = c_ptr.all_objects.get(obj_prop.name)
-            if not bl_obj or bl_obj.hide_viewport or bl_obj.type not in SUPPORTED_OBJECT_TYPES: continue
-
-            obj_overrides = resolve_overrides(pinned_ovrs + get_flat_overrides(obj_prop.nodegroups, "OBJECT"))
-            obj_overrides = filter_overrides_for_object(obj_overrides, bl_obj)
-            full_sig = get_override_signature(obj_overrides)
-            if not full_sig and skip_direct: continue
-            execution_batches.setdefault(full_sig, []).append((c, obj_prop, bl_obj))
-            batch_overrides.setdefault(full_sig, obj_overrides)
+    # Objects without overrides were already written by the main process (skip_direct).
+    targets = iter_export_objects(scene, preset, live_collection_names(bpy.context.view_layer))
+    batches = group_by_signature(t for t in targets if t[4] or not skip_direct)
 
     layer_collection_map, layer_collection_parents = {}, {}
     def map_layer_collections(lc, parent=None):
@@ -1507,18 +1647,18 @@ def run_headless_export(job_file_path):
 
     print(f"    ├─ Mapped {len(layer_collection_map)} collections for depsgraph culling in {time.perf_counter() - t_phase0_start:.4f}s", flush=True)
 
-    if not execution_batches:
+    if not batches:
         print("  └─ No active objects to export.\nBATCH_STL_DONE", flush=True)
         sys.exit(0)
 
-    batch_counts = {sig: count_override_combinations(ovrs) for sig, ovrs in batch_overrides.items()}
-    total_ops = sum(len(items) * batch_counts[sig] for sig, items in execution_batches.items())
+    with cached_menu_items():
+        batch_counts = {sig: count_override_combinations(ovrs, limit=None) for sig, (ovrs, _items) in batches.items()}
+    total_ops = sum(len(items) * batch_counts[sig] for sig, (_ovrs, items) in batches.items())
     print(f"BATCH_STL_TOTAL:{total_ops}", flush=True)
 
     current_op_step, batch_counter, first_export_started = 0, 1, False
 
-    for signature, batch_items in execution_batches.items():
-        all_overrides = batch_overrides[signature]
+    for signature, (all_overrides, batch_items) in batches.items():
         num_combinations = batch_counts[signature]
         batch_objects = {item[2] for item in batch_items}
 
@@ -1540,29 +1680,29 @@ def run_headless_export(job_file_path):
         baseline_global_states, baseline_mod_states = capture_baseline_states(all_overrides, batch_objects)
 
         try:
-            for combo_idx, combo in enumerate(generate_override_combinations(all_overrides)):
+            for combo_idx, (combo, tags_by_level, paths_by_level) in enumerate(generate_named_combinations(all_overrides)):
                 t_perm_start = time.perf_counter()
                 if not first_export_started:
                     print(f"=== Headless init took {time.time() - start_time_unix:.2f} s to start first export ===", flush=True)
                     first_export_started = True
 
-                tags_by_level, paths_by_level = evaluate_combo_naming(combo, all_overrides)
-
-                apply_overrides(reconstruct_overrides_for_combo(combo), batch_objects)
+                # A parameter left out of this variant (no value applies to its branch) must be back at its baseline,
+                # not keep what the previous variant set.
+                combo_overrides = reconstruct_overrides_for_combo(combo)
+                revert_overrides(baseline_global_states, baseline_mod_states, batch_objects, skip=override_targets(combo_overrides))
+                apply_overrides(combo_overrides, batch_objects)
                 bpy.context.view_layer.update()
                 depsgraph = bpy.context.evaluated_depsgraph_get()
                 instance_arrays = collect_instance_arrays(depsgraph, batch_objects)
 
                 for c, obj_prop, bl_obj in batch_items:
-                    full_dir_parts = build_export_dir_parts(preset.preset_prefix, c.sub_path, obj_prop.sub_path, paths_by_level)
+                    full_dir_parts, filename = export_file_parts(preset, c, obj_prop, bl_obj, tags_by_level, paths_by_level)
                     out_dir = os.path.normpath(os.path.join(root_dir, *full_dir_parts)) if full_dir_parts else root_dir
-
-                    filename = format_export_filename(bl_obj.name, obj_prop.tag, getattr(c, 'use_tag', False), c.tag, tags_by_level)
                     filepath = os.path.join(out_dir, filename)
 
                     result_text = export_object_stl(filepath, bl_obj, depsgraph, instance_arrays.get(bl_obj.name_full, ()))
 
-                    print(f"{preset.name} | {c.collection_name} | {bl_obj.name} | Permutation {combo_idx + 1}/{num_combinations} | Batch {batch_counter}/{len(execution_batches)}\n  └─ {result_text} | {time.perf_counter() - t_perm_start:.2f} s", flush=True)
+                    print(f"{preset.name} | {c.collection_name} | {bl_obj.name} | Permutation {combo_idx + 1}/{num_combinations} | Batch {batch_counter}/{len(batches)}\n  └─ {result_text} | {time.perf_counter() - t_perm_start:.2f} s", flush=True)
                     current_op_step += 1
                     print(f"BATCH_STL_PROGRESS:{current_op_step}", flush=True)
 
@@ -1683,39 +1823,37 @@ def get_socket_default_value(group_ptr, node_name, input_name):
             return getattr(node.inputs[input_name], "default_value", None)
     return None
 
+def default_value_text(override_type, default_val, menu_items):
+    """Text for a value field holding a socket's default, or None when there is no usable default. A menu default
+    that is not one of the items (the modifier interface reports '') falls back to the first item."""
+    try:
+        if override_type == 'FLOAT': return str(round(float(default_val), 4))
+        if override_type == 'INT': return str(int(default_val))
+        if override_type == 'BOOLEAN': return str(bool(default_val))
+        if override_type == 'STRING': return None if default_val is None else str(default_val)
+        if override_type == 'MENU':
+            if default_val and str(default_val) in menu_items: return str(default_val)
+            return menu_items[0] if menu_items else None
+    except (TypeError, ValueError): pass
+    return None
+
 def sync_input_type(inp, scene, update_value=True):
     for _lvl, ng in HierarchyIterator.iterate(scene):
         for n in ng.nodes:
             if inp in n.inputs.values():
                 ng_ptr = bpy.data.node_groups.get(ng.group_name)
                 new_type = infer_input_type(ng_ptr, n.name, inp.name)
-                inp.override_type = new_type
-
-                if update_value:
-                    default_val = get_socket_default_value(ng_ptr, n.name, inp.name)
-                    for v in inp.values:
-                        v.use_sweep = False
-                        if default_val is not None:
-                            if new_type == 'FLOAT':
-                                try: v.value_string = str(round(float(default_val), 4))
-                                except (TypeError, ValueError): pass
-                            elif new_type == 'INT':
-                                try: v.value_string = str(int(default_val))
-                                except (TypeError, ValueError): pass
-                            elif new_type == 'BOOLEAN':
-                                try: v.value_menu = str(bool(default_val))
-                                except (TypeError, ValueError): pass
-                            elif new_type == 'STRING':
-                                try: v.value_string = str(default_val)
-                                except (TypeError, ValueError): pass
-                            elif new_type == 'MENU':
-                                try: v.value_menu = str(default_val)
-                                except (TypeError, ValueError): pass
-                        if new_type == 'MENU' and not v.value_menu:
-                            # For menus, if there's no clear default or it's empty, try to pick the first item
-                            items = get_menu_switch_items(ng_ptr, n.name, inp.name)
-                            if items:
-                                v.value_menu = items[0]
+                # These writes are consistent data, so the edit callbacks must not run on them: they treat an emptied
+                # value as "delete it", which would remove the input (and with it its node and node group).
+                with raw_edits():
+                    inp.override_type = new_type
+                    if update_value:
+                        items = get_menu_switch_items(ng_ptr, n.name, inp.name) if new_type == 'MENU' else []
+                        text = default_value_text(new_type, get_socket_default_value(ng_ptr, n.name, inp.name), items)
+                        field = "value_menu" if new_type in ('BOOLEAN', 'MENU') else "value_string"
+                        for v in inp.values:
+                            v.use_sweep = False
+                            if text is not None: setattr(v, field, text)
                 return
 
 @edit_callback("Edit Override Input", "name", "prev_name")
@@ -1860,7 +1998,8 @@ def on_value_update(prop_name, label=""):
                             else:
                                 ng_ptr = bpy.data.node_groups.get(ng.group_name)
                                 items = get_menu_switch_items(ng_ptr, n.name, i.name) if ng_ptr else []
-                            if my_val not in items:
+                            # Items that cannot be listed are checked when exporting (a rejected value is logged)
+                            if items and my_val not in items:
                                 is_invalid = True
 
                         if prop_name in ("value_string", "sweep_start", "sweep_step"):
@@ -1875,7 +2014,7 @@ def on_value_update(prop_name, label=""):
 
                         if prop_name == "sweep_count":
                             try:
-                                if int(my_val) < 1: is_invalid = True
+                                if not 1 <= int(my_val) <= MAX_SWEEP_STEPS: is_invalid = True
                             except ValueError:
                                 is_invalid = True
 
@@ -1922,7 +2061,9 @@ _PATH_STEP = re.compile(r"(\w+)\[(\d+)\]")
 # - Keys are (kind, name) with kind "dir" (folder) or "tag" (filename token).
 # - A branch name is created by a value. Values of one input are alternatives: the names of different values (or
 #   sweep steps) of the same input never appear in the same permutation, so they exclude each other. The folder and
-#   the token of the *same* value do appear together.
+#   the token of the *same* value do appear together. A name created by several inputs (e.g. "1" from two number
+#   inputs) excludes nothing, since it can come from either.
+# - Only explicitly named value folders / tokens (is_explicit_name) merge; names derived from the value are new.
 # - A context is the set of branch keys a block is merged into (plus what those names themselves require).
 # - A name created inside a merged block exists only in that context, e.g. "X" made under a block merged into "A"
 #   is never available inside a block merged into "C".
@@ -1958,16 +2099,17 @@ def _block_desc(kind, ng, node=None):
 
 class BranchScope:
     def __init__(self):
-        self.entries = {}  # (kind, name) -> {"desc", "group", "alts": set, "reqs": [frozenset(keys)]}
+        self.entries = {}  # (kind, name) -> {"desc", "groups": set, "alts": {(group, alt)}, "reqs": [frozenset(keys)]}
 
     def __contains__(self, key): return key in self.entries
     def desc(self, key): return self.entries[key]["desc"]
-    def is_branch(self, key): return key in self.entries and self.entries[key]["group"] is not None
+    def is_branch(self, key): return key in self.entries and bool(self.entries[key]["groups"])
 
     def _excludes(self, a, b):
+        """Names of different values of one single input never coexist."""
         ea, eb = self.entries.get(a), self.entries.get(b)
-        if a == b or not ea or not eb or ea["group"] is None or ea["group"] != eb["group"]: return False
-        return not (ea["alts"] & eb["alts"])
+        if a == b or not ea or not eb or len(ea["groups"]) != 1 or ea["groups"] != eb["groups"]: return False
+        return ea["alts"].isdisjoint(eb["alts"])
 
     def _req_set(self, key, ctx):
         """Branches `key` certainly requires alongside the context `ctx` (shared by every way it can exist there),
@@ -1980,9 +2122,10 @@ class BranchScope:
     def available(self, key, ctx): return self._req_set(key, ctx) is not None
 
     def add(self, key, desc, ctx, group=None, alt=None):
-        e = self.entries.setdefault(key, {"desc": desc, "group": group, "alts": set(), "reqs": []})
-        if e["group"] is None and group is not None: e["group"] = group
-        if alt is not None: e["alts"].add(alt)
+        e = self.entries.setdefault(key, {"desc": desc, "groups": set(), "alts": set(), "reqs": []})
+        if group is not None:
+            e["groups"].add(group)
+            e["alts"].add((group, alt))
         reqs = frozenset(k for k in ctx if k != key)
         if reqs not in e["reqs"]: e["reqs"].append(reqs)
 
@@ -2011,19 +2154,27 @@ class BranchScope:
             ctx = self.resolve(kind, block_parts(block, kind), ctx, _block_desc(kind, ng, node) if record else None)[0]
         return ctx
 
+    def resolve_value(self, val, dirs, tags, ctx):
+        """resolve() for the folder names and tokens of one value step, in context `ctx`: only explicitly named fields
+        anchor, derived names are always new. Returns (new_ctx, {kind: (hits, dead)})."""
+        res = {}
+        for kind, names, field in (("dir", dirs, val.dir_tag), ("tag", tags, val.tag)):
+            if is_explicit_name(field): ctx, hits, dead = self.resolve(kind, names, ctx)
+            else: hits, dead = [], []
+            res[kind] = (hits, dead)
+        return frozenset(ctx), res
+
     def add_input(self, ng, ng_ptr, node, inp, ctx):
         """Record the folders and tokens an input's values create inside context `ctx`."""
         group = (ng.group_name, clean_node_name(node.name), inp.name)
         descs = {"dir": f"Branch · {ng.group_name} › {inp.name}", "tag": f"Name branch · {ng.group_name} › {inp.name}"}
         for v_idx, val in enumerate(inp.values):
             for s_idx, (dirs, tags) in enumerate(_value_step_names(ng_ptr, node, inp, val)):
-                v_ctx, new, dead = ctx, [], False
+                v_ctx, res = self.resolve_value(val, dirs, tags, ctx)
+                if res["dir"][1] or res["tag"][1]: continue  # this value never applies, so its names never exist
                 for kind, names in (("dir", dirs), ("tag", tags)):
-                    v_ctx, hits, k_dead = self.resolve(kind, names, v_ctx)
-                    dead = dead or bool(k_dead)
-                    new += [(kind, n) for n in names if n not in hits]
-                if dead: continue  # this value never applies, so its names never exist
-                for key in new: self.add(key, descs[key[0]], v_ctx, group, (v_idx, s_idx))
+                    for n in names:
+                        if n not in res[kind][0]: self.add((kind, n), descs[kind], v_ctx, group, (v_idx, s_idx))
 
     def suggestions(self, kind, ctx, exclude=()):
         """{name: description} of the names of `kind` available in context `ctx`, in stack order."""
@@ -2130,10 +2281,10 @@ class BatchSTLValue(bpy.types.PropertyGroup):
     value_menu: bpy.props.StringProperty(name="Value", default="", search=search_menu_items_cb, update=on_value_update("value_menu", "Edit Override Value"))
     use_tag: bpy.props.BoolProperty(name="Use Tag", default=False, update=mark_dirty)
     prev_tag: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    tag: bpy.props.StringProperty(name="Tag", description="Filename tag: '_tag' appends, 'tag_' prepends, 'tag' replaces the value; pick an upstream name token to merge into that branch", default="", search=make_scope_search_cb("tag", "tag", multi_part=False), update=on_no_spaces_update("tag", "Edit Override Tag"))
+    tag: bpy.props.StringProperty(name="Tag", description="Filename tag: '_tag' appends, 'tag_' prepends, 'tag' replaces the value. A replacing name that matches an upstream name token merges into that branch", default="", search=make_scope_search_cb("tag", "tag", multi_part=False), update=on_no_spaces_update("tag", "Edit Override Tag"))
     use_dir: bpy.props.BoolProperty(name="Use Dir", default=True, update=mark_dirty)
     prev_dir_tag: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    dir_tag: bpy.props.StringProperty(name="Directory", description="Folder name: '_tag' appends, 'tag_' prepends, 'tag' replaces the value", default="", search=make_scope_search_cb("dir", "dir_tag", multi_part=False), update=on_no_spaces_update("dir_tag", "Edit Override Directory"))
+    dir_tag: bpy.props.StringProperty(name="Directory", description="Folder name: '_tag' appends, 'tag_' prepends, 'tag' replaces the value. A replacing name that matches an upstream folder merges into that branch", default="", search=make_scope_search_cb("dir", "dir_tag", multi_part=False), update=on_no_spaces_update("dir_tag", "Edit Override Directory"))
     use_sweep: bpy.props.BoolProperty(name="Sweep", default=False, update=mark_dirty)
     sweep_range: bpy.props.StringProperty(name="Sweep Range", default="", update=mark_dirty)
     prev_sweep_start: bpy.props.StringProperty(default="0", options={'HIDDEN'})
@@ -2141,7 +2292,7 @@ class BatchSTLValue(bpy.types.PropertyGroup):
     prev_sweep_step: bpy.props.StringProperty(default="1", options={'HIDDEN'})
     sweep_step: bpy.props.StringProperty(name="Step", description="Value step", default="1", update=on_value_update("sweep_step"))
     prev_sweep_count: bpy.props.StringProperty(default="2", options={'HIDDEN'})
-    sweep_count: bpy.props.StringProperty(name="Steps", description="Number of steps", default="2", update=on_value_update("sweep_count"))
+    sweep_count: bpy.props.StringProperty(name="Steps", description=f"Number of steps (1 to {MAX_SWEEP_STEPS})", default="2", update=on_value_update("sweep_count"))
 
 class BatchSTLInput(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty(name="Input Socket", default="", search=search_input_name_cb, update=on_input_name_update)
@@ -2252,7 +2403,8 @@ class BatchSTLNodeGroup(bpy.types.PropertyGroup):
 
 class BatchSTLObject(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty()
-    obj_ptr: bpy.props.PointerProperty(type=bpy.types.Object)
+    # session_uid of the object, to follow renames (see sync_collection_objects); not an ID pointer, which adds a user
+    obj_uid: bpy.props.IntProperty(default=0, options={'HIDDEN'})
     export: bpy.props.BoolProperty(default=True, update=mark_dirty)
     prev_tag: bpy.props.StringProperty(default="", options={'HIDDEN'})
     tag: bpy.props.StringProperty(name="Tag", default="", description="Filename token(s), '/' between tokens. Placed in hierarchy order: Global, Preset, Collection, Object", update=on_no_spaces_update("tag"))
@@ -2277,9 +2429,10 @@ class BatchSTLCollection(bpy.types.PropertyGroup):
     nodegroups: bpy.props.CollectionProperty(type=BatchSTLNodeGroup)
 
 class BatchSTLJob(bpy.types.PropertyGroup):
-    """Runtime state of one preset's export. Lives on the WindowManager so it is never saved or rolled back by undo."""
-    preset_index: bpy.props.IntProperty(default=-1)
-    scene_name: bpy.props.StringProperty(default="")
+    """Runtime state of one preset's export. Lives on the WindowManager so undo never rolls it back; cleared when a
+    file loads. Keyed by preset uid and scene session_uid (see get_job)."""
+    preset_uid: bpy.props.StringProperty(default="")
+    scene_uid: bpy.props.IntProperty(default=0)
     is_exporting: bpy.props.BoolProperty(default=False)
     cancel_export: bpy.props.BoolProperty(default=False)
     export_progress: bpy.props.FloatProperty(name="Progress", default=0.0, min=0.0, max=1.0)
@@ -2289,6 +2442,7 @@ class BatchSTLJob(bpy.types.PropertyGroup):
 
 class BatchSTLExportPreset(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty(name="Preset Name", default="New Preset", update=mark_dirty)
+    uid: bpy.props.StringProperty(default="", options={'HIDDEN'})  # stable identity of a running export's preset
     prev_preset_prefix: bpy.props.StringProperty(default="", options={'HIDDEN'})
     preset_prefix: bpy.props.StringProperty(name="Preset Root Directory", default="", update=on_no_spaces_update("preset_prefix"))
     collections: bpy.props.CollectionProperty(type=BatchSTLCollection)
@@ -2335,6 +2489,7 @@ class BATCH_STL_OT_import_presets_json(bpy.types.Operator, ImportHelper):
                 return {'CANCELLED'}
             for p_data in data:
                 paste_preset_from_dict(context.scene.batch_stl_presets.add(), p_data)
+            ensure_preset_uids(context.scene)
             self.report({'INFO'}, f"Presets imported from {os.path.basename(self.filepath)}")
         except Exception as e:
             while len(context.scene.batch_stl_presets) > before:
@@ -2349,7 +2504,7 @@ class BATCH_STL_OT_clear_console(bpy.types.Operator):
     bl_label = "Clear Console"
     bl_description = "Clear console logs for the current view"
     def execute(self, context):
-        job = get_job(context.scene.batch_stl_preset_index)
+        job = get_job(get_active_preset(context.scene))
         if job: job.console_logs.clear()
         return {'FINISHED'}
 
@@ -2404,18 +2559,21 @@ class BATCH_STL_OT_preset_actions(bpy.types.Operator):
 
     @inside_operator
     def execute(self, context):
-        lst = context.scene.batch_stl_presets
-        idx = context.scene.batch_stl_preset_index
-        # Export state is keyed by preset index, so removing or reordering presets is only safe while nothing runs.
-        reorders = self.action in {'REMOVE', 'UP', 'DOWN'}
+        scene = context.scene
+        lst = scene.batch_stl_presets
+        idx = scene.batch_stl_preset_index
+        # Jobs are keyed by preset uid, so reordering is safe while an export runs; removing the exporting preset is not.
+        removed = lst[idx] if self.action == 'REMOVE' and 0 <= idx < len(lst) else None
+        removed_job = get_job(removed)
 
-        if reorders and is_any_exporting():
-            self.report({'WARNING'}, "Cannot remove or reorder presets while an export is running.")
+        if removed_job and removed_job.is_exporting:
+            self.report({'WARNING'}, "Cannot remove a preset while it is exporting.")
         else:
-            context.scene.batch_stl_preset_index = ListActionHandler.perform_action(
+            if removed_job: remove_job(scene.session_uid, removed.uid)  # its log
+            scene.batch_stl_preset_index = ListActionHandler.perform_action(
                 self.action, lst, idx, self.shift_pressed, "preset", copy_preset_to_dict, paste_preset_from_dict
             )
-            if reorders: context.window_manager.batch_stl_jobs.clear()  # old logs would point at the wrong presets
+            ensure_preset_uids(scene)  # added and pasted presets
 
         mark_dirty()
         return {'FINISHED'}
@@ -2475,20 +2633,14 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
     def description(cls, context, properties):
         act = properties.action
         if act == 'ADD_GROUP': return "Add an Override Group to this level"
-        if act == 'DEL_GROUP': return "Delete this Override Group"
         if act == 'COPY_GROUP': return "Copy this Override Group to clipboard"
         if act == 'PASTE_GROUP': return "Paste an Override Group from clipboard"
         if act == 'MOVE_GROUP_UP': return "Move group up (Shift: Move directly to parent hierarchy level)"
         if act == 'MOVE_GROUP_DOWN': return "Move group down (Shift: Localize and copy group to every nested child)"
         if act == 'ADD_NODE': return "Add a Target Node filter"
-        if act == 'DEL_NODE': return "Delete this Target Node filter"
         if act == 'MOVE_NODE_UP': return "Move Target Node up"
         if act == 'MOVE_NODE_DOWN': return "Move Target Node down"
         if act == 'ADD_INPUT': return "Add an Input Parameter override (Shift: Auto-populate all available socket inputs)"
-        if act == 'DEL_INPUT': return "Delete this Input Parameter"
-        if act == 'ADD_VALUE': return "Add a Value Permutation iteration"
-        if act == 'DEL_VALUE': return "Delete this Value Permutation"
-        if act in ('DEL_VALUE_OR_INPUT', 'DEL_VALUE_MIXED'): return "Delete Value (Deletes entire Input if it's the last iteration)"
         if act == 'VALUE_ACTION': return "Add Permutation (Shift: Toggle Sweep range mode)"
         if act == 'CLEAR_VALUE_STRING': return "Clear this value (deletes it, and the input if it is the last value)"
         if act == 'TOGGLE_VALUE_USE_DIR': return "Toggle sub-directory folder structuring for this iteration"
@@ -2515,8 +2667,6 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
     def _handle_group_action(self, ng_list, context, preset):
         if self.action == 'ADD_GROUP':
             ng_list.add()
-        elif self.action == 'DEL_GROUP' and 0 <= self.ng_idx < len(ng_list):
-            ng_list.remove(self.ng_idx)
         elif self.action == 'COPY_GROUP' and 0 <= self.ng_idx < len(ng_list):
             _clipboard["nodegroup"] = copy_ng_to_dict(ng_list[self.ng_idx])
         elif self.action == 'PASTE_GROUP' and _clipboard.get("nodegroup"):
@@ -2566,11 +2716,6 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
             valid_targets = get_target_node_names(ng_ptr, {clean_node_name(n.name) for n in nodes})
             if valid_targets:
                 nodes.add().name = valid_targets[0]
-
-        elif self.action == 'DEL_NODE' and 0 <= self.n_idx < len(nodes):
-            nodes.remove(self.n_idx)
-            if len(nodes) == 0:
-                ng_list.remove(self.ng_idx)
         elif self.action == 'MOVE_NODE_UP' and 0 < self.n_idx < len(nodes):
             nodes.move(self.n_idx, self.n_idx - 1)
         elif self.action == 'MOVE_NODE_DOWN' and 0 <= self.n_idx < len(nodes) - 1:
@@ -2606,12 +2751,6 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
             else:
                 inputs.add().values.add()
 
-        elif self.action == 'DEL_INPUT' and 0 <= self.i_idx < len(inputs):
-            inputs.remove(self.i_idx)
-            if len(inputs) == 0:
-                self.action = 'DEL_NODE'
-                self._handle_node_action(ng_list)
-
     def _handle_value_action(self, ng_list):
         if not (0 <= self.ng_idx < len(ng_list)): return
         ng = ng_list[self.ng_idx]
@@ -2620,12 +2759,7 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
         if not (0 <= self.i_idx < len(node.inputs)): return
         inp_obj = node.inputs[self.i_idx]
         vals = inp_obj.values
-        if self.action in ('DEL_VALUE', 'DEL_VALUE_MIXED') and 0 <= self.v_idx < len(vals):
-            vals.remove(self.v_idx)
-            if len(vals) == 0:
-                self.action = 'DEL_INPUT'
-                self._handle_input_action(ng_list)
-        elif self.action in ['ADD_VALUE', 'TOGGLE_SWEEP', 'VALUE_ACTION']:
+        if self.action == 'VALUE_ACTION':
             def add_smart_value():
                 if inp_obj.override_type == 'BOOLEAN':
                     existing = {v.value_menu for v in vals if not v.use_sweep}
@@ -2687,7 +2821,8 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
                         node_obj = ng_obj.nodes[self.n_idx]
                         target = 'MODIFIER' if not node_obj.name or node_obj.name == "<Modifier Interface>" else 'NODE'
                         temp_inp = MockInput(inp_obj, val, is_temp=True)
-                        parsed_vals = parse_sweep_values(MockOverride(target, ng_ptr, node_obj.name, [temp_inp]), temp_inp)
+                        # An empty value (unknown menu items, empty string range) would delete the value it is written to
+                        parsed_vals = [x for x in parse_sweep_values(MockOverride(target, ng_ptr, node_obj.name, [temp_inp]), temp_inp) if x != ""]
                         if parsed_vals:
                             for p_idx, p_val in enumerate(parsed_vals):
                                 v = val if p_idx == 0 else vals.add()
@@ -2744,8 +2879,8 @@ class BATCH_STL_OT_toggle_dir_tree(bpy.types.Operator):
         return self.execute(context)
 
     def execute(self, context):
-        scene = context.scene
-        toggled = load_toggled_dirs(scene)
+        wm = context.window_manager
+        toggled = load_toggled_dirs(wm)
         subtree = []
         if self.recursive:
             subtree = [(p, is_root) for p, _node, is_root in iter_tree_dirs(_ui_cache["tree"][0])
@@ -2757,7 +2892,7 @@ class BATCH_STL_OT_toggle_dir_tree(bpy.types.Operator):
             for p, is_root in subtree: set_dir_collapsed(toggled, p, is_root, collapse)
         elif self.dir_path in toggled: toggled.discard(self.dir_path)
         else: toggled.add(self.dir_path)
-        save_toggled_dirs(scene, toggled)
+        save_toggled_dirs(wm, toggled)
         return {'FINISHED'}
 
 class BATCH_STL_OT_tree_expansion(bpy.types.Operator):
@@ -2773,9 +2908,9 @@ class BATCH_STL_OT_tree_expansion(bpy.types.Operator):
         return "Collapse all, then expand the last subdirectory of every directory"
 
     def execute(self, context):
-        scene = context.scene
+        wm = context.window_manager
         tree = _ui_cache["tree"][0]
-        toggled = load_toggled_dirs(scene)
+        toggled = load_toggled_dirs(wm)
         if self.mode == 'EXPAND_LAST':
             for p, _node, is_root in iter_tree_dirs(tree):
                 set_dir_collapsed(toggled, p, is_root, True)
@@ -2784,7 +2919,7 @@ class BATCH_STL_OT_tree_expansion(bpy.types.Operator):
             collapse = self.mode == 'COLLAPSE_ALL'
             for p, _node, is_root in iter_tree_dirs(tree):
                 set_dir_collapsed(toggled, p, is_root, collapse)
-        save_toggled_dirs(scene, toggled)
+        save_toggled_dirs(wm, toggled)
         return {'FINISHED'}
 
 class BATCH_STL_OT_merge_info(bpy.types.Operator):
@@ -2805,9 +2940,9 @@ class BATCH_STL_OT_cancel_export(bpy.types.Operator):
     bl_idname = "batch_stl.cancel_export"
     bl_label = "Cancel Export"
     bl_description = "Cancel the active batch export"
-    preset_index: bpy.props.IntProperty(default=-1)
+    preset_uid: bpy.props.StringProperty(options={'HIDDEN'})
     def execute(self, context):
-        job = get_job(self.preset_index)
+        job = find_job(context.scene.session_uid, self.preset_uid)
         if job and job.is_exporting:
             job.cancel_export = True
             log_to_console(job, "[!] Export cancelled manually.")
@@ -2829,12 +2964,15 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
         self.export_start_time = time.perf_counter()
         scene = context.scene
 
-        self.preset_idx = self.preset_index if self.preset_index >= 0 else scene.batch_stl_preset_index
-        if self.preset_idx < 0 or self.preset_idx >= len(scene.batch_stl_presets): return {"CANCELLED"}
-        context.scene.batch_stl_preset_index = self.preset_idx
-        # Pointers are only valid during invoke: undo and file loads invalidate them, so modal()/cleanup() re-resolve by index.
-        self.preset = scene.batch_stl_presets[self.preset_idx]
-        job = get_job(self.preset_idx, create=True)
+        preset_idx = self.preset_index if self.preset_index >= 0 else scene.batch_stl_preset_index
+        if preset_idx < 0 or preset_idx >= len(scene.batch_stl_presets): return {"CANCELLED"}
+        scene.batch_stl_preset_index = preset_idx
+        ensure_preset_uids(scene)
+        preset = scene.batch_stl_presets[preset_idx]
+        # Undo, reordering and scene switches invalidate pointers and indices: modal() and cleanup() find the preset
+        # and its job again by these.
+        self.scene_uid, self.preset_uid, self.preset_name = scene.session_uid, preset.uid, preset.name
+        job = get_job(preset, create=True)
 
         if job.is_exporting: return {'CANCELLED'}
         if not scene.batch_stl_root_dir:
@@ -2843,64 +2981,49 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
         if scene.batch_stl_root_dir.startswith("//") and not bpy.data.is_saved:
             self.report({'ERROR'}, "Please save the .blend file before exporting to a relative path (//)")
             return {"CANCELLED"}
-        if not is_preset_setup_valid(scene, self.preset):
+        if not is_preset_setup_valid(scene, preset):
             self.report({'ERROR'}, "Improper setup: One or more override fields are missing or invalid.")
             return {"CANCELLED"}
 
-        tree, duplicates = build_tree_dict(context, is_global=False)
-        if duplicates:
-            self.report({'ERROR'}, f"Export aborted: {len(duplicates)} naming collisions detected. Check tree view.")
+        for c in preset.collections: sync_collection_objects(c)
+        live = live_collection_names(context.view_layer)
+        preset_root = os.path.normpath(bpy.path.abspath(scene.batch_stl_root_dir))
+        with cached_menu_items():
+            clashes = find_export_clashes(scene, preset, live, preset_root)
+            targets = list(iter_export_objects(scene, preset, live))
+        if clashes:
+            self.report({'ERROR'}, f"Export aborted: {len(clashes)} files would be written more than once (e.g. {next(iter(clashes.values()))}). Check the tree view.")
             return {"CANCELLED"}
 
-        context.scene.batch_stl_info_tab = 'LOG'
+        context.window_manager.batch_stl_info_tab = 'LOG'
         job.console_logs.clear()
 
-        objects_to_export_directly, objects_needing_headless = [], []
-        preset_root = os.path.normpath(bpy.path.abspath(scene.batch_stl_root_dir))
-        global_ovrs = get_flat_overrides(scene.batch_stl_global_nodegroups, "GLOBAL")
-        preset_ovrs = global_ovrs + get_flat_overrides(self.preset.nodegroups, "PRESET")
+        for c in preset.collections:
+            # e.g. the collection was renamed or deleted: say so instead of reporting a complete export
+            if c.collection_name and not bpy.data.collections.get(c.collection_name):
+                log_to_console(job, f"SKIPPED (collection not found): {c.collection_name}")
 
-        for c in self.preset.collections:
-            c_ptr = bpy.data.collections.get(c.collection_name)
-            if not c_ptr:
-                # e.g. the collection was renamed or deleted: say so instead of reporting a complete export
-                if c.collection_name: log_to_console(job, f"SKIPPED (collection not found): {c.collection_name}")
-                continue
-            if is_collection_excluded(bpy.context, c_ptr): continue
-            sync_collection_objects(c, c_ptr)
-            c_pinned_ovrs = get_flat_overrides(c.nodegroups, "COLLECTION")
-            for obj_prop in c.objects:
-                if not obj_prop.export: continue
-                bl_obj = c_ptr.all_objects.get(obj_prop.name)
-                if not bl_obj or bl_obj.hide_viewport or bl_obj.type not in SUPPORTED_OBJECT_TYPES: continue
-
-                obj_ovrs = get_flat_overrides(obj_prop.nodegroups, "OBJECT")
-                all_ovrs = resolve_overrides(preset_ovrs + c_pinned_ovrs + obj_ovrs)
-                all_ovrs = filter_overrides_for_object(all_ovrs, bl_obj)
-
-                if not all_ovrs: objects_to_export_directly.append((c, obj_prop, bl_obj))
-                else: objects_needing_headless.append((c, obj_prop, bl_obj))
+        objects_to_export_directly = [(c, obj_prop, bl_obj) for _c_idx, c, obj_prop, bl_obj, ovrs in targets if not ovrs]
+        needs_headless = any(t[4] for t in targets)
 
         if objects_to_export_directly:
-            depsgraph = bpy.context.evaluated_depsgraph_get()
+            depsgraph = context.evaluated_depsgraph_get()
             instance_arrays = collect_instance_arrays(depsgraph, [item[2] for item in objects_to_export_directly])
             log_to_console(job, f"=== STARTING NATIVE DIRECT EXPORT ({len(objects_to_export_directly)} Objects) ===")
             for c, obj_prop, bl_obj in objects_to_export_directly:
                 t_dir_start = time.perf_counter()
-                full_dir_parts = build_export_dir_parts(self.preset.preset_prefix, c.sub_path, obj_prop.sub_path)
+                full_dir_parts, filename = export_file_parts(preset, c, obj_prop, bl_obj)
                 out_dir = os.path.normpath(os.path.join(preset_root, *full_dir_parts)) if full_dir_parts else preset_root
-
-                filename = format_export_filename(bl_obj.name, obj_prop.tag, getattr(c, 'use_tag', False), c.tag)
                 filepath = os.path.join(out_dir, filename)
 
                 result_text = export_object_stl(filepath, bl_obj, depsgraph, instance_arrays.get(bl_obj.name_full, ()))
 
-                log_to_console(job, f"{self.preset.name} | {c.collection_name} | {bl_obj.name} | Permutation 1/1 | Batch 1/1\n  └─ {result_text} | {time.perf_counter() - t_dir_start:.2f} s")
+                log_to_console(job, f"{preset.name} | {c.collection_name} | {bl_obj.name} | Permutation 1/1 | Batch 1/1\n  └─ {result_text} | {time.perf_counter() - t_dir_start:.2f} s")
 
-        if not objects_needing_headless:
-            self.preset.last_export_time = time.perf_counter() - self.export_start_time
-            log_to_console(job, f"=== BATCH EXPORT COMPLETE ({self.preset.last_export_time:.4f}s) ===")
-            self.report({'INFO'}, f"Batch Export {self.preset.name} Complete in {self.preset.last_export_time:.2f}s.")
+        if not needs_headless:
+            preset.last_export_time = time.perf_counter() - self.export_start_time
+            log_to_console(job, f"=== BATCH EXPORT COMPLETE ({preset.last_export_time:.4f}s) ===")
+            self.report({'INFO'}, f"Batch Export {preset.name} Complete in {preset.last_export_time:.2f}s.")
             redraw_sidebars(context)
             self.cleanup(context)
             return {'FINISHED'}
@@ -2912,7 +3035,7 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
         self.job_json = os.path.join(self.temp_dir, "job.json")
 
         bpy.ops.wm.save_as_mainfile(filepath=self.temp_blend, copy=True, compress=False)
-        with open(self.job_json, 'w', encoding="utf-8") as f: json.dump({"preset_index": self.preset_idx, "root_dir": bpy.path.abspath(scene.batch_stl_root_dir), "start_time": time.time(), "skip_direct": True}, f)
+        with open(self.job_json, 'w', encoding="utf-8") as f: json.dump({"preset_index": preset_idx, "preset_uid": preset.uid, "root_dir": bpy.path.abspath(scene.batch_stl_root_dir), "start_time": time.time(), "skip_direct": True}, f)
 
         # The worker runs this very file as a script (see the __main__ block at the bottom).
         # --factory-startup disables Python auto-run, so mirror the user's setting to keep scripted drivers working.
@@ -2931,7 +3054,7 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
             self.cleanup(context)
             return {'CANCELLED'}
 
-        log_to_console(job, f"=== INITIATING HEADLESS EXPORT '{self.preset.name}' [{time.perf_counter() - t_spawn_start:.4f}s Boot] ===")
+        log_to_console(job, f"=== INITIATING HEADLESS EXPORT '{preset.name}' [{time.perf_counter() - t_spawn_start:.4f}s Boot] ===")
 
         self.q = queue.Queue()
         def enqueue_output(out, q):
@@ -2945,11 +3068,11 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
     def _preset(self):
-        presets = bpy.context.scene.batch_stl_presets
-        return presets[self.preset_idx] if 0 <= self.preset_idx < len(presets) else None
+        """The preset being exported, or None when an undo removed it (the export carries on regardless)."""
+        return find_preset(self.scene_uid, self.preset_uid)
 
     def _job(self):
-        return get_job(self.preset_idx)
+        return find_job(getattr(self, "scene_uid", 0), getattr(self, "preset_uid", ""))
 
     def _drain_output(self, job):
         """Process queued worker output. Returns True once the worker reported BATCH_STL_DONE."""
@@ -2971,20 +3094,14 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
 
     def modal(self, context, event):
         try:
-            preset, job = self._preset(), self._job()
-            if preset is None or job is None:  # presets were replaced underneath us (undo / file load)
+            job = self._job()
+            if job is None:  # a file load cleared the jobs: this export belonged to a file that is gone
                 self.cleanup(context)
                 return {'CANCELLED'}
 
-            if event.type == 'Z' and event.value == 'PRESS' and (event.ctrl or event.oskey):
-                # Undo could shift preset indices, which the running job is keyed by.
-                job.cancel_export = True
-                log_to_console(job, "[!] Undo pressed: cancelling the running export.")
-                return {'RUNNING_MODAL'}
-
             if job.cancel_export:
                 self.cleanup(context)
-                self.report({'WARNING'}, f"Export cancelled for {preset.name}.")
+                self.report({'WARNING'}, f"Export cancelled for {self.preset_name}.")
                 return {'CANCELLED'}
 
             if event.type == 'TIMER':
@@ -2998,9 +3115,10 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
 
                 if finished:
                     self.cleanup(context)
-                    preset.last_export_time = time.perf_counter() - self.export_start_time
-                    log_to_console(job, f"=== BATCH EXPORT COMPLETE ({preset.last_export_time:.4f}s) ===")
-                    self.report({'INFO'}, f"Batch Export {preset.name} Complete in {preset.last_export_time:.2f}s.")
+                    preset = self._preset()
+                    if preset: preset.last_export_time = elapsed
+                    log_to_console(job, f"=== BATCH EXPORT COMPLETE ({elapsed:.4f}s) ===")
+                    self.report({'INFO'}, f"Batch Export {self.preset_name} Complete in {elapsed:.2f}s.")
                     redraw_sidebars(context)
                     return {'FINISHED'}
 
@@ -3008,7 +3126,7 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
                     exit_code = self.process.returncode
                     self.cleanup(context)
                     log_to_console(job, f"[!] CRASH DETECTED: Worker exited with code {exit_code} before finishing.")
-                    self.report({'ERROR'}, f"Background worker crashed for preset {preset.name}.")
+                    self.report({'ERROR'}, f"Background worker crashed for preset {self.preset_name}.")
                     redraw_sidebars(context)
                     return {'CANCELLED'}
 
@@ -3030,11 +3148,10 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
             try: context.window_manager.event_timer_remove(self._timer)
             except Exception: pass
             self._timer = None
-        if hasattr(self, 'preset_idx'):
-            try:
-                job = self._job()
-                if job: job.is_exporting, job.cancel_export, job.export_progress, job.export_status = False, False, 0.0, ""
-            except Exception: pass
+        try:
+            job = self._job()
+            if job: job.is_exporting, job.cancel_export, job.export_progress, job.export_status = False, False, 0.0, ""
+        except Exception: pass
         if getattr(self, 'process', None):
             try:
                 if self.process.poll() is None:
@@ -3052,7 +3169,7 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
 
 class BATCH_STL_UL_presets(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
-        job = get_job(index)
+        job = get_job(item)
         row = layout.row(align=True)
         prop_row = row.row(align=True)
         prop_row.enabled = not is_any_exporting()
@@ -3067,7 +3184,7 @@ class BATCH_STL_UL_presets(bpy.types.UIList):
 
         if job and job.is_exporting:
             row.prop(job, "export_progress", text=job.export_status, slider=True)
-            row.operator("batch_stl.cancel_export", text="", icon=ICONS['CANCEL']).preset_index = index
+            row.operator("batch_stl.cancel_export", text="", icon=ICONS['CANCEL']).preset_uid = item.uid
         else:
             row.operator("export_scene.batch_stl_multi", text="", icon=ICONS['EXPORT']).preset_index = index
 
@@ -3113,6 +3230,10 @@ def draw_inline_controls(layout, operator_id, use_clipboard=False):
         row.operator(operator_id, icon=ICONS['COPY'], text="").action = 'COPY'
         row.operator(operator_id, icon=ICONS['PASTE'], text="").action = 'PASTE'
 
+def format_count(stats, key="exp"):
+    """A stats count; '5000+' when counting stopped at COUNT_LIMIT for some object."""
+    return f"{stats[key]}+" if stats.get("capped") else stats[key]
+
 def draw_stats_table(parent_layout, stats_list):
     box = parent_layout.box()
     row = box.row(align=True)
@@ -3121,7 +3242,10 @@ def draw_stats_table(parent_layout, stats_list):
         if i > 0: row.separator(factor=2.0)
         row.label(text=str(val), icon=icon)
 
-def draw_overrides_table(layout, scene, nodegroups, is_collection, is_open_prop, title_text, is_preset=False, is_global=False, is_locked=False):
+def draw_overrides_table(*args, **kwargs):
+    with cached_menu_items(): _draw_overrides_table(*args, **kwargs)
+
+def _draw_overrides_table(layout, wm, nodegroups, is_collection, is_open_prop, title_text, is_preset=False, is_global=False, is_locked=False):
     # Setup inline helper to simplify conditional operator generation drastically
     def draw_op(parent, action, icon, depress=False, ng_idx=-1, n_idx=-1, i_idx=-1, v_idx=-1):
         parent.operator_context = 'INVOKE_DEFAULT'
@@ -3139,9 +3263,9 @@ def draw_overrides_table(layout, scene, nodegroups, is_collection, is_open_prop,
 
     header_row = box.row()
     header_row.enabled = not is_locked
-    is_open = getattr(scene, is_open_prop)
+    is_open = getattr(wm, is_open_prop)
     icon_open = ICONS['DOWN'] if is_open else ICONS['RIGHT']
-    header_row.prop(scene, is_open_prop, text="", icon=icon_open, emboss=False)
+    header_row.prop(wm, is_open_prop, text="", icon=icon_open, emboss=False)
 
     icon_header = ICONS['GLOBAL'] if is_global else (ICONS['PRESET'] if is_preset else (ICONS['COLLECTION'] if is_collection else ICONS['OBJECT']))
     header_row.label(text="", icon=ICONS['OVR'])
@@ -3308,8 +3432,8 @@ def draw_overrides_table(layout, scene, nodegroups, is_collection, is_open_prop,
                     # A folder / token that merges into an upstream one shows the merge icon on its toggle; red when
                     # it cannot exist in this block's branch (the value never applies).
                     v_dirs, v_tags = _value_names(ng_ptr, node, inp, val)
-                    v_ctx, vd_hits, vd_dead = scope.resolve("dir", v_dirs, n_ctx)
-                    _v_ctx, vt_hits, vt_dead = scope.resolve("tag", v_tags, v_ctx)
+                    v_res = scope.resolve_value(val, v_dirs, v_tags, n_ctx)[1]
+                    (vd_hits, vd_dead), (vt_hits, vt_dead) = v_res["dir"], v_res["tag"]
                     s_dir_tag = c_dir.split(factor=0.5, align=True)
                     c_d = s_dir_tag.row(align=True)
                     c_d.alert = bool(vd_dead)
@@ -3360,7 +3484,7 @@ class VIEW3D_PT_batch_export_stl_main(bpy.types.Panel):
         # Global Overrides
         g_col = layout.column()
         g_col.enabled = not any_exporting
-        draw_overrides_table(g_col, scene, scene.batch_stl_global_nodegroups, False, "batch_stl_ui_global_ovr_main", "Global Overrides", is_global=True, is_locked=any_exporting)
+        draw_overrides_table(g_col, context.window_manager, scene.batch_stl_global_nodegroups, False, "batch_stl_ui_global_ovr", "Global Overrides", is_global=True, is_locked=any_exporting)
 
 
 class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
@@ -3379,10 +3503,11 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
         any_exporting = is_any_exporting()
 
         tab_row = layout.row()
-        tab_row.prop(scene, "batch_stl_info_tab", expand=True)
+        wm = context.window_manager
+        tab_row.prop(wm, "batch_stl_info_tab", expand=True)
 
-        if scene.batch_stl_info_tab == 'LOG':
-            active_job = get_job(scene.batch_stl_preset_index)
+        if wm.batch_stl_info_tab == 'LOG':
+            active_job = get_job(get_active_preset(scene))
             log_row = layout.row()
 
             if active_job:
@@ -3393,7 +3518,7 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
                 col.label(text="No export log for this preset yet.", icon=ICONS['INFO'])
 
             log_tools = log_row.column(align=True)
-            log_tools.prop(scene, "batch_stl_verbose_console", text="", toggle=True, icon=ICONS['CONSOLE'])
+            log_tools.prop(wm, "batch_stl_verbose_console", text="", toggle=True, icon=ICONS['CONSOLE'])
 
             if active_job:
                 log_tools.separator()
@@ -3401,7 +3526,7 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
                 clear_col.enabled = not any_exporting
                 clear_col.operator("batch_stl.clear_console", text="", icon=ICONS['DEL'])
 
-        elif scene.batch_stl_info_tab == 'TREE':
+        elif wm.batch_stl_info_tab == 'TREE':
             tree_dict, duplicates = _ui_cache.get("tree", ({}, set()))
             if duplicates:
                 warn_box = layout.box()
@@ -3413,7 +3538,7 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
             col = tree_row.column(align=True)
             draw_tree_dict(col, tree_dict, duplicates=duplicates)
             expand_tools = tree_row.column(align=True)
-            expand_tools.prop(scene, "batch_stl_info_global", text="", toggle=True, icon=ICONS['GLOBAL'])
+            expand_tools.prop(wm, "batch_stl_info_global", text="", toggle=True, icon=ICONS['GLOBAL'])
             expand_tools.separator()
             expand_tools.operator("batch_stl.tree_expansion", text="", icon=ICONS['EXPAND_ALL']).mode = 'EXPAND_ALL'
             expand_tools.operator("batch_stl.tree_expansion", text="", icon=ICONS['COLLAPSE_ALL']).mode = 'COLLAPSE_ALL'
@@ -3423,11 +3548,11 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
 
         tip_box = layout.box()
         tip_header = tip_box.row()
-        icon_tip = ICONS['DOWN'] if scene.batch_stl_ui_tips else ICONS['RIGHT']
-        tip_header.prop(scene, "batch_stl_ui_tips", text="", icon=icon_tip, emboss=False)
+        icon_tip = ICONS['DOWN'] if wm.batch_stl_ui_tips else ICONS['RIGHT']
+        tip_header.prop(wm, "batch_stl_ui_tips", text="", icon=icon_tip, emboss=False)
         tip_header.label(text="EXTENSION GUIDE", icon=ICONS['INFO'])
 
-        if scene.batch_stl_ui_tips:
+        if wm.batch_stl_ui_tips:
             box_col = tip_box.column()
 
             box_col.label(text="Hierarchical Overrides (Priority):", icon=ICONS['OVR'])
@@ -3476,6 +3601,7 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
             split.column()
             child_col = split.column()
             child_col.label(text="  • Name an upstream folder or filename token to merge into that branch only", icon=ICONS['BLANK'])
+            child_col.label(text="  • Values merge only by a plain name; a name derived from the value is new", icon=ICONS['BLANK'])
             child_col.label(text="  • Tag merges append new tokens at the end of the filename", icon=ICONS['TAG'])
             child_col.label(text="  • B = only B permutations, C/2 = only C2, 2 = every 2 branch", icon=ICONS['BLANK'])
             child_col.label(text="  • Folder/tag fields list upstream names that fit the current branch", icon=ICONS['DIR'])
@@ -3540,11 +3666,11 @@ class VIEW3D_PT_batch_export_stl_presets(bpy.types.Panel):
             (g_stats['presets'], ICONS['PRESET']),
             (g_stats['cols'], ICONS['COLLECTION']),
             (g_stats['objs'], ICONS['OBJECT']),
-            (g_stats['exp'], ICONS['SWEEP'])
+            (format_count(g_stats), ICONS['SWEEP'])
         ])
 
         if active_preset:
-            draw_overrides_table(locked_col, scene, active_preset.nodegroups, False, "batch_stl_ui_preset_ovr", f"Overrides for [ {active_preset.name} ]", is_preset=True, is_locked=any_exporting)
+            draw_overrides_table(locked_col, context.window_manager, active_preset.nodegroups, False, "batch_stl_ui_preset_ovr", f"Overrides for [ {active_preset.name} ]", is_preset=True, is_locked=any_exporting)
 
 
 class VIEW3D_PT_batch_export_stl_collections(bpy.types.Panel):
@@ -3587,11 +3713,11 @@ class VIEW3D_PT_batch_export_stl_collections(bpy.types.Panel):
         draw_stats_table(content_col, [
             (p_stats['cols'], ICONS['COLLECTION']),
             (p_stats['objs'], ICONS['OBJECT']),
-            (p_stats['exp'], ICONS['SWEEP'])
+            (format_count(p_stats), ICONS['SWEEP'])
         ])
 
         if active_col:
-            draw_overrides_table(content_col, scene, active_col.nodegroups, True, "batch_stl_ui_global_ovr", f"Overrides [ {active_col.collection_name or 'Shared'} ]", is_locked=any_exporting)
+            draw_overrides_table(content_col, context.window_manager, active_col.nodegroups, True, "batch_stl_ui_collection_ovr", f"Overrides [ {active_col.collection_name or 'Shared'} ]", is_locked=any_exporting)
 
 
 class VIEW3D_PT_batch_export_stl_objects(bpy.types.Panel):
@@ -3629,11 +3755,11 @@ class VIEW3D_PT_batch_export_stl_objects(bpy.types.Panel):
         c_stats = stats.get("cols", {}).get(col_key, {"objs": 0, "exp": 0})
         draw_stats_table(content_col, [
             (c_stats['objs'], ICONS['OBJECT']),
-            (c_stats['exp'], ICONS['SWEEP'])
+            (format_count(c_stats), ICONS['SWEEP'])
         ])
 
         if active_obj:
-            draw_overrides_table(content_col, scene, active_obj.nodegroups, False, "batch_stl_ui_local_ovr", f"Overrides [ {active_obj.name} ]", is_locked=any_exporting)
+            draw_overrides_table(content_col, context.window_manager, active_obj.nodegroups, False, "batch_stl_ui_object_ovr", f"Overrides [ {active_obj.name} ]", is_locked=any_exporting)
 
 # ==============================================================================
 # === [ 6. REGISTRATION & LIFECYCLE ] ===
@@ -3662,9 +3788,66 @@ def sync_prev_values(scene):
             sync_groups(col.nodegroups)
             for obj in col.objects: sync_groups(obj.nodegroups)
 
-def sync_all_prev_values():
+# Version of the stored override data. A scene without a stored version predates versioning and is migrated on load.
+# 1: the value folder name (dir_tag) is split from the filename tag (tag).
+# 2: v1.0.0 typed values and sweeps become text; object entries drop `obj_ptr` (an ID pointer, which kept deleted
+#    objects alive) for `obj_uid`; the UI state moves from the Scene to the WindowManager.
+DATA_VERSION = 2
+
+# Scene properties of the UI state before it moved to the WindowManager (version 2)
+OLD_SCENE_UI_PROPS = ("batch_stl_ui_global_ovr_main", "batch_stl_ui_preset_ovr", "batch_stl_ui_global_ovr", "batch_stl_ui_local_ovr",
+                      "batch_stl_ui_global_ovr_nested", "batch_stl_ui_local_ovr_nested", "batch_stl_ui_tips", "batch_stl_collapsed_dirs",
+                      "batch_stl_info_tab", "batch_stl_info_global", "batch_stl_verbose_console")
+
+def iter_scene_nodegroup_lists(scene):
+    yield scene.batch_stl_global_nodegroups
+    for preset in scene.batch_stl_presets:
+        yield preset.nodegroups
+        for col in preset.collections:
+            yield col.nodegroups
+            for obj in col.objects: yield obj.nodegroups
+
+def iter_scene_inputs(scene):
+    for nodegroups in iter_scene_nodegroup_lists(scene):
+        for ng in nodegroups:
+            for n in ng.nodes: yield from n.inputs
+
+def del_stored_prop(owner, key):
+    """Remove a stored value of a property this version no longer registers."""
+    if key in owner.keys(): del owner[key]
+
+def migrate_scene_data(scene):
+    """Bring override data saved by older versions up to DATA_VERSION."""
+    version = scene.batch_stl_data_version if scene.is_property_set("batch_stl_data_version") else 0
+    if version >= DATA_VERSION: return
+    with raw_edits():
+        for inp in iter_scene_inputs(scene):
+            for v in inp.values:
+                # Before the split one tag named both the folder and the filename token
+                if version < 1 and not v.dir_tag and v.tag: v.dir_tag = v.tag
+                if version < 2:
+                    # Only unversioned scenes can be v1.0.0 data, whose unedited typed fields were not stored
+                    migrate_legacy_value(v, v.get, inp.override_type, fill_defaults=version < 1)
+                    for key in LEGACY_VALUE_KEYS: del_stored_prop(v, key)
+        if version < 2:
+            for preset in scene.batch_stl_presets:
+                for col in preset.collections:
+                    for entry in col.objects: del_stored_prop(entry, "obj_ptr")
+            for key in OLD_SCENE_UI_PROPS: del_stored_prop(scene, key)
+        scene.batch_stl_data_version = DATA_VERSION
+
+def stamp_data_version(scene):
+    """Scenes created in this session hold current data: record that, so a later load does not migrate them."""
+    if not scene.is_property_set("batch_stl_data_version"): scene.batch_stl_data_version = DATA_VERSION
+
+def prepare_scenes():
+    """Bring the data of every scene in the file up to date (after a load, or when the add-on is enabled)."""
     for scene in bpy.data.scenes:
-        try: sync_prev_values(scene)
+        try:
+            migrate_scene_data(scene)
+            sync_prev_values(scene)
+            restamp_object_uids(scene)
+            ensure_preset_uids(scene)
         except Exception: traceback.print_exc()
 
 @persistent
@@ -3672,8 +3855,8 @@ def reset_batch_stl_state(*args):
     try:
         for wm in bpy.data.window_managers: wm.batch_stl_jobs.clear()  # no export survives a file load
     except Exception: pass
-    if hasattr(bpy.data, "scenes"): sync_all_prev_values()
-    else: bpy.app.timers.register(sync_all_prev_values, first_interval=0.0)  # enabled from Preferences: bpy.data is still restricted
+    if hasattr(bpy.data, "scenes"): prepare_scenes()
+    else: bpy.app.timers.register(prepare_scenes, first_interval=0.0)  # enabled from Preferences: bpy.data is still restricted
     mark_dirty()
     if "--batch-stl-headless" not in sys.argv and not bpy.app.timers.is_registered(rebuild_ui_cache_if_dirty):
         bpy.app.timers.register(rebuild_ui_cache_if_dirty)
@@ -3685,32 +3868,44 @@ classes = (
     VIEW3D_PT_batch_export_stl_main, VIEW3D_PT_batch_export_stl_info, VIEW3D_PT_batch_export_stl_presets, VIEW3D_PT_batch_export_stl_collections, VIEW3D_PT_batch_export_stl_objects
 )
 
+# Open state of the override tables (Global, Preset, Collection, Object)
+UI_OPEN_PROPS = ("batch_stl_ui_global_ovr", "batch_stl_ui_preset_ovr", "batch_stl_ui_collection_ovr", "batch_stl_ui_object_ovr")
+WM_PROPS = ("batch_stl_jobs", "batch_stl_verbose_console", "batch_stl_ui_tips", "batch_stl_collapsed_dirs", "batch_stl_info_tab",
+            "batch_stl_info_global") + UI_OPEN_PROPS
+SCENE_PROPS = ("batch_stl_data_version", "batch_stl_root_dir", "batch_stl_presets", "batch_stl_preset_index", "batch_stl_global_nodegroups")
+
+def remove_stale_temp_dirs():
+    """Remove the temp folders of exports that crashed. A recent one may belong to an export running in another Blender
+    instance (its worker reads the folder after loading the file), so only old ones go."""
+    try:
+        tmp = tempfile.gettempdir()
+        for f in os.listdir(tmp):
+            path = os.path.join(tmp, f)
+            if f.startswith("fast_batch_stl_") and time.time() - os.path.getmtime(path) > STALE_TEMP_AGE:
+                shutil.rmtree(path, ignore_errors=True)
+    except Exception: pass
+
 def register():
     for cls in classes: bpy.utils.register_class(cls)
 
-    if "--batch-stl-headless" not in sys.argv:
-        try:
-            tmp = tempfile.gettempdir()
-            for f in os.listdir(tmp):
-                if f.startswith("fast_batch_stl_"):
-                    shutil.rmtree(os.path.join(tmp, f), ignore_errors=True)
-        except Exception: pass
+    if "--batch-stl-headless" not in sys.argv: remove_stale_temp_dirs()
 
-    bpy.types.WindowManager.batch_stl_jobs = bpy.props.CollectionProperty(type=BatchSTLJob)
+    # Runtime and UI state lives on the WindowManager: not part of the scene's data, so undo never touches it
+    WM = bpy.types.WindowManager
+    WM.batch_stl_jobs = bpy.props.CollectionProperty(type=BatchSTLJob)
+    WM.batch_stl_verbose_console = bpy.props.BoolProperty(name="Verbose Console Output", default=False)
+    for prop in UI_OPEN_PROPS: setattr(WM, prop, bpy.props.BoolProperty(default=True))
+    WM.batch_stl_ui_tips = bpy.props.BoolProperty(default=False)
+    WM.batch_stl_collapsed_dirs = bpy.props.StringProperty(default="[]")
+    WM.batch_stl_info_tab = bpy.props.EnumProperty(items=[('LOG', "Console Log", "", ICONS['CONSOLE'], 0), ('TREE', "Tree View", "", ICONS['TREE'], 1)], name="Info Tab", default='LOG', update=lambda s, c: mark_dirty())
+    WM.batch_stl_info_global = bpy.props.BoolProperty(name="Global Mode", default=False, update=lambda s, c: mark_dirty())
 
     Scene = bpy.types.Scene
     Scene.batch_stl_root_dir = bpy.props.StringProperty(name="Root", default="//", subtype="DIR_PATH", update=mark_dirty)
     Scene.batch_stl_presets = bpy.props.CollectionProperty(type=BatchSTLExportPreset)
     Scene.batch_stl_global_nodegroups = bpy.props.CollectionProperty(type=BatchSTLNodeGroup)
     Scene.batch_stl_preset_index = bpy.props.IntProperty(name="Active Preset", default=0, update=mark_dirty)
-    Scene.batch_stl_verbose_console = bpy.props.BoolProperty(name="Verbose Console Output", default=False, options={'SKIP_SAVE'})
-
-    for prop in ["batch_stl_ui_global_ovr_main", "batch_stl_ui_preset_ovr", "batch_stl_ui_global_ovr", "batch_stl_ui_local_ovr", "batch_stl_ui_global_ovr_nested", "batch_stl_ui_local_ovr_nested", "batch_stl_ui_tips"]:
-        setattr(Scene, prop, bpy.props.BoolProperty(default=True if ("nested" not in prop and "tips" not in prop) else False, options={'SKIP_SAVE'}))
-
-    Scene.batch_stl_collapsed_dirs = bpy.props.StringProperty(default="[]", options={'SKIP_SAVE'})
-    Scene.batch_stl_info_tab = bpy.props.EnumProperty(items=[('LOG', "Console Log", "", ICONS['CONSOLE'], 0), ('TREE', "Tree View", "", ICONS['TREE'], 1)], name="Info Tab", default='LOG', update=lambda s, c: mark_dirty(), options={'SKIP_SAVE'})
-    Scene.batch_stl_info_global = bpy.props.BoolProperty(name="Global Mode", default=False, update=lambda s, c: mark_dirty(), options={'SKIP_SAVE'})
+    Scene.batch_stl_data_version = bpy.props.IntProperty(default=0, options={'HIDDEN'})
 
     reset_batch_stl_state(None)
     if reset_batch_stl_state not in bpy.app.handlers.load_post: bpy.app.handlers.load_post.append(reset_batch_stl_state)
@@ -3732,10 +3927,9 @@ def unregister():
         try: bpy.utils.unregister_class(cls)
         except RuntimeError: pass
 
-    if hasattr(bpy.types.WindowManager, "batch_stl_jobs"): del bpy.types.WindowManager.batch_stl_jobs
-
-    props = ["batch_stl_root_dir", "batch_stl_presets", "batch_stl_preset_index", "batch_stl_global_nodegroups", "batch_stl_ui_global_ovr_main", "batch_stl_verbose_console", "batch_stl_ui_preset_ovr", "batch_stl_ui_global_ovr", "batch_stl_ui_local_ovr", "batch_stl_collapsed_dirs", "batch_stl_ui_tips", "batch_stl_ui_global_ovr_nested", "batch_stl_ui_local_ovr_nested", "batch_stl_info_tab", "batch_stl_info_global"]
-    for p in props:
+    for p in WM_PROPS:
+        if hasattr(bpy.types.WindowManager, p): delattr(bpy.types.WindowManager, p)
+    for p in SCENE_PROPS:
         if hasattr(bpy.types.Scene, p): delattr(bpy.types.Scene, p)
 
 if __name__ == "__main__":

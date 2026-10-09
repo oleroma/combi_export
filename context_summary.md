@@ -5,8 +5,9 @@ user-defined overrides (node group → node → input → values/sweeps) across 
 Global → Preset → Collection → Object. Values can create sub-folders and filename tokens. README.md (user-facing)
 and ARCHITECTURE.md (internals) are current, as is the in-addon EXTENSION GUIDE panel.
 
-Repo: `D:\extensions\combi_export` (git). Check `git status` for uncommitted work. Nothing has been tested inside
-Blender; logic was verified with mocked data outside Blender, the file compiles.
+Repo: `D:\extensions\combi_export` (git). Check `git status` for uncommitted work. Core logic, migrations and the
+headless worker are verified in background Blender 5.2.0 (probe scripts, 2026-10-09); the panels were only drawn
+against a fake layout, not used interactively.
 
 ---
 
@@ -28,6 +29,10 @@ Rules per name (`_place_dir_parts(parts, branch, known, kind)`):
    override/value **inactive** for this branch.
 3. Anything else → new folder / new token.
 Matching is case-sensitive.
+**Explicit value names only** (`is_explicit_name`): a value's folder/token goes through these rules only when its field
+names it outright (replace rule, e.g. `B`). Names derived from the value (blank, `_x`, `x_`) are always new, so two
+inputs sharing a value (`1`, `True`) multiply (`1/1`) instead of merging (bug found 2026-10-09: 3×3 gave 3 variants).
+They are still branch names that blocks anchor to.
 
 ### Key functions
 - `value_dir_label(val, tag)` (tag rules: `_x` append, `x_` prepend, `x` replace), `value_dir_names`, `value_tag_names`.
@@ -36,16 +41,20 @@ Matching is case-sensitive.
   each input (`(id(ovr), input_name)`).
 - `walk_override_branch(overrides, combo, known_before)` – **single source of truth**. Walks overrides top-to-bottom
   with `dir_branch` and `tag_branch`; returns `(active_input_ids, tags_by_level, paths_by_level)`.
-- `generate_override_combinations` – recursion over `_build_override_pools`, keeps only variations the walker marks
+- `generate_named_combinations` – recursion over `_build_override_pools`, keeps only variations the walker marks
   active; if no value of a pool applies the param stays default for that branch; leaf combos filtered + deduplicated.
-- `evaluate_combo_naming(combo, all_overrides)` → `(tags_by_level, paths_by_level)`.
+  Yields `(combo, tags_by_level, paths_by_level)` from the leaf walk (no second naming walk).
+  `generate_override_combinations` wraps it (combos only).
+- Headless loop: before applying a variant, `revert_overrides(..., skip=override_targets(combo))` restores every socket
+  the variant leaves out (otherwise the previous variant's value leaked into "default" branches).
 - `format_export_filename(obj_name, obj_tag, col_use_tag, col_tag, tags_by_level)` → `Object` + `_token` for every
   token in hierarchy order: Global ovr → Preset ovr → Collection tag → Collection ovr → Object tag → Object ovr
-  (consecutive duplicates collapsed). Example `Box_A_v2_1_lid.stl`.
+  (`join_name_segments`: a collection/object tag collapses into an equal neighbour; equal override tokens stay).
+  Example `Box_A_v2_1_lid.stl`.
   **Behaviour change:** collection/object tags are plain tokens now; the object tag no longer renames/prefixes the
   object name (user chose this). Old `_lid` style still works (edge `_` stripped).
 - `build_export_dir_parts` – folders: GLOBAL ovr, preset prefix, PRESET ovr, collection sub_path, COLLECTION ovr,
-  object sub_path, OBJECT ovr (consecutive duplicates collapsed).
+  object sub_path, OBJECT ovr (`join_name_segments`: only fixed parts collapse into an equal neighbour).
 - `get_override_signature` now includes block `ng_sub_path`/`node_sub_path`/`ng_tag`/`node_tag` (bug fix: objects
   differing only in block sub-folders were batched together in the headless worker and got the wrong folders).
 
@@ -55,8 +64,9 @@ Matching is case-sensitive.
 - `BatchSTLNodeGroup` / `BatchSTLNode`: new `tag` (+`prev_tag`) next to `sub_path`; both search fields.
 - `MockOverride` carries `ng_sub_path`, `node_sub_path`, `ng_tag`, `node_tag` (set in `get_flat_overrides`,
   kept by `resolve_overrides`). A block with only a sub-folder/tag and no inputs still becomes an override.
-- JSON: values `dir_tag`; blocks `tag`. Old JSON without `dir_tag` gets `dir_tag = tag`. Values already stored in
-  .blend files are NOT migrated (`dir_tag` empty).
+- JSON: values `dir_tag`; blocks `tag`. Old JSON without `dir_tag` gets `dir_tag = tag`. .blend data: scenes without
+  a stored `batch_stl_data_version` are migrated on load/register (`migrate_scene_data`: empty `dir_tag` = `tag`);
+  `_rebuild_ui_cache` stamps `DATA_VERSION` on the active scene so new scenes are never migrated.
 
 ## 3. Merge predictions in the UI (`BranchScope`)
 - Keys `(kind, name)`, kind "dir"/"tag". Each entry: description ("Branch"/"Name branch" for value names,
@@ -64,7 +74,8 @@ Matching is case-sensitive.
   different values of one input exclude each other, the folder and token of the same value coexist. Contexts mix both
   kinds (a block placed in folder C only sees tokens of the C branch, and vice versa).
 - `resolve(kind, parts, ctx, desc=None)` → `(new_ctx, hits, dead)`; `enter_block`; `add_input`; `suggestions(kind, ctx)`.
-  A plain name existing in several branches only adds the intersection of their requirements (known limitation:
+  Entries keep the set of inputs that create a name; a name created by several inputs excludes nothing.
+  `resolve_value` applies the explicit-name rule. A plain name existing in several branches only adds the intersection of their requirements (known limitation:
   suggestions can then be slightly too broad, never too narrow).
 - `upstream_scope(item)` → `(scope, ctx)` at any field via `item.path_from_id()` (`_PATH_STEP`). Export order:
   Global, Preset, Collection, Object lists; groups/nodes top to bottom; block sub-folder, then tag, then inputs.
@@ -83,12 +94,43 @@ Matching is case-sensitive.
 - `value_string` (float/int/string) is a plain text field (no search). Its clear button is an inline `PANEL_CLOSE`
   button → `table_action` `CLEAR_VALUE_STRING` (sets `""` → callback deletes value / emptied input). Not on sweeps.
 - **Group Output** is a valid node target, sorted after regular nodes (never the default). Group Input excluded.
-- Removed unused `itertools` import and the dummy `search_empty_cb`.
+- Removed the dummy `search_empty_cb`.
 
-## 5. Open points / ideas
+## 5. Review fixes (2026-10-09)
+- **Jobs** (`BatchSTLJob`, WindowManager) are keyed by `BatchSTLExportPreset.uid` (uuid, `ensure_preset_uids`) and
+  the scene's `session_uid`: `get_job(preset)`, `find_job`, `find_preset`. Undo, reordering, renaming and scene switches
+  no longer cancel or orphan an export; the undo handler only marks the cache dirty.
+- **Object entries** follow their object by `obj_uid` (`session_uid`, re-stamped by name on load in
+  `restamp_object_uids`); the old `obj_ptr` ID pointer kept deleted objects alive and is removed by migration.
+- **Evaluated objects only**: `live_collection_names` / `is_object_live` / `iter_export_objects` are the single filter
+  for counts, tree, clash check, fast path and worker. `write_object_stl` returns None for an object that is not
+  `is_evaluated` (logged as SKIPPED).
+- **Collisions**: `find_export_clashes` checks every output path at export (no limit, variants generated once per
+  signature via `group_by_signature`); the tree preview stays capped at `COUNT_LIMIT`.
+- **Menus**: `modifier_menu_items` (modifier RNA enum items) and `socket_menu_items` (items parsed from the TypeError
+  of an invalid assignment; draw code reuses `_socket_menu_memo`, refreshed by `refresh_menu_items` in each rebuild).
+  `sync_input_type` writes defaults inside `raw_edits()`, so an empty menu default no longer deletes the override.
+  Rejected values at export are logged once (`report_apply_failure`).
+- **Counting**: `_has_branch_anchors` → product of pool sizes; otherwise enumeration capped at `COUNT_LIMIT` (stats
+  show `5000+`). Walker results per override / pool value are cached on the Mock objects (`_cached`).
+- **UI state** moved to the WindowManager (`batch_stl_ui_global_ovr|preset_ovr|collection_ovr|object_ovr`,
+  `batch_stl_ui_tips`, `batch_stl_info_tab`, `batch_stl_info_global`, `batch_stl_collapsed_dirs`,
+  `batch_stl_verbose_console`).
+- **DATA_VERSION 2** (`migrate_scene_data`, run by `prepare_scenes` on load/register): v1.0.0 typed values/sweeps →
+  text (`migrate_legacy_value`, also used by JSON import, which now respects the input type), drop `obj_ptr`, drop the
+  old Scene UI properties.
+- Also: `use_combine` in copy/paste/JSON; sweep steps limited to `MAX_SWEEP_STEPS` (1000) in validation; stale temp
+  folders removed only after `STALE_TEMP_AGE` (1 day); dead code removed (unused `DEL_*` table actions, `mod[...]`
+  modifier access, menu index mapping).
+
+## 6. Open points / ideas
 - Verify in Blender: search dropdowns (dir + tag), merge bars (blue/red), toggle icons, X clear button look
   (`PANEL_CLOSE` vs `X`), undo entries, Group Output overrides, row width with the extra tag fields.
-- Optional: migrate `dir_tag` for existing .blend data (load_post handler + "migrated" flag).
+- Performance: counts cached per override signature in a rebuild; without branch anchors the count is a product of
+  pool sizes (no enumeration). `cached_menu_items()` around cache rebuild, panel draw and the export's clash check.
+- Known gaps: UI scope (`upstream_scope`) ignores `resolve_overrides`/`filter_overrides_for_object`, so a predicted
+  merge can differ from the export; a block's own folder/tag is added even when none of its inputs apply in a branch;
+  search-field undo assumption still unverified in the UI.
 - Optional: case-insensitive matching on Windows (`clash_key` already casefolds for path clashes).
 - Collection/object tags are not part of the merge scope (constant per object, merging into them would be a no-op).
 - UI preference: merges must be visually obvious; blue = merge, red (`alert`) = invalid / never applies.
