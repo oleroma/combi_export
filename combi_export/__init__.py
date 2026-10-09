@@ -10,7 +10,6 @@ Data Hierarchy: Global > Preset > Collection > Object > NodeGroup > Node > Input
 import os
 import json
 import time
-import itertools
 import contextlib
 import functools
 import math
@@ -1880,10 +1879,82 @@ def on_no_spaces_update(prop_name, label=""):
 
 _PATH_STEP = re.compile(r"(\w+)\[(\d+)\]")
 
-# A "dir scope" is {folder name: description} of the folders that exist at a point of the override stack.
-def _scope_add_parts(scope, text, desc):
-    for name in split_path_parts(text):
-        scope.setdefault(name, desc)
+# --- Merge predictions -------------------------------------------------------------------------------------------
+# DirScope mirrors walk_override_branch for the UI, without enumerating permutations. It records every folder that
+# exists at a point of the override stack together with the branch context it was created in, so suggestions and
+# merge highlights only offer folders that can actually coexist with the merges already made above a field.
+#
+# - A branch name is a folder created by a value. Values of the same input are alternatives: the folders "A", "B",
+#   "C" of one input never appear in the same permutation, so they exclude each other.
+# - A context is the set of branch names a block is merged into (plus what those names themselves require).
+# - A folder created inside a merged block exists only in that context, e.g. "X" made under a block merged into "A"
+#   is never available inside a block merged into "C".
+
+class DirScope:
+    def __init__(self):
+        self.entries = {}  # name -> {"desc": str, "group": key or None, "reqs": [frozenset(branch names)]}
+
+    def copy(self):
+        dup = DirScope()
+        dup.entries = {k: {"desc": e["desc"], "group": e["group"], "reqs": list(e["reqs"])} for k, e in self.entries.items()}
+        return dup
+
+    def __contains__(self, name): return name in self.entries
+    def desc(self, name): return self.entries[name]["desc"]
+    def is_branch(self, name): return name in self.entries and self.entries[name]["group"] is not None
+
+    def _excludes(self, a, b):
+        ga = self.entries.get(a, {}).get("group")
+        return a != b and ga is not None and ga == self.entries.get(b, {}).get("group")
+
+    def _req_set(self, name, ctx):
+        """Branches `name` certainly requires alongside the context `ctx` (shared by every way it can exist there),
+        or None when it can never exist in `ctx`."""
+        e = self.entries.get(name)
+        if not e or any(self._excludes(name, k) for k in ctx): return None
+        fits = [reqs for reqs in e["reqs"] if not any(self._excludes(r, k) for r in reqs for k in ctx)]
+        return frozenset.intersection(*fits) if fits else None
+
+    def available(self, name, ctx): return self._req_set(name, ctx) is not None
+
+    def add(self, name, desc, ctx, group=None):
+        e = self.entries.setdefault(name, {"desc": desc, "group": group, "reqs": []})
+        if e["group"] is None and group is not None: e["group"] = group
+        reqs = frozenset(k for k in ctx if k != name)
+        if reqs not in e["reqs"]: e["reqs"].append(reqs)
+
+    def resolve(self, parts, ctx, desc=None):
+        """Walk a sub-folder path inside context `ctx` like the exporter does.
+
+        Returns (new_ctx, hits, dead): `hits` merge into existing folders, `dead` are branch names that cannot exist
+        in this context (the exporter then never applies the block). With `desc`, new folders are recorded."""
+        ctx, hits, dead = set(ctx), [], []
+        for p in parts:
+            reqs = self._req_set(p, ctx)
+            if reqs is not None:
+                hits.append(p)
+                if self.is_branch(p): ctx.add(p)
+                ctx.update(reqs)
+            elif self.is_branch(p):
+                dead.append(p)
+            elif desc is not None:
+                self.add(p, desc, ctx)
+        return frozenset(ctx), hits, dead
+
+    def add_input(self, ng, ng_ptr, node, inp, ctx):
+        """Record the folders an input's values create inside context `ctx`."""
+        group = (ng.group_name, clean_node_name(node.name), inp.name)
+        desc = f"Branch · {ng.group_name} › {inp.name}"
+        for val in inp.values:
+            names = _value_folder_names(ng_ptr, node, inp, val)
+            _ctx, hits, dead = self.resolve(names, ctx)
+            if dead: continue  # this value never applies, so its folders never exist
+            for name in names:
+                if name not in hits: self.add(name, desc, ctx, group)
+
+    def suggestions(self, ctx, exclude=()):
+        """{name: description} of the folders available in context `ctx`, in stack order."""
+        return {n: e["desc"] for n, e in self.entries.items() if n not in ctx and n not in exclude and self.available(n, ctx)}
 
 def _value_folder_names(ng_ptr, node, inp, val):
     """Folder names one UI value creates (sweep steps included)."""
@@ -1894,33 +1965,28 @@ def _value_folder_names(ng_ptr, node, inp, val):
 def _group_folder_desc(ng): return f"Folder · {ng.group_name}"
 def _node_folder_desc(ng, node): return f"Folder · {ng.group_name} › {clean_node_name(node.name) or 'Modifier'}"
 
-def _scope_add_input(scope, ng, ng_ptr, node, inp):
-    for val in inp.values:
-        for name in _value_folder_names(ng_ptr, node, inp, val):
-            scope.setdefault(name, f"Branch · {ng.group_name} › {inp.name}")
-
-def merge_hits(names, scope):
-    """The names that merge into a folder already in `scope`, in order, without repeats."""
-    return [n for n in dict.fromkeys(names) if n in scope]
-
-def merge_tooltip(hits, scope):
-    lines = [f"{name}  ({scope[name]})" for name in hits]
-    if any(scope[name].startswith("Branch") for name in hits):
+def merge_tooltip(hits, dead, scope):
+    lines = [f"{name}  ({scope.desc(name)})" for name in hits]
+    if dead:
+        lines += [f"{name}  ({scope.desc(name)}) cannot exist here" for name in dead]
+        lines.append("No branch contains all of these folders together, so this block and everything inside it never applies")
+    elif any(scope.is_branch(name) for name in hits):
         lines.append("This block and everything inside it only applies to the branches that contain these folders")
     else:
         lines.append("This block and everything inside it is placed inside these existing folders")
     return "\n".join(lines)
 
-def upstream_dir_suggestions(item):
-    """Folder names defined above `item` in the override stack, in export order, as {name: description}.
+def upstream_dir_scope(item):
+    """(DirScope, context) at `item` in the override stack: the folders that exist before it and the branches the
+    blocks around it are merged into.
 
     Order matches the exporter: Global, Preset, Collection, Object lists; inside a list node groups and nodes top to
-    bottom; inside a node its sub-folder first, then its inputs. Only what comes before `item` is listed, because
-    only those folders exist yet when `item` is evaluated."""
+    bottom; inside a node its sub-folder first, then its inputs. Only what comes before `item` exists yet."""
+    scope, empty = DirScope(), frozenset()
     scene = item.id_data
     try: steps = _PATH_STEP.findall(item.path_from_id())
-    except (ValueError, AttributeError): return {}
-    if not steps: return {}
+    except (ValueError, AttributeError): return scope, empty
+    if not steps: return scope, empty
 
     # Resolve the chain of override lists that lead to the item, plus the item's position in its own list.
     lists, pos = [scene.batch_stl_global_nodegroups], {}
@@ -1934,41 +2000,40 @@ def upstream_dir_suggestions(item):
         if attr in ("nodegroups", "batch_stl_global_nodegroups", "nodes", "inputs"): pos[attr if attr != "batch_stl_global_nodegroups" else "nodegroups"] = int(idx)
     own = lists[-1]
 
-    out = {}
-    def add_node(ng, ng_ptr, node, input_limit=None):
-        _scope_add_parts(out, node.sub_path, _node_folder_desc(ng, node))
+    def add_node(ng, ng_ptr, node, ng_ctx, input_limit=None):
+        n_ctx = scope.resolve(split_path_parts(node.sub_path), ng_ctx, _node_folder_desc(ng, node))[0]
         for i_idx, inp in enumerate(node.inputs):
             if input_limit is not None and i_idx >= input_limit: break
-            _scope_add_input(out, ng, ng_ptr, node, inp)
+            scope.add_input(ng, ng_ptr, node, inp, n_ctx)
+        return n_ctx
 
-    def add_group(ng, node_limit=None, input_limit=None):
+    def add_group(ng):
         ng_ptr = bpy.data.node_groups.get(ng.group_name)
-        _scope_add_parts(out, ng.sub_path, _group_folder_desc(ng))
-        for n_idx, node in enumerate(ng.nodes):
-            if node_limit is not None and n_idx >= node_limit:
-                if input_limit is not None and n_idx == node_limit: add_node(ng, ng_ptr, node, input_limit)
-                break
-            add_node(ng, ng_ptr, node)
+        ng_ctx = scope.resolve(split_path_parts(ng.sub_path), empty, _group_folder_desc(ng))[0]
+        for node in ng.nodes: add_node(ng, ng_ptr, node, ng_ctx)
 
     for lst in lists[:-1]:
         for ng in lst: add_group(ng)
 
     g = pos.get("nodegroups", len(own))
     for ng in list(own)[:g]: add_group(ng)
-    if g < len(own) and isinstance(item, (BatchSTLNode, BatchSTLValue)):
-        ng = own[g]
-        if isinstance(item, BatchSTLNode):
-            # The node's own group sub-folder already exists when the node is evaluated.
-            _scope_add_parts(out, ng.sub_path, _group_folder_desc(ng))
-            for node in list(ng.nodes)[:pos.get("nodes", 0)]: add_node(ng, bpy.data.node_groups.get(ng.group_name), node)
-        else:
-            add_group(ng, node_limit=pos.get("nodes", 0), input_limit=pos.get("inputs", 0))
-    return out
+    if g >= len(own) or not isinstance(item, (BatchSTLNode, BatchSTLValue)): return scope, empty
+
+    # Inside the item's own group: its sub-folder (and the node's, for a value) already exist and set the context.
+    ng = own[g]
+    ng_ptr = bpy.data.node_groups.get(ng.group_name)
+    ng_ctx = scope.resolve(split_path_parts(ng.sub_path), empty, _group_folder_desc(ng))[0]
+    n_pos = pos.get("nodes", 0)
+    for node in list(ng.nodes)[:n_pos]: add_node(ng, ng_ptr, node, ng_ctx)
+    if isinstance(item, BatchSTLNode) or n_pos >= len(ng.nodes): return scope, ng_ctx
+    return scope, add_node(ng, ng_ptr, ng.nodes[n_pos], ng_ctx, input_limit=pos.get("inputs", 0))
 
 def make_dir_search_cb(prop_name, multi_part=True):
-    """Search list for a folder field: upstream folder names to merge into. Free text is still allowed.
+    """Search list for a folder field: upstream folders that can exist in this branch, to merge into.
+    Free text is still allowed.
 
-    For sub-folder paths the suggestion completes the last path part, so 'C/' offers 'C/2', 'C/3', ..."""
+    For sub-folder paths the suggestion completes the last path part inside the branch chosen so far, so 'C/' offers
+    'C/2', 'C/3', ... but not 'C/A' (A and C are alternatives of the same input)."""
     def search(self, context, edit_text):
         current = getattr(self, prop_name, "")
         if edit_text == current and "/" not in current and "\\" not in current: edit_text = ""
@@ -1976,11 +2041,12 @@ def make_dir_search_cb(prop_name, multi_part=True):
         if multi_part:
             cut = max(edit_text.rfind("/"), edit_text.rfind("\\"))
             if cut >= 0: prefix, query = edit_text[:cut + 1], edit_text[cut + 1:]
-        used = set(split_path_parts(prefix))
-        suggestions = upstream_dir_suggestions(self)
+        scope, ctx = upstream_dir_scope(self)
+        used = split_path_parts(prefix)
+        ctx = scope.resolve(used, ctx)[0]
         q = query.lower()
-        return [(prefix + name, desc) for name, desc in suggestions.items()
-                if name not in used and (not q or q in name.lower())]
+        return [(prefix + name, desc) for name, desc in scope.suggestions(ctx, exclude=used).items()
+                if not q or q in name.lower()]
     return search
 
 class BatchSTLLogLine(bpy.types.PropertyGroup): text: bpy.props.StringProperty()
@@ -2348,6 +2414,7 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
         if act == 'DEL_VALUE': return "Delete this Value Permutation"
         if act in ('DEL_VALUE_OR_INPUT', 'DEL_VALUE_MIXED'): return "Delete Value (Deletes entire Input if it's the last iteration)"
         if act == 'VALUE_ACTION': return "Add Permutation (Shift: Toggle Sweep range mode)"
+        if act == 'CLEAR_VALUE_STRING': return "Clear this value (deletes it, and the input if it is the last value)"
         if act == 'TOGGLE_VALUE_USE_DIR': return "Toggle sub-directory folder structuring for this iteration"
         if act == 'TOGGLE_VALUE_USE_TAG': return "Toggle dynamic filename tagging for this iteration"
         if act == 'TOGGLE_COLLECTION_USE_TAG': return "Toggle collection-level filename prefix/suffix tag"
@@ -2568,7 +2635,11 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
                 ng_list = self._resolve_context_list(context, preset)
                 if ng_list is None: return {'CANCELLED'}
 
-                if self.action in ('TOGGLE_VALUE_USE_DIR', 'TOGGLE_VALUE_USE_TAG'):
+                if self.action == 'CLEAR_VALUE_STRING':
+                    # Same as emptying the field by hand: on_value_update deletes the value (and an emptied input)
+                    if 0 <= self.ng_idx < len(ng_list) and 0 <= self.n_idx < len(ng_list[self.ng_idx].nodes) and 0 <= self.i_idx < len(ng_list[self.ng_idx].nodes[self.n_idx].inputs) and 0 <= self.v_idx < len(ng_list[self.ng_idx].nodes[self.n_idx].inputs[self.i_idx].values):
+                        ng_list[self.ng_idx].nodes[self.n_idx].inputs[self.i_idx].values[self.v_idx].value_string = ""
+                elif self.action in ('TOGGLE_VALUE_USE_DIR', 'TOGGLE_VALUE_USE_TAG'):
                     if 0 <= self.ng_idx < len(ng_list) and 0 <= self.n_idx < len(ng_list[self.ng_idx].nodes) and 0 <= self.i_idx < len(ng_list[self.ng_idx].nodes[self.n_idx].inputs) and 0 <= self.v_idx < len(ng_list[self.ng_idx].nodes[self.n_idx].inputs[self.i_idx].values):
                         val = ng_list[self.ng_idx].nodes[self.n_idx].inputs[self.i_idx].values[self.v_idx]
                         if self.action == 'TOGGLE_VALUE_USE_DIR': val.use_dir = not val.use_dir
@@ -3015,20 +3086,23 @@ def draw_overrides_table(layout, scene, nodegroups, is_collection, is_open_prop,
         content_col.label(text="No overrides defined.")
         return
 
-    def draw_merge_bar(parent, hits):
-        """Blue bar on top of a block whose sub-folder merges into upstream folders: marks the block and its children."""
-        op = parent.row(align=True).operator("batch_stl.merge_info", text="Merges into " + " / ".join(hits), icon=ICONS['MERGE'], depress=True)
-        op.info = merge_tooltip(hits, scope)
+    def draw_merge_bar(parent, hits, dead):
+        """Bar on top of a block whose sub-folder merges into upstream folders: marks the block and its children.
+        Blue for a merge, red when the chosen folders can never exist together (the block never applies)."""
+        row = parent.row(align=True)
+        row.alert = bool(dead)
+        text = ("Never applies: " if dead else "Merges into ") + " / ".join(hits + dead)
+        op = row.operator("batch_stl.merge_info", text=text, icon=ICONS['ERROR'] if dead else ICONS['MERGE'], depress=not dead)
+        op.info = merge_tooltip(hits, dead, scope)
 
-    # Folders that exist so far, built in export order while drawing (same order as upstream_dir_suggestions)
-    scope = dict(upstream_dir_suggestions(nodegroups[0]))
+    # Folders that exist so far and their branch contexts, built in export order while drawing
+    scope = upstream_dir_scope(nodegroups[0])[0]
 
     for ng_idx, ng in enumerate(nodegroups):
         ng_box = content_col.box()
         ng_layout = ng_box.column()
-        ng_hits = merge_hits(split_path_parts(ng.sub_path), scope)
-        if ng_hits: draw_merge_bar(ng_layout, ng_hits)
-        _scope_add_parts(scope, ng.sub_path, _group_folder_desc(ng))
+        ng_ctx, ng_hits, ng_dead = scope.resolve(split_path_parts(ng.sub_path), frozenset(), _group_folder_desc(ng))
+        if ng_hits or ng_dead: draw_merge_bar(ng_layout, ng_hits, ng_dead)
         ng_row = ng_layout.row(align=True)
 
         if ng.group_name:
@@ -3037,7 +3111,7 @@ def draw_overrides_table(layout, scene, nodegroups, is_collection, is_open_prop,
         ng_sub.alert = not is_override_group_valid(ng)
         ng_sub.prop(ng, "group_name", text="")
         ng_row.prop(ng, "use_combine", text="", icon=ICONS['COMBINE'])
-        ng_row.prop(ng, "sub_path", text="", icon=ICONS['MERGE'] if ng_hits else ICONS['DIR'])
+        ng_row.prop(ng, "sub_path", text="", icon=ICONS['MERGE'] if ng_hits or ng_dead else ICONS['DIR'])
         draw_op(ng_row, 'MOVE_GROUP_UP', ICONS['UP'], ng_idx=ng_idx)
         draw_op(ng_row, 'MOVE_GROUP_DOWN', ICONS['DOWN'], ng_idx=ng_idx)
         draw_op(ng_row, 'COPY_GROUP', ICONS['COPY'], ng_idx=ng_idx)
@@ -3056,16 +3130,15 @@ def draw_overrides_table(layout, scene, nodegroups, is_collection, is_open_prop,
         for n_idx, node in enumerate(ng.nodes):
             node_container = nodes_layout.box()
             node_layout = node_container.column()
-            n_hits = merge_hits(split_path_parts(node.sub_path), scope)
-            if n_hits: draw_merge_bar(node_layout, n_hits)
-            _scope_add_parts(scope, node.sub_path, _node_folder_desc(ng, node))
+            n_ctx, n_hits, n_dead = scope.resolve(split_path_parts(node.sub_path), ng_ctx, _node_folder_desc(ng, node))
+            if n_hits or n_dead: draw_merge_bar(node_layout, n_hits, n_dead)
 
             n_row = node_layout.row(align=True)
             draw_op(n_row, 'ADD_INPUT', ICONS['ADD'], ng_idx=ng_idx, n_idx=n_idx)
             n_sub = n_row.row(align=True)
             n_sub.alert = not is_override_node_valid(ng_ptr, node)
             n_sub.prop(node, "name", text="", icon=ICONS['NODE'])
-            n_row.prop(node, "sub_path", text="", icon=ICONS['MERGE'] if n_hits else ICONS['DIR'])
+            n_row.prop(node, "sub_path", text="", icon=ICONS['MERGE'] if n_hits or n_dead else ICONS['DIR'])
 
             if len(ng.nodes) > 1:
                 draw_op(n_row, 'MOVE_NODE_UP', ICONS['UP'], ng_idx=ng_idx, n_idx=n_idx)
@@ -3128,15 +3201,22 @@ def draw_overrides_table(layout, scene, nodegroups, is_collection, is_open_prop,
                         prop_name = prop_map.get(inp.override_type)
                         if prop_name:
                             c_val_prop.prop(val, prop_name, text="")
+                            if prop_name == "value_string":
+                                # Plain text fields have no built-in clear button (only search fields do), so add one
+                                op = c_val_prop.operator("batch_stl.table_action", text="", icon='PANEL_CLOSE', emboss=False)
+                                op.action, op.is_collection, op.is_preset, op.is_global = 'CLEAR_VALUE_STRING', is_collection, is_preset, is_global
+                                op.ng_idx, op.n_idx, op.i_idx, op.v_idx = ng_idx, n_idx, i_idx, v_idx
                         else:
                             c_val_prop.label(text="Unsupported socket type", icon=ICONS['ERROR'])
 
                     # Directory and filename tag: each toggle drives only its own field.
-                    # A folder that merges into an upstream one shows the merge icon on its toggle.
-                    v_hits = merge_hits(_value_folder_names(ng_ptr, node, inp, val), scope)
+                    # A folder that merges into an upstream one shows the merge icon on its toggle; red when that
+                    # folder cannot exist in this block's branch (the value never applies).
+                    _v_ctx, v_hits, v_dead = scope.resolve(_value_folder_names(ng_ptr, node, inp, val), n_ctx)
                     s_dir_tag = c_dir.split(factor=0.5, align=True)
                     c_d = s_dir_tag.row(align=True)
-                    draw_op(c_d, 'TOGGLE_VALUE_USE_DIR', ICONS['MERGE'] if v_hits else ICONS['DIR'], depress=val.use_dir, ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx, v_idx=v_idx)
+                    c_d.alert = bool(v_dead)
+                    draw_op(c_d, 'TOGGLE_VALUE_USE_DIR', ICONS['MERGE'] if v_hits or v_dead else ICONS['DIR'], depress=val.use_dir, ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx, v_idx=v_idx)
                     c_d_field = c_d.row(align=True); c_d_field.active = val.use_dir
                     c_d_field.prop(val, "dir_tag", text="")
                     c_t = s_dir_tag.row(align=True)
@@ -3144,7 +3224,7 @@ def draw_overrides_table(layout, scene, nodegroups, is_collection, is_open_prop,
                     c_t_field = c_t.row(align=True); c_t_field.active = val.use_tag
                     c_t_field.prop(val, "tag", text="")
 
-                _scope_add_input(scope, ng, ng_ptr, node, inp)
+                scope.add_input(ng, ng_ptr, node, inp, n_ctx)
 
 
 class VIEW3D_PT_batch_export_stl_main(bpy.types.Panel):
@@ -3258,6 +3338,7 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
             child_col = split.column()
             child_col.label(text="  • Global > Preset > Collection > Object", icon=ICONS['BLANK'])
             child_col.label(text="  • Modifiers: Leave Node empty or set to <Modifier Interface>", icon=ICONS['BLANK'])
+            child_col.label(text="  • Group Output: Can be targeted to override what the group outputs", icon=ICONS['NODE'])
             box_col.separator()
 
             box_col.label(text="Shortcuts & Ergonomics:", icon=ICONS['INFO'])
@@ -3267,7 +3348,7 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
             child_col.label(text="  • Shift + Add Input (+): Auto-populates all exposed inputs", icon=ICONS['ADD'])
             child_col.label(text="  • Shift + Up/Down: Move group to parent tier / copy to all child tiers", icon=ICONS['UP'])
             child_col.label(text="  • Copy/Paste/Import/Export: Transfer configurations seamlessly", icon=ICONS['COPY'])
-            child_col.label(text="  • Instant Deletion: Empty a field & submit to delete it", icon=ICONS['DEL'])
+            child_col.label(text="  • Instant Deletion: Empty a field & submit, or click its X, to delete it", icon=ICONS['DEL'])
             child_col.label(text="  • Validation: Invalid inputs are rejected and reset safely", icon=ICONS['CHECK_ON'])
             box_col.separator()
 
@@ -3284,9 +3365,21 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
             split = box_col.split(factor=0.05)
             split.column()
             child_col = split.column()
-            child_col.label(text="  • Directory (Folder): Routes variant to a dedicated sub-folder", icon=ICONS['DIR'])
-            child_col.label(text="  • Tag (Bookmark): Formats filename according to rules", icon=ICONS['TAG'])
-            child_col.label(text="  • Rules: [ tag ] = Replace, [ _tag ] = Append, [ tag_ ] = Prepend", icon=ICONS['BLANK'])
+            child_col.label(text="  • Directory (Folder): Routes variant to a sub-folder named by its field", icon=ICONS['DIR'])
+            child_col.label(text="  • Tag (Bookmark): Adds the value to the filename, named by its field", icon=ICONS['TAG'])
+            child_col.label(text="  • Each toggle enables only its own field", icon=ICONS['BLANK'])
+            child_col.label(text="  • Rules (both fields): [ tag ] = Replace, [ _tag ] = Append, [ tag_ ] = Prepend", icon=ICONS['BLANK'])
+            box_col.separator()
+
+            box_col.label(text="Branch Merging:", icon=ICONS['MERGE'])
+            split = box_col.split(factor=0.05)
+            split.column()
+            child_col = split.column()
+            child_col.label(text="  • Name an upstream folder to merge into that branch only", icon=ICONS['BLANK'])
+            child_col.label(text="  • B = only B permutations, C/2 = only C2, 2 = every 2 branch", icon=ICONS['BLANK'])
+            child_col.label(text="  • Folder fields list upstream folders that fit the current branch", icon=ICONS['DIR'])
+            child_col.label(text="  • Blue bar: block and children merge (hover for sources)", icon=ICONS['MERGE'])
+            child_col.label(text="  • Red bar: folders never exist together, block never applies", icon=ICONS['ERROR'])
             box_col.separator()
 
             box_col.label(text="Tree View & Output Console:", icon=ICONS['TREE'])

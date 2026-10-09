@@ -36,7 +36,7 @@ Define temporary parameter overrides and sweeps across an 8-tier hierarchy:
 `Global` → `Preset` → `Collection` → `Object` → `NodeGroup` → `Node` → `Input Socket` → `Value / Sweep`
 
 * **Override Semantics:** A more specific level replaces the inherited value of the same socket (an Object value replaces a Collection, Preset or Global value). Several values on the *same* level are variants and are all exported.
-* **Target Flexibility:** Target either exposed modifier interface sockets (`<Modifier Interface>`) or specific internal nodes within a Geometry Node tree.
+* **Target Flexibility:** Target either exposed modifier interface sockets (`<Modifier Interface>`) or specific internal nodes within a Geometry Node tree, including the `Group Output` node (its unlinked inputs set what the group outputs).
 * **Type Auto-Detection:** Automatically inspects the node tree interface and infers socket data types (`FLOAT`, `INT`, `BOOLEAN`, `STRING`, `MENU`). Other socket types (vectors, colors, objects, ...) are flagged as unsupported and block the export until removed.
 * **Menu/Enum Auto-Populate:** Searches and lists available items for Menu Switch nodes.
 
@@ -44,7 +44,7 @@ Define temporary parameter overrides and sweeps across an 8-tier hierarchy:
 Generate variant permutations across any socket:
 * **Float / Int Ranges:** Define numeric sweeps via explicit Value start, Value step, and Number of steps controls, or string ranges.
 * **Boolean & Menu Combinations:** Automatically iterates through `True`/`False` states or all enum options.
-* **Cartesian Product Generator:** Calculates multi-dimensional permutation matrices using `itertools.product`, ensuring all parameter combinations are generated systematically.
+* **Branch-Aware Combinations:** Every parameter combination is generated, except where an override is limited to one branch of the folder tree (see *Branch Merging*). Such an override only multiplies the permutations of that branch.
 
 ### 5. Predictive Directory Tree & Overwrite Protection
 * **Interactive Nested UI Hierarchy:** Calculates permutations ahead of time and displays an interactive directory hierarchy using collapsible nested UI boxes and indentation. Dedicated toolbar buttons let you quickly toggle the Global View, Expand All, Collapse All, or recursively Expand Last subdirectory.
@@ -55,7 +55,7 @@ Generate variant permutations across any socket:
 * **Shift + Up/Down Arrows:** Shift + Up moves an override group to the parent tier (e.g., from Object up to its Collection). Shift + Down copies it to every nested child tier and removes it from the current one (e.g., from Preset down to all its Collections, or Collection down to all its Objects).
 * **Shift + Add Input (+):** Auto-populates all available and exposed inputs for the selected Geometry Node.
 * **Instant Deletion:** Emptying a Node Group, Node, Input, or Value field (and submitting) instantly deletes the iteration.
-* **Non-Destructive Clear (X):** Float and integer fields use unified strings with built-in clear ('X') buttons, maintaining safe, single-action undo stack operations.
+* **Clear Button (X):** Float, integer and string value fields have an inline clear button that deletes the value (and the input when it was the last value) in a single undo step. Menu and boolean values keep Blender's own clear button.
 * **Validation Check:** Real-time socket validation rejects invalid inputs/nodes and instantly reverts to the last known valid state.
 
 ### 7. Scoped Live Console & Progress Tracking
@@ -71,16 +71,29 @@ Generate variant permutations across any socket:
 * **Per-Object Overrides:** Assign distinct tags, sub-folders, and dedicated node override groups down to individual objects.
 
 ### 9. Dynamic Tagging & Directory Formatting
-* **Sub-Directory Creation (`FILE_FOLDER`):** Route variant exports into dedicated sub-folders per value iteration. The folder name has its own field, independent of the filename tag.
-* **Filename Tag (`BOOKMARKS`):** Add the value to the exported filename. The tag has its own field.
+* **Two Separate Fields per Value:** Each value has a directory field and a filename-tag field side by side. Each toggle button enables only its own field (a disabled field is greyed out).
+* **Sub-Directory Creation (`FILE_FOLDER`):** Route variant exports into dedicated sub-folders per value iteration, named by the directory field.
+* **Filename Tag (`BOOKMARKS`):** Add the value to the exported filename, formatted by the tag field.
 * **Naming Rules (same for both fields):**
   - `tag`: Replaces the socket value label entirely (`tag`).
   - `tag_`: Prepends the tag to the value (`tag_15`).
   - `_tag`: Appends the tag to the value (`15_tag`).
   - Blank: Defaults to the formatted parameter value.
 
-### 10. JSON Preset Portability & Clipboard Buffer
-* **Import / Export Setup:** Save or restore presets, collections, object lists, exclusion states, and override matrices to external JSON files.
+### 10. Branch Merging
+Values with a folder create branches in the output tree, e.g. letters `A B C` × numbers `1 2 3` give `A/1 … C/3`. An override further down the stack can be attached to an existing branch instead of multiplying every permutation:
+* **Merge by Name:** When a node group sub-folder, node sub-folder, or value directory names a folder that already exists upstream, the override merges into it. Its own folders are created inside the branch, below the folders already there.
+  - Sub-folder `B` → only the B permutations get the new values: `B/1/X`, `B/1/Y`, … The A and C branches stay as they are.
+  - Sub-folder `C/2` → only `C/2/X`, `C/2/Y`, …
+  - Sub-folder `2` → every `2` branch: `A/2/X`, `B/2/X`, `C/2/X`, …
+* **Matching Rules:** A name may match any parent folder of the branch, not only the last one. Several names (`C/2`) must appear in that order. A branch name that is missing from a branch means the override does not apply there; any other name simply becomes a new folder.
+* **Upstream Suggestions:** Folder fields are searchable and list the folders that exist above them, each labelled as a *Branch* (created by a value) or a *Folder* (a plain sub-folder) with its source. Free text is still allowed. In sub-folder paths the suggestion completes the last part, so typing `C/` offers `C/1`, `C/2`, …
+* **Branch-Aware Predictions:** Suggestions only list folders that can exist together with the merges already made above the field. Inside a block merged into `C`, the alternatives `A` and `B` are not offered, and neither are folders that exist only under `A`.
+* **Merge Highlighting:** A node group or node that merges shows a blue *Merges into …* bar on top of its block, covering everything inside it. Its folder icon becomes a merge icon. A value whose folder merges shows the merge icon on its folder toggle. Hover the bar to see where each folder comes from.
+* **Dead Merge Warning:** If the chosen folders can never exist together (e.g. `C/X` when `X` only exists under `A`), the bar turns red (*Never applies*) because that block is never exported. A value with such a folder gets a red folder toggle.
+
+### 11. JSON Preset Portability & Clipboard Buffer
+* **Import / Export Setup:** Save or restore presets, collections, object lists, exclusion states, and override matrices to external JSON files. Presets saved before directory and tag were split into two fields reuse their old tag as the directory name, so their folders keep their names.
 * **Internal Clipboard:** Copy and paste presets, collections, and node groups between tiers with one click.
 
 ---

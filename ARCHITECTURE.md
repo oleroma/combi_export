@@ -44,7 +44,7 @@
                                       |                                           |
                                       |  • Group objects by override signature    |
                                       |  • Dynamic depsgraph culling (lc.exclude) |
-                                      |  • Itertools combinatorial sweep          |
+                                      |  • Branch-aware combinatorial sweep       |
                                       |  • Apply overrides -> depsgraph -> mesh   |
                                       |  • write_object_stl                       |
                                       |  • Revert baseline states                 |
@@ -72,9 +72,11 @@ The add-on structures export configurations in a strictly scoped 8-tier hierarch
    - Provides per-object export toggling (`export`), filename tag (`tag`), object subfolder (`sub_path`), and object-level overrides (`nodegroups`).
 4. **`BatchSTLNodeGroup`**:
    - Targets a Geometry Node tree by name (`group_name`).
+   - Optional sub-folder path (`sub_path`) and `use_combine` to merge identical sockets of different groups.
    - Contains a list of `BatchSTLNode` blocks.
 5. **`BatchSTLNode`**:
-   - Targets an internal node name within the node group, or `"<Modifier Interface>"` to target the modifier interface sockets directly.
+   - Targets an internal node name within the node group, or `"<Modifier Interface>"` to target the modifier interface sockets directly. `Group Output` is a valid target (listed after the regular nodes so it never becomes the default); `Group Input` has no inputs and is not offered.
+   - Optional sub-folder path (`sub_path`).
 6. **`BatchSTLInput`**:
    - Targets an input socket (`name`) and its inferred data type (`override_type`: `FLOAT`, `INT`, `BOOLEAN`, `STRING`, `MENU`).
 7. **`BatchSTLValue`**:
@@ -123,7 +125,7 @@ When generating variations for an object, overrides are gathered in hierarchical
   4. **Headless Execution Engine (`run_headless_export`)**:
      - **Phase 0 (Depsgraph Culling)**: Groups objects by override signature (`execution_batches`). Excludes unrelated layer collections (`lc.exclude = True`) to prevent Blender from evaluating unneeded geometry trees during node updates.
      - **Baseline Capture (`capture_baseline_states`)**: Caches baseline modifier socket values, internal node socket defaults, and node link connections.
-     - **Combinatorial Cartesian Product (`generate_override_combinations`)**: Evaluates `itertools.product` across all parameter pools and sweeps.
+     - **Branch-Aware Combinations (`generate_override_combinations`)**: Recursively picks one value per parameter pool (sweeps expanded) and keeps only the values that apply to the branch built so far. See *Branching & Merging* below.
      - **Evaluation Loop**:
        - Applies overrides via `apply_overrides`.
        - Calls `bpy.context.view_layer.update()` and fetches updated depsgraph.
@@ -133,6 +135,17 @@ When generating variations for an object, overrides are gathered in hierarchical
      - Worker exits with code 0.
      - Main process modal handler catches `BATCH_STL_DONE`, stops modal timer, and removes temporary directory.
      - A worker that exits without printing `BATCH_STL_DONE` is reported as a crash together with its exit code (1 for an uncaught Python error).
+
+### C. Branching & Merging (`walk_override_branch`)
+Folders created by values form a tree of branches. Overrides further down the stack can merge into an existing branch instead of multiplying every permutation.
+
+- **One walker for generation and naming**: `walk_override_branch(overrides, combo)` walks the resolved overrides top to bottom (Global → Preset → Collection → Object, then node groups, nodes and inputs in UI order). It keeps the full folder path of the branch and returns the active inputs, the filename suffix and the folder parts per level. `generate_override_combinations` uses it to prune values that do not apply to a branch, and `evaluate_combo_naming` uses it to name the files, so the two can never disagree.
+- **Branch names (`_known_branch_dirs`)**: the folder names that values *earlier* in the stack can generate (every sweep step included), recorded per override and per input.
+- **Placement (`_place_dir_parts`)**, for each folder name of a sub-folder path or value folder:
+  - The name is already in the branch (any ancestor) → merge into it. Several names must appear in order.
+  - It is a branch name missing from this branch → the override or value is inactive for this branch.
+  - Any other name → a new folder below the branch's deepest folder.
+- **Pruning**: if no value of a parameter applies to the current branch, the parameter stays at its default for that branch. Combinations are deduplicated after inactive values are removed.
 
 ---
 
@@ -174,9 +187,16 @@ Instead of creating intermediate text or using standard single-threaded Python f
 - Computes directory hierarchies and leaf files in advance. The UI displays this with an uncollapsable root directory and dedicated side-column toolbar buttons for toggling global view and bulk expanding/collapsing.
 - **Naming Collision Detection**: Analyzes all destination paths and flags collisions when two permutations or objects resolve to the identical output file path.
 
+### Merge Predictions (`DirScope`)
+The folder fields (`BatchSTLNodeGroup.sub_path`, `BatchSTLNode.sub_path`, `BatchSTLValue.dir_tag`) offer upstream folders and highlight merges without enumerating permutations. `DirScope` mirrors the walker's rules:
+- Each folder name is recorded with a description (*Branch* for value folders, *Folder* for plain sub-folders), its exclusivity group (values of the same input are alternatives and exclude each other) and the branch contexts it can exist in.
+- `DirScope.resolve(parts, ctx)` walks a path inside a context and returns the new context, the merged names (`hits`) and the branch names that cannot exist there (`dead`). A plain folder that exists in several branches only adds the branches those places share.
+- `upstream_dir_scope(item)` builds the scope and context at any field from its `path_from_id()`. `make_dir_search_cb` uses it for the search lists, and also resolves the typed path prefix, so `C/` only offers folders that exist under `C`.
+- `draw_overrides_table` builds the scope incrementally while drawing, in export order. Merging blocks get a blue `batch_stl.merge_info` bar (red with *Never applies* for dead merges) whose tooltip lists the source of each folder, and merging value folders get the merge icon on their toggle.
+
 ### Undo Stack Protection & Validation
 - **Single Undo Step per Edit**: Plain text fields (`value_string` for floats, ints and strings, sub-folders, tags) get their undo step from Blender when the edit is confirmed. Search fields (group, node, input, menu value, folder fields with upstream suggestions) are created without `UI_BUT_UNDO`, so their labelled `@edit_callback` pushes exactly one step; nested callbacks of a cascade are suppressed.
-- **Empty Field Deletion**: Submitting an empty field (`""`) triggers an automatic GC deletion routine for Node Groups, Nodes, Inputs, and Values.
+- **Empty Field Deletion**: Submitting an empty field (`""`) triggers an automatic GC deletion routine for Node Groups, Nodes, Inputs, and Values. The inline clear button on `value_string` fields (`table_action` → `CLEAR_VALUE_STRING`) empties the field from inside the operator, so the deletion runs through the same callback and is recorded as the operator's single undo step.
 - **Validation Engine**: Real-time validation checks against depsgraph interfaces ensure node groups, nodes, and inputs exist. Invalid targets are visually flagged and gracefully rejected or reset to the last known valid state.
 - **Numeric Validation**: Float/Int values and sweep start/step must parse as numbers and the sweep step count must be at least 1; otherwise the field is flagged and export is blocked.
 - **Hierarchical Propagation**: Multi-level operations (Shift + Up moves a group to the parent tier, Shift + Down copies it to every child tier) use `operator_context = 'INVOKE_DEFAULT'` to intercept modifier keys and explicitly iterate down the hierarchy.
@@ -187,5 +207,6 @@ Instead of creating intermediate text or using standard single-threaded Python f
 ## 7. Configuration Portability
 
 The add-on implements full JSON schema serialization and deserialization (`BATCH_STL_OT_export_presets_json` / `BATCH_STL_OT_import_presets_json`):
-- Serializes presets, collections, object lists, exclusion states, node group overrides, input types, values, sweeps, and tagging configurations into clean, version-agnostic JSON files.
+- Serializes presets, collections, object lists, exclusion states, node group overrides, input types, values, sweeps, and tagging configurations (`use_dir`, `dir_tag`, `use_tag`, `tag`) into clean, version-agnostic JSON files.
+- Values from files saved before the directory/tag split (no `dir_tag` key) get `dir_tag = tag` on import, so their folders keep their names.
 - Provides deep-copy and paste support across presets, collections, and node groups via internal clipboard buffers (`_clipboard`).
