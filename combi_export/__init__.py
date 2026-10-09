@@ -353,7 +353,7 @@ def get_override_signature(overrides):
         inputs_sig = tuple(
             (inp.input_name, inp.override_type, get_input_value(inp), inp.use_sweep, inp.sweep_range,
              inp.sweep_start, inp.sweep_step, inp.sweep_count,
-             inp.use_tag, inp.tag, inp.use_dir)
+             inp.use_tag, inp.tag, inp.use_dir, inp.dir_tag)
             for inp in ovr.inputs
         )
         sig.append((ovr.level, override_param_key(ovr, ""), inputs_sig))
@@ -368,6 +368,7 @@ class MockInput:
         self.use_tag = getattr(source, "use_tag", False)
         self.tag = getattr(source, "tag", "")
         self.use_dir = getattr(source, "use_dir", False)
+        self.dir_tag = getattr(source, "dir_tag", "")
         self.use_sweep = getattr(source, "use_sweep", False)
         self.sweep_range = getattr(source, "sweep_range", "")
         self.sweep_start = getattr(source, "sweep_start", "0")
@@ -500,24 +501,34 @@ def count_override_combinations(overrides):
     return count
 
 def value_dir_label(val, tag):
-    """Name a value contributes to filenames/folders (tag rules applied, made filesystem-safe)."""
+    """Name a value contributes to a filename or folder (tag rules applied, made filesystem-safe)."""
     val_str = f"{val:.10g}" if isinstance(val, float) else str(val).replace(" ", "_")
     return sanitize_name(apply_tag(val_str, tag))
 
-def _known_branch_dirs(overrides):
-    """For each override: folder names that values of *earlier* overrides can generate (branch names).
+def value_dir_names(ovr, inp):
+    """Folder names one override value can generate (every sweep step included), in order."""
+    if not getattr(inp, "use_dir", False): return []
+    vals = parse_sweep_values(ovr, inp) if getattr(inp, "use_sweep", False) else [get_input_value(inp)]
+    names = []
+    for val in vals:
+        names.extend(split_path_parts(value_dir_label(val, getattr(inp, "dir_tag", "")).strip(" .")))
+    return names
 
+def _known_branch_dirs(overrides):
+    """Folder names that values *earlier* in the stack can generate (branch names).
+
+    Keyed by id(ovr) for the override's own sub-paths and by (id(ovr), input_name) for its value folders.
     A sub-path or value folder carrying one of these names is an anchor into an existing branch,
     not a new folder."""
     known_before = {}
     known = set()
     for ovr in overrides:
         known_before[id(ovr)] = frozenset(known)
-        for inp in ovr.inputs:
-            if not getattr(inp, "use_dir", False): continue
-            vals = parse_sweep_values(ovr, inp) if getattr(inp, "use_sweep", False) else [get_input_value(inp)]
-            for val in vals:
-                known.update(split_path_parts(value_dir_label(val, getattr(inp, "tag", "")).strip(" .")))
+        for input_name in dict.fromkeys(getattr(i, "input_name", "") for i in ovr.inputs):
+            known_before[(id(ovr), input_name)] = frozenset(known)
+            for inp in ovr.inputs:
+                if getattr(inp, "input_name", "") == input_name:
+                    known.update(value_dir_names(ovr, inp))
     return known_before
 
 def _place_dir_parts(parts, branch, known):
@@ -571,16 +582,17 @@ def walk_override_branch(overrides, combo, known_before=None):
         for input_name in dict.fromkeys(getattr(i, "input_name", "") for i in ovr.inputs):
             inp = ovr_chosen.get(input_name)
             if inp is None: continue
-            label = value_dir_label(get_input_value(inp), getattr(inp, "tag", ""))
-            dir_parts = split_path_parts(label.strip(" .")) if getattr(inp, "use_dir", False) else []
-            new_parts = _place_dir_parts(dir_parts, branch, known)
+            val = get_input_value(inp)
+            dir_label = value_dir_label(val, getattr(inp, "dir_tag", ""))
+            dir_parts = split_path_parts(dir_label.strip(" .")) if getattr(inp, "use_dir", False) else []
+            new_parts = _place_dir_parts(dir_parts, branch, known_before.get((id(ovr), input_name), known))
             if new_parts is None: continue
             active.add(id(inp))
 
             param_key = override_param_key(ovr, input_name)
             if param_key in processed_params: continue
             processed_params.add(param_key)
-            if getattr(inp, "use_tag", False): combo_suffix += f"_{label}"
+            if getattr(inp, "use_tag", False): combo_suffix += f"_{value_dir_label(val, getattr(inp, 'tag', ''))}"
             branch.extend(new_parts)
             paths_by_level[level].extend(new_parts)
 
@@ -955,7 +967,7 @@ def copy_val_to_dict(v):
     return {
         "value_string": getattr(v, "value_string", ""), "value_menu": getattr(v, "value_menu", ""),
         "use_tag": getattr(v, "use_tag", False), "tag": getattr(v, "tag", ""),
-        "use_dir": getattr(v, "use_dir", False), "use_sweep": getattr(v, "use_sweep", False),
+        "use_dir": getattr(v, "use_dir", False), "dir_tag": getattr(v, "dir_tag", ""), "use_sweep": getattr(v, "use_sweep", False),
         "sweep_range": getattr(v, "sweep_range", ""),
         "sweep_start": getattr(v, "sweep_start", "0"),
         "sweep_step": getattr(v, "sweep_step", "1"),
@@ -983,6 +995,8 @@ def copy_preset_to_dict(src):
 def paste_val_from_dict(new_v, data):
     for k, v in data.items():
         if hasattr(new_v, k): setattr(new_v, k, v)
+    # Presets saved before the split used one tag for both the filename and the folder
+    if "dir_tag" not in data: new_v.dir_tag = data.get("tag", "")
     # Migrate legacy properties to value_string
     if not new_v.value_string:
         if "value_float" in data: new_v.value_string = str(data["value_float"])
@@ -1534,8 +1548,9 @@ def run_headless_export(job_file_path):
 # ==============================================================================
 
 # Undo: Blender records an undo step for every property edited in the UI, and the operators below declare
-# 'UNDO' in bl_options, so property updates only refresh the UI cache. The exception is search fields,
-# which push their own step (see search_field_update).
+# 'UNDO' in bl_options, so property updates only refresh the UI cache. The exception is search fields
+# (any StringProperty with search=, including the folder fields with upstream suggestions), which push their own
+# step through a labelled edit_callback / search_field_update. A search field without a label gets no undo step.
 
 class HierarchyIterator:
     """Helper to yield all active node groups in the hierarchy context."""
@@ -1864,6 +1879,91 @@ def on_no_spaces_update(prop_name, label=""):
 def search_empty_cb(self, context, edit_text):
     return []
 
+_PATH_STEP = re.compile(r"(\w+)\[(\d+)\]")
+
+def upstream_dir_suggestions(item):
+    """Folder names defined above `item` in the override stack, in export order, as {name: description}.
+
+    Order matches the exporter: Global, Preset, Collection, Object lists; inside a list node groups and nodes top to
+    bottom; inside a node its sub-folder first, then its inputs. Only what comes before `item` is listed, because
+    only those folders exist yet when `item` is evaluated."""
+    scene = item.id_data
+    try: steps = _PATH_STEP.findall(item.path_from_id())
+    except (ValueError, AttributeError): return {}
+    if not steps: return {}
+
+    # Resolve the chain of override lists that lead to the item, plus the item's position in its own list.
+    lists, pos = [scene.batch_stl_global_nodegroups], {}
+    if steps[0][0] == "batch_stl_presets":
+        owner = scene
+        for attr, idx in steps:
+            if attr == "nodegroups" or attr == "batch_stl_global_nodegroups": break
+            owner = getattr(owner, attr)[int(idx)]
+            lists.append(owner.nodegroups)
+    for attr, idx in steps:
+        if attr in ("nodegroups", "batch_stl_global_nodegroups", "nodes", "inputs"): pos[attr if attr != "batch_stl_global_nodegroups" else "nodegroups"] = int(idx)
+    own = lists[-1]
+
+    out = {}
+    def add_parts(text, desc):
+        for name in split_path_parts(text):
+            out.setdefault(name, desc)
+
+    def add_values(ng, ng_ptr, node, inp):
+        target = 'MODIFIER' if not node.name or node.name == "<Modifier Interface>" else 'NODE'
+        for val in inp.values:
+            tmp = MockInput(inp, val, is_temp=True)
+            for name in value_dir_names(MockOverride(target, ng_ptr, node.name, [tmp]), tmp):
+                out.setdefault(name, f"Branch · {ng.group_name} › {inp.name}")
+
+    def add_node(ng, ng_ptr, node, input_limit=None):
+        add_parts(node.sub_path, f"Folder · {ng.group_name} › {clean_node_name(node.name) or 'Modifier'}")
+        for i_idx, inp in enumerate(node.inputs):
+            if input_limit is not None and i_idx >= input_limit: break
+            add_values(ng, ng_ptr, node, inp)
+
+    def add_group(ng, node_limit=None, input_limit=None):
+        ng_ptr = bpy.data.node_groups.get(ng.group_name)
+        add_parts(ng.sub_path, f"Folder · {ng.group_name}")
+        for n_idx, node in enumerate(ng.nodes):
+            if node_limit is not None and n_idx >= node_limit:
+                if input_limit is not None and n_idx == node_limit: add_node(ng, ng_ptr, node, input_limit)
+                break
+            add_node(ng, ng_ptr, node)
+
+    for lst in lists[:-1]:
+        for ng in lst: add_group(ng)
+
+    g = pos.get("nodegroups", len(own))
+    for ng in list(own)[:g]: add_group(ng)
+    if g < len(own) and isinstance(item, (BatchSTLNode, BatchSTLValue)):
+        ng = own[g]
+        if isinstance(item, BatchSTLNode):
+            # The node's own group sub-folder already exists when the node is evaluated.
+            add_parts(ng.sub_path, f"Folder · {ng.group_name}")
+            for node in list(ng.nodes)[:pos.get("nodes", 0)]: add_node(ng, bpy.data.node_groups.get(ng.group_name), node)
+        else:
+            add_group(ng, node_limit=pos.get("nodes", 0), input_limit=pos.get("inputs", 0))
+    return out
+
+def make_dir_search_cb(prop_name, multi_part=True):
+    """Search list for a folder field: upstream folder names to merge into. Free text is still allowed.
+
+    For sub-folder paths the suggestion completes the last path part, so 'C/' offers 'C/2', 'C/3', ..."""
+    def search(self, context, edit_text):
+        current = getattr(self, prop_name, "")
+        if edit_text == current and "/" not in current and "\\" not in current: edit_text = ""
+        prefix, query = "", edit_text
+        if multi_part:
+            cut = max(edit_text.rfind("/"), edit_text.rfind("\\"))
+            if cut >= 0: prefix, query = edit_text[:cut + 1], edit_text[cut + 1:]
+        used = set(split_path_parts(prefix))
+        suggestions = upstream_dir_suggestions(self)
+        q = query.lower()
+        return [(prefix + name, desc) for name, desc in suggestions.items()
+                if name not in used and (not q or q in name.lower())]
+    return search
+
 class BatchSTLLogLine(bpy.types.PropertyGroup): text: bpy.props.StringProperty()
 class BatchSTLValue(bpy.types.PropertyGroup):
     prev_value_string: bpy.props.StringProperty(default="", options={'HIDDEN'})
@@ -1872,8 +1972,10 @@ class BatchSTLValue(bpy.types.PropertyGroup):
     value_menu: bpy.props.StringProperty(name="Value", default="", search=search_menu_items_cb, update=on_value_update("value_menu", "Edit Override Value"))
     use_tag: bpy.props.BoolProperty(name="Use Tag", default=False, update=mark_dirty)
     prev_tag: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    tag: bpy.props.StringProperty(name="Tag", default="", update=on_no_spaces_update("tag"))
+    tag: bpy.props.StringProperty(name="Tag", description="Filename tag: '_tag' appends, 'tag_' prepends, 'tag' replaces the value", default="", update=on_no_spaces_update("tag"))
     use_dir: bpy.props.BoolProperty(name="Use Dir", default=True, update=mark_dirty)
+    prev_dir_tag: bpy.props.StringProperty(default="", options={'HIDDEN'})
+    dir_tag: bpy.props.StringProperty(name="Directory", description="Folder name: '_tag' appends, 'tag_' prepends, 'tag' replaces the value", default="", search=make_dir_search_cb("dir_tag", multi_part=False), update=on_no_spaces_update("dir_tag", "Edit Override Directory"))
     use_sweep: bpy.props.BoolProperty(name="Sweep", default=False, update=mark_dirty)
     sweep_range: bpy.props.StringProperty(name="Sweep Range", default="", update=mark_dirty)
     prev_sweep_start: bpy.props.StringProperty(default="0", options={'HIDDEN'})
@@ -1936,7 +2038,7 @@ class BatchSTLNode(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty(name="Target Node", default="", search=search_target_node_cb, update=on_node_name_update, description="Select <Modifier Interface> to target the modifier directly")
     prev_name: bpy.props.StringProperty(default="", options={'HIDDEN'})
     prev_sub_path: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    sub_path: bpy.props.StringProperty(name="Sub-folder", default="", update=on_no_spaces_update("sub_path"))
+    sub_path: bpy.props.StringProperty(name="Sub-folder", default="", description="Sub-folder path; pick an upstream folder to merge into that branch", search=make_dir_search_cb("sub_path"), update=on_no_spaces_update("sub_path", "Edit Override Node Sub-folder"))
     inputs: bpy.props.CollectionProperty(type=BatchSTLInput)
 
 @edit_callback("Edit Override Node Group", "group_name", "prev_group_name")
@@ -1983,7 +2085,7 @@ class BatchSTLNodeGroup(bpy.types.PropertyGroup):
     prev_group_name: bpy.props.StringProperty(default="", options={'HIDDEN'})
     use_combine: bpy.props.BoolProperty(name="Combine Overrides", description="Combine overrides of different nodegroups that share the same inner node and socket paths", default=False, update=mark_dirty)
     prev_sub_path: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    sub_path: bpy.props.StringProperty(name="Sub-folder", default="", update=on_no_spaces_update("sub_path"))
+    sub_path: bpy.props.StringProperty(name="Sub-folder", default="", description="Sub-folder path; pick an upstream folder to merge into that branch", search=make_dir_search_cb("sub_path"), update=on_no_spaces_update("sub_path", "Edit Override Group Sub-folder"))
     nodes: bpy.props.CollectionProperty(type=BatchSTLNode)
 
 class BatchSTLObject(bpy.types.PropertyGroup):
@@ -2427,7 +2529,7 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
                             for p_idx, p_val in enumerate(parsed_vals):
                                 v = val if p_idx == 0 else vals.add()
                                 v.use_sweep = False
-                                v.use_dir, v.use_tag, v.tag = val.use_dir, val.use_tag, val.tag  # generated values inherit the sweep's tag settings
+                                v.use_dir, v.dir_tag, v.use_tag, v.tag = val.use_dir, val.dir_tag, val.use_tag, val.tag  # generated values inherit the sweep's tag settings
                                 if inp_obj.override_type in ('FLOAT', 'INT', 'STRING'): v.value_string = str(p_val)
                                 elif inp_obj.override_type in ('MENU', 'BOOLEAN'): v.value_menu = str(p_val)
 
@@ -2981,10 +3083,16 @@ def draw_overrides_table(layout, scene, nodegroups, is_collection, is_open_prop,
                         else:
                             c_val_prop.label(text="Unsupported socket type", icon=ICONS['ERROR'])
 
-                    # Render Directory/Tag controls for permutations
-                    draw_op(c_dir, 'TOGGLE_VALUE_USE_DIR', ICONS['DIR'], depress=val.use_dir, ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx, v_idx=v_idx)
-                    draw_op(c_dir, 'TOGGLE_VALUE_USE_TAG', ICONS['TAG'], depress=val.use_tag, ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx, v_idx=v_idx)
-                    c_dir.prop(val, "tag", text="")
+                    # Directory and filename tag: each toggle drives only its own field
+                    s_dir_tag = c_dir.split(factor=0.5, align=True)
+                    c_d = s_dir_tag.row(align=True)
+                    draw_op(c_d, 'TOGGLE_VALUE_USE_DIR', ICONS['DIR'], depress=val.use_dir, ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx, v_idx=v_idx)
+                    c_d_field = c_d.row(align=True); c_d_field.active = val.use_dir
+                    c_d_field.prop(val, "dir_tag", text="")
+                    c_t = s_dir_tag.row(align=True)
+                    draw_op(c_t, 'TOGGLE_VALUE_USE_TAG', ICONS['TAG'], depress=val.use_tag, ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx, v_idx=v_idx)
+                    c_t_field = c_t.row(align=True); c_t_field.active = val.use_tag
+                    c_t_field.prop(val, "tag", text="")
 
 
 class VIEW3D_PT_batch_export_stl_main(bpy.types.Panel):

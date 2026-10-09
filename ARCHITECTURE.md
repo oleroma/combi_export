@@ -80,7 +80,7 @@ The add-on structures export configurations in a strictly scoped 8-tier hierarch
 7. **`BatchSTLValue`**:
    - Unified string-based concrete parameter value (`value_string`) for Ints, Floats, and Strings, and `value_menu` for Enum/Booleans.
    - Sweep definitions using updated explicit terminology (`sweep_start`, `sweep_step`, `sweep_count`, `sweep_range`).
-   - Configures naming tags (`use_tag`, `tag`) and subfolder routing (`use_dir`).
+   - Configures the filename tag (`use_tag`, `tag`) and subfolder routing (`use_dir`, `dir_tag`); both names use the same append/prepend/replace rules.
 8. **`BatchSTLJob`** (`WindowManager.batch_stl_jobs`):
    - Runtime export state of one preset, keyed by `preset_index`: `is_exporting`, `cancel_export`, `export_progress`, `export_status` and the console log (`console_logs`).
    - Lives on the WindowManager, so it is never saved to the `.blend` file nor rolled back by undo. Cleared on file load and whenever presets are removed or reordered.

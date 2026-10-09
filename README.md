@@ -71,8 +71,9 @@ Generate variant permutations across any socket:
 * **Per-Object Overrides:** Assign distinct tags, sub-folders, and dedicated node override groups down to individual objects.
 
 ### 9. Dynamic Tagging & Directory Formatting
-* **Sub-Directory Creation (`FILE_FOLDER`):** Route variant exports into dedicated sub-folders per value iteration.
-* **Tagging Rules (`BOOKMARKS`):**
+* **Sub-Directory Creation (`FILE_FOLDER`):** Route variant exports into dedicated sub-folders per value iteration. The folder name has its own field, independent of the filename tag.
+* **Filename Tag (`BOOKMARKS`):** Add the value to the exported filename. The tag has its own field.
+* **Naming Rules (same for both fields):**
   - `tag`: Replaces the socket value label entirely (`tag`).
   - `tag_`: Prepends the tag to the value (`tag_15`).
   - `_tag`: Appends the tag to the value (`15_tag`).
