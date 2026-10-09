@@ -175,7 +175,7 @@ Instead of creating intermediate text or using standard single-threaded Python f
 - **Naming Collision Detection**: Analyzes all destination paths and flags collisions when two permutations or objects resolve to the identical output file path.
 
 ### Undo Stack Protection & Validation
-- **Unified String Undo Isolation**: Float and integer properties map to a unified `value_string` defining a dummy search callback to inherit Blender's `UI_BUT_UNDO` exemption. Custom `@edit_callback` wrappers inject a strict 1-action limit to the undo stack, preventing Blender from logging partial keystrokes.
+- **Single Undo Step per Edit**: Plain text fields (`value_string` for floats, ints and strings, sub-folders, tags) get their undo step from Blender when the edit is confirmed. Search fields (group, node, input, menu value, folder fields with upstream suggestions) are created without `UI_BUT_UNDO`, so their labelled `@edit_callback` pushes exactly one step; nested callbacks of a cascade are suppressed.
 - **Empty Field Deletion**: Submitting an empty field (`""`) triggers an automatic GC deletion routine for Node Groups, Nodes, Inputs, and Values.
 - **Validation Engine**: Real-time validation checks against depsgraph interfaces ensure node groups, nodes, and inputs exist. Invalid targets are visually flagged and gracefully rejected or reset to the last known valid state.
 - **Numeric Validation**: Float/Int values and sweep start/step must parse as numbers and the sweep step count must be at least 1; otherwise the field is flagged and export is blocked.

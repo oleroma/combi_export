@@ -1629,8 +1629,10 @@ def get_target_node_names(group_ptr, exclude=()):
     (clean names). '<Modifier Interface>' comes last, and is the fallback when nothing else is offered."""
     targets = []
     if group_ptr:
-        for n in group_ptr.nodes:
-            if n.type not in ('GROUP_INPUT', 'GROUP_OUTPUT') and clean_node_name(n.name) not in exclude:
+        # Group Input has no input sockets. Group Output is a valid target (its unlinked inputs set the group's
+        # outputs) but goes after the regular nodes, so it never becomes the default target of a new override.
+        for n in sorted(group_ptr.nodes, key=lambda n: n.type == 'GROUP_OUTPUT'):
+            if n.type != 'GROUP_INPUT' and clean_node_name(n.name) not in exclude:
                 if get_supported_inputs(group_ptr, n.name):
                     targets.append(f"{n.name} [{n.node_tree.name if n.type == 'GROUP' and getattr(n, 'node_tree', None) else n.type}]")
     if "<Modifier Interface>" not in exclude and (get_supported_inputs(group_ptr, "<Modifier Interface>") or not targets):
@@ -1767,8 +1769,8 @@ def search_target_node_cb(self, context, edit_text):
                 if get_supported_inputs(ng_ptr, "<Modifier Interface>"):
                     res.append("<Modifier Interface>")
                     
-                for node in ng_ptr.nodes:
-                    if node.type != 'GROUP_OUTPUT' and node.type != 'GROUP_INPUT':
+                for node in sorted(ng_ptr.nodes, key=lambda n: n.type == 'GROUP_OUTPUT'):
+                    if node.type != 'GROUP_INPUT':
                         if get_supported_inputs(ng_ptr, node.name):
                             val = f"{node.name} [{node.node_tree.name if node.type == 'GROUP' and getattr(node, 'node_tree', None) else node.type}]"
                             if not edit_text or edit_text.lower() in val.lower(): res.append(val)
@@ -1876,9 +1878,6 @@ def on_no_spaces_update(prop_name, label=""):
             setattr(self, "prev_" + prop_name, val)
     return update
 
-def search_empty_cb(self, context, edit_text):
-    return []
-
 _PATH_STEP = re.compile(r"(\w+)\[(\d+)\]")
 
 def upstream_dir_suggestions(item):
@@ -1967,7 +1966,8 @@ def make_dir_search_cb(prop_name, multi_part=True):
 class BatchSTLLogLine(bpy.types.PropertyGroup): text: bpy.props.StringProperty()
 class BatchSTLValue(bpy.types.PropertyGroup):
     prev_value_string: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    value_string: bpy.props.StringProperty(name="Value", default="", search=search_empty_cb, update=on_value_update("value_string", "Edit Override Value"))
+    # Plain text field (no search list): Blender records its undo step, so the callback must not push another one.
+    value_string: bpy.props.StringProperty(name="Value", default="", update=on_value_update("value_string"))
     prev_value_menu: bpy.props.StringProperty(default="", options={'HIDDEN'})
     value_menu: bpy.props.StringProperty(name="Value", default="", search=search_menu_items_cb, update=on_value_update("value_menu", "Edit Override Value"))
     use_tag: bpy.props.BoolProperty(name="Use Tag", default=False, update=mark_dirty)
