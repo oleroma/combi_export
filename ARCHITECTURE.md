@@ -69,10 +69,10 @@ The add-on structures export configurations in a strictly scoped 8-tier hierarch
    - Holds subfolder paths (`sub_path`), tagging flags (`use_tag`, `tag`: filename token(s) at Collection level), collection-level pinned overrides (`nodegroups`), and synchronized object entries (`objects`).
 3. **`BatchSTLObject`**:
    - Mirrors individual meshes/curves within a collection. `obj_uid` stores the object's `session_uid`, so an entry follows its object through renames (`sync_collection_objects`; name first, uid when the name is gone, a one-gone-one-new fallback for renames made while the add-on was off). It is not an ID pointer: that would add a user to the object, and deleting the object would then only unlink it. Session uids change when a file loads, so `restamp_object_uids` re-points the entries by name on load.
-   - Provides per-object export toggling (`export`), filename tag (`tag`: token(s) at Object level, no longer renames the object), object subfolder (`sub_path`), and object-level overrides (`nodegroups`).
+   - Provides per-object export toggling (`export`), file name (`export_name`: a get/set property that shows `name_override` or else the object name; setting it empty or to the object name clears the override, so an unedited entry follows renames), filename tag (`tag`: token(s) at Object level, no longer renames the object), object subfolder (`sub_path`), and object-level overrides (`nodegroups`).
 4. **`BatchSTLNodeGroup`**:
    - Targets a Geometry Node tree by name (`group_name`).
-   - Optional sub-folder path (`sub_path`), filename tag tokens (`tag`, `/`-separated) and `use_combine` to merge identical sockets of different groups.
+   - Optional sub-folder path (`sub_path`) and filename tag tokens (`tag`, `/`-separated).
    - Contains a list of `BatchSTLNode` blocks.
 5. **`BatchSTLNode`**:
    - Targets an internal node name within the node group, or `"<Modifier Interface>"` to target the modifier interface sockets directly. `Group Output` is a valid target (listed after the regular nodes so it never becomes the default); `Group Input` has no inputs and is not offered.
@@ -101,7 +101,7 @@ When generating variations for an object, overrides are gathered in hierarchical
 `resolve_overrides` then applies **most-specific-wins**: if a lower level defines the same socket (same target, node group, node and input name), the inherited values of higher levels for that socket are dropped. Several values on the same level remain variants. Objects are batched for the headless worker by `get_override_signature`, a fingerprint of the resolved overrides (values, sweeps, tags, folder flags, block sub-folders and block tags, and level).
 
 ### Filename Assembly (`format_export_filename`)
-`object name` + `_token` for every token in hierarchy order: Global override tokens, Preset override tokens, Collection tag, Collection override tokens, Object tag, Object override tokens. `join_name_segments` collapses a collection / object tag into an equal neighbouring token; equal neighbouring override tokens stay (the walker already merged what merges). Folders (`build_export_dir_parts`) follow the same rule for the preset prefix and collection / object sub-folders. Override tokens come per level from the walker (`tags_by_level`); block and collection/object tags are split by `split_tag_parts` (`/` separates tokens, edge `_` dropped).
+`file name` (`BatchSTLObject.export_name`) + `_token` for every token in hierarchy order: Global override tokens, Preset override tokens, Collection tag, Collection override tokens, Object tag, Object override tokens. `join_name_segments` collapses a collection / object tag into an equal neighbouring token; equal neighbouring override tokens stay (the walker already merged what merges). Folders (`build_export_dir_parts`) follow the same rule for the preset prefix and collection / object sub-folders. Override tokens come per level from the walker (`tags_by_level`); block and collection/object tags are split by `split_tag_parts` (`/` separates tokens, edge `_` dropped).
 
 ---
 
@@ -218,7 +218,7 @@ The folder fields (`sub_path` of node groups / nodes, `BatchSTLValue.dir_tag`) a
 ## 7. Configuration Portability
 
 The add-on implements full JSON schema serialization and deserialization (`BATCH_STL_OT_export_presets_json` / `BATCH_STL_OT_import_presets_json`):
-- Serializes presets, collections, object lists, exclusion states, node group overrides (including block `sub_path`, `tag` and `use_combine`), input types, values, sweeps, and tagging configurations (`use_dir`, `dir_tag`, `use_tag`, `tag`) into clean, version-agnostic JSON files.
+- Serializes presets, collections, object lists, exclusion states, node group overrides (including block `sub_path` and `tag`), input types, values, sweeps, and tagging configurations (`use_dir`, `dir_tag`, `use_tag`, `tag`) into clean, version-agnostic JSON files.
 - Values from files saved before the directory/tag split (no `dir_tag` key) get `dir_tag = tag` on import, so their folders keep their names. Version 1.0.0 files kept numbers in typed fields (`value_float`, `value_int`, `value_bool`, `sweep_start_float`, ...); `migrate_legacy_value` moves them into the text fields of the input's type.
 - `.blend` data is versioned the same way: `Scene.batch_stl_data_version` (`DATA_VERSION`, now 2) is stamped on scenes edited with this version, and `migrate_scene_data` (on load / register, via `prepare_scenes`) brings older scenes up to date: 1 gives unversioned scenes `dir_tag = tag`; 2 migrates 1.0.0 typed values, removes the `obj_ptr` pointers of object entries (they kept deleted objects alive) and the UI properties that used to live on the Scene.
 - Provides deep-copy and paste support across presets, collections, and node groups via internal clipboard buffers (`_clipboard`).

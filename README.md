@@ -73,7 +73,8 @@ Generate variant permutations across any socket:
 * **Per-Object Overrides:** Assign distinct tags, sub-folders, and dedicated node override groups down to individual objects.
 
 ### 9. Dynamic Tagging & Directory Formatting
-* **Filename Structure:** The object name followed by every tag token in hierarchy order, joined with `_`:
+* **File Name:** The name field of an object in the object list starts out as the object name. Type another name to export the object's files under it; clear the field to go back to the object name (which then follows renames again).
+* **Filename Structure:** The file name (object name unless edited) followed by every tag token in hierarchy order, joined with `_`:
   `Object` → Global override tags → Preset override tags → Collection tag → Collection override tags → Object tag → Object override tags.
   Example: object `Box`, Global letter `A`, collection tag `v2`, Collection number `1`, object tag `lid` → `Box_A_v2_1_lid.stl`.
 * **Collection, Object, Node Group and Node Tags:** Plain filename tokens placed at their level (several tokens separated by `/`; leading/trailing `_` are ignored, so `_lid` and `lid` are the same). The object tag no longer renames the object.
@@ -100,7 +101,7 @@ Values with a folder or filename tag create branches, e.g. letters `A B C` × nu
 * **Dead Merge Warning:** If the chosen folders can never exist together (e.g. `C/X` when `X` only exists under `A`), the bar turns red (*Never applies*) because that block is never exported. A value with such a folder or tag gets a red toggle.
 
 ### 11. JSON Preset Portability & Clipboard Buffer
-* **Import / Export Setup:** Save or restore presets, collections, object lists, exclusion states, and override matrices (including *Combine Overrides*) to external JSON files. Presets saved before directory and tag were split into two fields reuse their old tag as the directory name, so their folders keep their names. Files and `.blend` data from version 1.0.0 keep their number, boolean and sweep values.
+* **Import / Export Setup:** Save or restore presets, collections, object lists, exclusion states, and override matrices to external JSON files. Presets saved before directory and tag were split into two fields reuse their old tag as the directory name, so their folders keep their names. Files and `.blend` data from version 1.0.0 keep their number, boolean and sweep values.
 * **Internal Clipboard:** Copy and paste presets, collections, and node groups between tiers with one click.
 
 ---

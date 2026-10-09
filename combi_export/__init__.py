@@ -44,7 +44,7 @@ ICONS = {
     'TIME': 'TIME', 'MODIFIER': 'MODIFIER', 'TREE': 'OUTLINER_OB_EMPTY', 'ERROR': 'ERROR',
     'RIGHT': 'TRIA_RIGHT', 'BLANK': 'BLANK1', 'FILE': 'FILE_3D',
     'EXPAND_ALL': 'FULLSCREEN_ENTER', 'COLLAPSE_ALL': 'FULLSCREEN_EXIT', 'EXPAND_LAST': 'TRIA_DOWN_BAR',
-    'COMBINE': 'LINKED', 'MERGE': 'AUTOMERGE_ON'
+    'MERGE': 'AUTOMERGE_ON'
 }
 
 SUPPORTED_OBJECT_TYPES = {"MESH", "CURVE", "SURFACE", "META", "FONT"}
@@ -352,8 +352,6 @@ LEVEL_RANK = {"NONE": -1, "GLOBAL": 0, "PRESET": 1, "COLLECTION": 2, "OBJECT": 3
 def override_param_key(ovr, input_name):
     """Identity of one overridden socket, independent of the hierarchy level that defines it."""
     pg_name = ovr.parent_group_ptr.name if ovr.parent_group_ptr else ""
-    if getattr(ovr, "use_combine", False):
-        pg_name = ""
     node = clean_node_name(ovr.node_name) if ovr.override_target == 'NODE' else ""
     return (ovr.override_target, pg_name, node, input_name)
 
@@ -370,7 +368,7 @@ def resolve_overrides(overrides):
     for ovr in overrides:
         rank = LEVEL_RANK.get(ovr.level, -1)
         kept = [inp for inp in ovr.inputs if best_rank[override_param_key(ovr, inp.input_name)] == rank]
-        if kept or not ovr.inputs: resolved.append(MockOverride(ovr.override_target, ovr.parent_group_ptr, ovr.node_name, kept, ovr.level, getattr(ovr, "use_combine", False), getattr(ovr, "ng_sub_path", ""), getattr(ovr, "node_sub_path", ""), getattr(ovr, "ng_tag", ""), getattr(ovr, "node_tag", "")))
+        if kept or not ovr.inputs: resolved.append(MockOverride(ovr.override_target, ovr.parent_group_ptr, ovr.node_name, kept, ovr.level, getattr(ovr, "ng_sub_path", ""), getattr(ovr, "node_sub_path", ""), getattr(ovr, "ng_tag", ""), getattr(ovr, "node_tag", "")))
     return resolved
 
 def get_override_signature(overrides):
@@ -411,13 +409,12 @@ class MockInput:
     def value_menu(self): return self._val.value_menu if self._is_temp else str(self._val)
 
 class MockOverride:
-    def __init__(self, target, ptr, node_name, inputs, level="NONE", use_combine=False, ng_sub_path="", node_sub_path="", ng_tag="", node_tag=""):
+    def __init__(self, target, ptr, node_name, inputs, level="NONE", ng_sub_path="", node_sub_path="", ng_tag="", node_tag=""):
         self.override_target = target
         self.parent_group_ptr = ptr
         self.node_name = node_name
         self.inputs = inputs
         self.level = level
-        self.use_combine = use_combine
         self.ng_sub_path = ng_sub_path
         self.node_sub_path = node_sub_path
         self.ng_tag = ng_tag
@@ -468,7 +465,7 @@ def get_flat_overrides(nodegroups, level="NONE"):
 
             block_fields = (getattr(ng, "sub_path", ""), getattr(node, "sub_path", ""), getattr(ng, "tag", ""), getattr(node, "tag", ""))
             if temp_inputs or any(block_fields):
-                overrides.append(MockOverride(target, ng_ptr, node.name, temp_inputs, level, getattr(ng, "use_combine", False), *block_fields))
+                overrides.append(MockOverride(target, ng_ptr, node.name, temp_inputs, level, *block_fields))
     return overrides
 
 def parse_sweep_values(ovr, inp):
@@ -749,9 +746,9 @@ def generate_named_combinations(overrides, known_before=None):
 def reconstruct_overrides_for_combo(combo):
     grouped = {}
     for ovr, inp in combo:
-        target_key = (ovr.override_target, ovr.parent_group_ptr, ovr.node_name, getattr(ovr, "level", "NONE"), getattr(ovr, "use_combine", False))
+        target_key = (ovr.override_target, ovr.parent_group_ptr, ovr.node_name, getattr(ovr, "level", "NONE"))
         grouped.setdefault(target_key, []).append(inp)
-    return [MockOverride(tgt, ptr, name, inputs, lvl, use_combine) for (tgt, ptr, name, lvl, use_combine), inputs in grouped.items()]
+    return [MockOverride(tgt, ptr, name, inputs, lvl) for (tgt, ptr, name, lvl), inputs in grouped.items()]
 
 def capture_baseline_states(overrides, target_objects):
     global_states, mod_states = [], []
@@ -1044,7 +1041,7 @@ def restamp_object_uids(scene):
 def export_file_parts(preset, c, obj_prop, bl_obj, tags_by_level=None, paths_by_level=None):
     """(folder names below the root, filename) of one exported file."""
     return (build_export_dir_parts(preset.preset_prefix, c.sub_path, obj_prop.sub_path, paths_by_level),
-            format_export_filename(bl_obj.name, obj_prop.tag, c.use_tag, c.tag, tags_by_level))
+            format_export_filename(obj_prop.export_name, obj_prop.tag, c.use_tag, c.tag, tags_by_level))
 
 def iter_export_objects(scene, preset, live, global_ovrs=None):
     """(collection index, collection entry, object entry, object, resolved overrides) of every object the preset
@@ -1198,10 +1195,10 @@ def copy_node_to_dict(n):
     return {"name": n.name, "sub_path": getattr(n, "sub_path", ""), "tag": getattr(n, "tag", ""), "inputs": [copy_input_to_dict(i) for i in n.inputs]}
 
 def copy_ng_to_dict(ng):
-    return {"group": ng.group_name, "use_combine": ng.use_combine, "sub_path": getattr(ng, "sub_path", ""), "tag": getattr(ng, "tag", ""), "nodes": [copy_node_to_dict(n) for n in ng.nodes]}
+    return {"group": ng.group_name, "sub_path": getattr(ng, "sub_path", ""), "tag": getattr(ng, "tag", ""), "nodes": [copy_node_to_dict(n) for n in ng.nodes]}
 
 def copy_obj_to_dict(o):
-    return {"name": o.name, "export": o.export, "tag": getattr(o, "tag", ""), "sub_path": getattr(o, "sub_path", ""), "nodegroups": [copy_ng_to_dict(ng) for ng in o.nodegroups]}
+    return {"name": o.name, "name_override": o.name_override, "export": o.export, "tag": getattr(o, "tag", ""), "sub_path": getattr(o, "sub_path", ""), "nodegroups": [copy_ng_to_dict(ng) for ng in o.nodegroups]}
 
 def copy_collection_to_dict(c):
     return {"collection_name": c.collection_name, "use_tag": c.use_tag, "tag": c.tag, "sub_path": c.sub_path, "objects": [copy_obj_to_dict(o) for o in c.objects], "nodegroups": [copy_ng_to_dict(ng) for ng in c.nodegroups]}
@@ -1258,13 +1255,13 @@ def paste_ng_from_dict(ng_list, data):
     with raw_edits():
         new_ng = ng_list.add()
         new_ng.group_name = group
-        new_ng.use_combine = data.get("use_combine", False)
         new_ng.sub_path = data.get("sub_path", "")
         new_ng.tag = data.get("tag", "")
         for n_data in data.get("nodes", []): paste_node_from_dict(new_ng.nodes.add(), n_data)
 
 def paste_obj_from_dict(new_o, data):
     new_o.name = data.get("name", "")
+    new_o.name_override = data.get("name_override", "")
     new_o.export = data.get("export", True)
     new_o.tag = data.get("tag", "")
     new_o.sub_path = data.get("sub_path", "")
@@ -2394,15 +2391,26 @@ def search_group_name_cb(self, context, edit_text):
 class BatchSTLNodeGroup(bpy.types.PropertyGroup):
     group_name: bpy.props.StringProperty(name="Node Group", default="", search=search_group_name_cb, update=on_group_name_update)
     prev_group_name: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    use_combine: bpy.props.BoolProperty(name="Combine Overrides", description="Combine overrides of different nodegroups that share the same inner node and socket paths", default=False, update=mark_dirty)
     prev_sub_path: bpy.props.StringProperty(default="", options={'HIDDEN'})
     sub_path: bpy.props.StringProperty(name="Sub-folder", default="", description="Sub-folder path; pick an upstream folder to merge into that branch", search=make_scope_search_cb("dir", "sub_path"), update=on_no_spaces_update("sub_path", "Edit Override Group Sub-folder"))
     prev_tag: bpy.props.StringProperty(default="", options={'HIDDEN'})
     tag: bpy.props.StringProperty(name="Tag", default="", description="Filename tokens added by this node group, '/' between tokens; pick an upstream name token to merge into that branch", search=make_scope_search_cb("tag", "tag"), update=on_no_spaces_update("tag", "Edit Override Group Tag"))
     nodes: bpy.props.CollectionProperty(type=BatchSTLNode)
 
+def get_export_name(self):
+    return self.name_override or self.name
+
+def set_export_name(self, value):
+    # Empty, or the object's own name, means "follow the object" (renames included)
+    value = value.strip()
+    self.name_override = "" if value == self.name else value
+    mark_dirty()
+
 class BatchSTLObject(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty()
+    name_override: bpy.props.StringProperty(default="", options={'HIDDEN'})
+    # Shows the object name until edited; clearing the field returns to the object name
+    export_name: bpy.props.StringProperty(name="File Name", description="Name the exported files start with. Clear the field to use the object name again", get=get_export_name, set=set_export_name, options={'SKIP_SAVE'})
     # session_uid of the object, to follow renames (see sync_collection_objects); not an ID pointer, which adds a user
     obj_uid: bpy.props.IntProperty(default=0, options={'HIDDEN'})
     export: bpy.props.BoolProperty(default=True, update=mark_dirty)
@@ -3206,7 +3214,7 @@ class BATCH_STL_UL_objects(bpy.types.UIList):
         row = split.row(align=True)
         op = row.operator("batch_stl.table_action", text="", icon=ICONS['CHECK_ON'] if item.export else ICONS['CHECK_OFF'], emboss=False)
         op.action = 'TOGGLE_OBJECT_EXPORT'; op.o_idx = index
-        row.label(text=item.name)
+        row.prop(item, "export_name", text="", emboss=False)
 
         tools = split.row(align=True)
         tools.label(text="", icon=ICONS['TAG'])
@@ -3327,7 +3335,6 @@ def _draw_overrides_table(layout, wm, nodegroups, is_collection, is_open_prop, t
         ng_sub = ng_row.row(align=True)
         ng_sub.alert = not is_override_group_valid(ng)
         ng_sub.prop(ng, "group_name", text="")
-        ng_row.prop(ng, "use_combine", text="", icon=ICONS['COMBINE'])
         ng_row.prop(ng, "sub_path", text="", icon=ICONS['MERGE'] if merged(ng_res, "dir") else ICONS['DIR'])
         ng_row.prop(ng, "tag", text="", icon=ICONS['MERGE'] if merged(ng_res, "tag") else ICONS['TAG'])
         draw_op(ng_row, 'MOVE_GROUP_UP', ICONS['UP'], ng_idx=ng_idx)
