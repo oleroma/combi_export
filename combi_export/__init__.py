@@ -2455,7 +2455,9 @@ def make_scope_search_cb(kind, prop_name, multi_part=True):
         if edit_text[-1:] and edit_text[-1] in marks:
             typed_mark, edit_text = edit_text[-1], edit_text[:-1]
         mark = typed_mark or marks[:1]
-        if edit_text + typed_mark == current and not any(c in edit_text for c in seps): edit_text = ""
+        # Opening a field that holds one name lists its alternatives; one that ends in the mark ('A_') goes on with
+        # the next link of the chain ('A_C_', 'A_D_') instead
+        if edit_text + typed_mark == current and not typed_mark and not any(c in edit_text for c in seps): edit_text = ""
         scope, ctx = upstream_scope(self)
         # The other field of the same block / value (sub-folder vs tag) must still fit every suggestion: both are
         # placed in the same branch
