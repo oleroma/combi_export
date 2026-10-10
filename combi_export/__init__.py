@@ -2481,15 +2481,21 @@ def make_scope_search_cb(kind, prop_name, multi_part=True):
             # Only names the chain can reach next, in its order; the branches the field is already in are left out
             names = scope.suggestions(kind, states, exclude=ctx, fits=fits)
             q = query.lower()
-            return [(prefix + name + mark, desc) for name, desc in names.items() if not q or q in name.lower()]
+            out = [(prefix + name + mark, desc) for name, desc in names.items() if not q or q in name.lower()]
+            # Text typed after the merged chain that names nothing upstream ('A_B_custom_') keeps the chain on offer,
+            # to go back to it
+            if prefix and query and not out: out.append((prefix if not multi_part else prefix[:-1], "Merged so far"))
+            return out
 
         items = complete(edit_text)
         if typed_mark and edit_text: items += complete(edit_text + typed_mark)  # the next link of the chain
         # Blender highlights the only result (or one equal to the text) and Enter applies the highlighted one, so
         # deleting a mark and pressing Enter would bring the mark back. The text as typed comes first instead: Enter
         # keeps it, arrow down picks a suggestion.
-        if typed and all(name != typed for name, _desc in items): items.insert(0, (typed, "Keep as typed"))
-        return list(dict.fromkeys(items))
+        unique = {}
+        for name, desc in items: unique.setdefault(name, desc)
+        if typed and typed not in unique: unique = {typed: "Keep as typed", **unique}
+        return list(unique.items())
     return search
 
 class BatchSTLLogLine(bpy.types.PropertyGroup): text: bpy.props.StringProperty()
