@@ -3568,13 +3568,14 @@ def _draw_overrides_table(layout, wm, nodegroups, is_collection, is_open_prop, t
         for visual_v, (v_idx, val) in enumerate(get_sorted_values(ng_ptr, node, inp, values)):
             i_first = (visual_v == 0)
             i_row = input_layout.row(align=True)
+            # The merge icon slot sits before the columns (blank on the other value rows), so it takes no width from them
+            if merges is not None: draw_merge_icon(i_row.row(align=True), merges if i_first else [])
 
             # Four equal columns: input, value, folder, tag
             s_main = i_row.split(factor=0.25, align=False)
             c_inp = s_main.row(align=True)
 
             if i_first:
-                if merges is not None: draw_merge_icon(c_inp, merges)
                 action_icon = ICONS['SWEEP'] if val and getattr(val, "use_sweep", False) else ICONS['ADD']
                 draw_op(c_inp, 'VALUE_ACTION', action_icon, depress=(action_icon == ICONS['SWEEP']),
                         ng_idx=ng_idx, n_idx=n_idx, i_idx=i_idx, v_idx=v_idx if val else -1)
