@@ -41,8 +41,10 @@ blocks anchor to.
   `x_` = token x then the value token), `split_value_tag_parts` (keeps edge `_`), `segment_tag(s)`, `value_parts`,
   `value_field_anchors`, `value_branch_names`.
 - `split_path_parts` (folders) / `split_tag_parts` (literal tag fields: `/` separates tokens, edge spaces and `_` stripped).
-- `_known_branch_dirs(overrides)` – `("dir", name)` / `("tag", name)` keys known before each override (`id(ovr)`) and
-  each input (`(id(ovr), input_name)`).
+- `_known_branch_dirs(overrides)` – `("dir", name)` / `("tag", name)` keys known before each override (`id(ovr)`),
+  each input (`(id(ovr), input_name)`) and the override's node group (`("group", id(ovr))`, via `MockOverride.group_uid`).
+- `_place_blocks` – group block, then node block, each its own chain (node can merge into the group's names); the
+  group block resolves against names known before the group, the same for each of its nodes.
 - `walk_override_branch(overrides, combo, known_before)` – **single source of truth**. Walks overrides top-to-bottom
   with `dir_branch` and `tag_branch`; returns `(active_input_ids, tags_by_level, paths_by_level)`.
 - `generate_named_combinations` – recursion over `_build_override_pools`, keeps only variations the walker marks
@@ -73,18 +75,20 @@ blocks anchor to.
   `_rebuild_ui_cache` stamps `DATA_VERSION` on the active scene so new scenes are never migrated.
 
 ## 3. Merge predictions in the UI (`BranchScope`)
-- Keys `(kind, name)`, kind "dir"/"tag". Each entry: description ("Branch"/"Name branch" for value names,
-  "Folder"/"Tag" for block names), exclusivity group (input) + alternatives (value index, sweep step): names of
-  different values of one input exclude each other, the folder and token of the same value coexist. Contexts mix both
-  kinds (a block placed in folder C only sees tokens of the C branch, and vice versa).
-- `resolve(kind, parts, ctx, desc=None)` → `(new_ctx, hits, dead)`; `enter_block`; `add_input`; `suggestions(kind, ctx)`.
-  Entries keep the set of inputs that create a name; a name created by several inputs excludes nothing.
-  `resolve_value` applies the explicit-name rule. A plain name existing in several branches only adds the intersection of their requirements (known limitation:
-  suggestions can then be slightly too broad, never too narrow).
+- Entries `(kind, name)` → desc, `known` (exporter branch name), instances (`group`/`alt` = input/value or None for
+  blocks, `reqs`, `pos` creation order, `base`). Context = name keys + `("alt", input, value)` keys.
+- `chain_states` (every placement, chain order via `pos`, branch names must merge), `segmentation` (tag split like
+  the walker), `place(chains, ctx)` (folder + tag chains of one block / value jointly) → hits / dead / fresh names.
+  `satisfiable(ctx)` = backtracking over value choices (three-way conflicts; step budget → yes), cached per `seq`.
+- Dead blocks / values: their value names stay `known` without instances (the walker still anchors to them). Sibling
+  values of one input resolve against the scope before the input. Verified 2026-10-10 by a randomized cross-check of
+  predictions and suggestions against `walk_override_branch` (0 mismatches in 1,000 setups; 2 in 600 setups whose
+  values contain `_`, from the walker's per-branch spelling of `a_b`).
 - `upstream_scope(item)` → `(scope, ctx)` at any field via `item.path_from_id()` (`_PATH_STEP`). Export order:
   Global, Preset, Collection, Object lists; groups/nodes top to bottom; block sub-folder, then tag, then inputs.
 - `make_scope_search_cb(kind, prop, multi_part)` on: block `sub_path`/`tag` (multi-part, `C/` completes `C/1…`),
-  value `dir_tag`/`tag` (single). Applies the block's other field and the typed prefix as context.
+  value `dir_tag`/`tag` (single). Completes only after a prefix that fully merges, in chain order, and only names the
+  other half of the block / value (sub-folder vs tag) still fits with.
 - `draw_overrides_table` builds the scope incrementally (cheap). Merging block → blue `batch_stl.merge_info` bar on
   top of its box ("Merges into C / 2 · name B"), field icon `AUTOMERGE_ON` (`ICONS['MERGE']`). Impossible merge →
   red "Never applies" bar. Value merge → merge icon on the DIR/TAG toggle; dead → red toggle. Tooltip lists sources.
