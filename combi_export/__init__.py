@@ -3569,7 +3569,8 @@ def _draw_overrides_table(layout, wm, nodegroups, is_collection, is_open_prop, t
             i_first = (visual_v == 0)
             i_row = input_layout.row(align=True)
 
-            s_main = i_row.split(factor=0.35, align=False)
+            # Four equal columns: input, value, folder, tag
+            s_main = i_row.split(factor=0.25, align=False)
             c_inp = s_main.row(align=True)
 
             if i_first:
@@ -3581,7 +3582,7 @@ def _draw_overrides_table(layout, wm, nodegroups, is_collection, is_open_prop, t
             else:
                 c_inp.alignment = 'RIGHT'
 
-            s_val = s_main.split(factor=0.5, align=False)
+            s_val = s_main.split(factor=1 / 3, align=False)
             c_val = s_val.row(align=True)
             c_dir = s_val.row(align=True)
 
@@ -3626,7 +3627,7 @@ def _draw_overrides_table(layout, wm, nodegroups, is_collection, is_open_prop, t
             # it cannot exist in this block's branch (the value never applies).
             v_res = scope.resolve_value(value_field_anchors(val), n_ctx)[1]
             (vd_hits, vd_dead), (vt_hits, vt_dead) = v_res["dir"], v_res["tag"]
-            s_dir_tag = c_dir.split(factor=0.5, align=True)
+            s_dir_tag = c_dir.split(factor=0.5, align=False)
             c_d = s_dir_tag.row(align=True)
             c_d.alert = bool(vd_dead)
             c_d.prop(val, "use_dir", text="", icon=ICONS['MERGE'] if vd_hits or vd_dead else ICONS['DIR'], toggle=True)
