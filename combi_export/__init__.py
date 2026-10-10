@@ -550,8 +550,9 @@ def _has_branch_anchors(overrides, known_before):
         if any(("dir", n) in known for n in block_dirs) or any(("tag", n) in known for n in block_tags): return True
         for inp in ovr.inputs:
             known_inp = known_before.get((id(ovr), inp.input_name), known)
-            if is_explicit_name(inp.dir_tag) and any(("dir", n) in known_inp for n in value_dir_names(ovr, inp)): return True
-            if is_explicit_name(inp.tag) and any(("tag", n) in known_inp for n in value_tag_names(ovr, inp)): return True
+            for kind, anchors in value_field_anchors(inp).items():
+                for n in anchors:
+                    if any((kind, x) in known_inp for x in [n] + ((kind == "tag" and tag_pieces(n)) or [])): return True
     return False
 
 # The walker runs once or more per variant, so what it derives from an override or a pool value (which never change
@@ -577,39 +578,60 @@ def _param_key(ovr, input_name):
     return key
 
 def _value_name_parts(inp):
-    """(folder names, filename tokens) one pool value contributes."""
-    def compute():
-        val = get_input_value(inp)
-        dirs = split_path_parts(value_dir_label(val, inp.dir_tag).strip(" .")) if inp.use_dir else []
-        token = value_dir_label(val, inp.tag) if inp.use_tag else ""
-        return dirs, [token] if token else []
-    return _cached(inp, "_name_parts", compute)
+    """{kind: (anchors, names)} one pool value contributes (see value_name_parts)."""
+    return _cached(inp, "_name_parts", lambda: value_parts(inp, get_input_value(inp)))
 
-def value_dir_label(val, tag):
-    """Name a value contributes to a filename or folder (tag rules applied, made filesystem-safe)."""
+def value_name_parts(val, field, kind):
+    """(anchors, names) the folder field (kind "dir") or filename-tag field (kind "tag") of a value gives.
+
+    - Blank: the value ('15').
+    - 'name' replaces the value.
+    - Folder 'name\\' (or 'name/') and tag 'name_': `name`, then the value ('name/15', 'Box_name_15').
+    '/' separates several names: 'C/2\\' gives 'C/2/15', 'C/2_' gives 'Box_C_2_15'. Only the last character is a mark,
+    so a tag name may contain '_' itself ('x__' is the token 'x_', then the value).
+    `anchors` are the names typed in the field: one that is already in the branch merges into it (see
+    _place_dir_parts). `names` come from the value and are always new: two independent inputs that happen to share a
+    value (1, True, a menu item) must multiply, not merge into each other."""
+    mark = "\\/" if kind == "dir" else "_"
+    then_value = not field or field[-1] in mark
+    typed = field[:-1] if field and then_value else field
+    anchors = split_path_parts(typed) if kind == "dir" else split_value_tag_parts(typed)
+    if not then_value: return anchors, []
     val_str = f"{val:.10g}" if isinstance(val, float) else str(val).replace(" ", "_")
-    return sanitize_name(apply_tag(val_str, tag))
+    name = sanitize_name(val_str)
+    if kind == "dir": name = name.strip(" .")
+    return anchors, [name] if name else []
 
-def value_dir_names(ovr, inp):
-    """Folder names one override value can generate (every sweep step included), in order."""
-    if not getattr(inp, "use_dir", False): return []
+def split_value_tag_parts(text):
+    """Split a value tag field into filename tokens: '/' separates tokens. Unlike split_tag_parts, '_' at the edges is
+    kept, so a token like 'x_' (made by the value 'x_') can be named."""
+    if not text: return []
+    parts = (sanitize_name(p).strip(" ") for p in re.split(r"[\\/]", text))
+    return [p for p in parts if p]
+
+def tag_pieces(name):
+    """'a_b' -> ['a', 'b']: a typed token that may stand for several tokens joined in the filename, else None."""
+    pieces = name.split("_")
+    return pieces if len(pieces) > 1 and all(pieces) else None
+
+def value_parts(inp, val):
+    """{kind: (anchors, names)} of one value step, honouring the folder / tag toggles."""
+    return {kind: value_name_parts(val, getattr(inp, field), kind) if getattr(inp, use) else ([], [])
+            for kind, use, field in (("dir", "use_dir", "dir_tag"), ("tag", "use_tag", "tag"))}
+
+def value_field_anchors(inp):
+    """{kind: anchors} of a value. Anchors only depend on the fields, never on the value itself."""
+    return {kind: anchors for kind, (anchors, _names) in value_parts(inp, "").items()}
+
+def value_branch_names(ovr, inp, kind):
+    """Folder names (kind "dir") or filename tokens (kind "tag") one override value can generate (every sweep step
+    included), anchors first, in order."""
     vals = parse_sweep_values(ovr, inp) if getattr(inp, "use_sweep", False) else [get_input_value(inp)]
     names = []
     for val in vals:
-        names.extend(split_path_parts(value_dir_label(val, getattr(inp, "dir_tag", "")).strip(" .")))
+        anchors, new = value_parts(inp, val)[kind]
+        names.extend(n for n in anchors + new if n not in names)
     return names
-
-def value_tag_names(ovr, inp):
-    """Filename tokens one override value can generate (every sweep step included), in order."""
-    if not getattr(inp, "use_tag", False): return []
-    vals = parse_sweep_values(ovr, inp) if getattr(inp, "use_sweep", False) else [get_input_value(inp)]
-    return [t for t in (value_dir_label(val, getattr(inp, "tag", "")) for val in vals) if t]
-
-def is_explicit_name(field):
-    """A value folder / tag field that names the folder or token outright ('tag', the replace rule) can anchor into an
-    existing branch. Names derived from the value itself ('', '_tag', 'tag_') are always new: two independent inputs
-    that happen to share a value (1, True, a menu item) must multiply, not merge into each other."""
-    return bool(field) and not field.startswith("_") and not field.endswith("_")
 
 def split_tag_parts(text):
     """Split a literal tag field into filename tokens: '/' separates tokens, edge spaces and '_' are dropped."""
@@ -630,8 +652,7 @@ def _known_branch_dirs(overrides):
             known_before[(id(ovr), input_name)] = frozenset(known)
             for inp in ovr.inputs:
                 if getattr(inp, "input_name", "") == input_name:
-                    known.update(("dir", n) for n in value_dir_names(ovr, inp))
-                    known.update(("tag", n) for n in value_tag_names(ovr, inp))
+                    known.update((kind, n) for kind in SCOPE_KINDS for n in value_branch_names(ovr, inp, kind))
     return known_before
 
 def _place_dir_parts(parts, branch, known, kind="dir"):
@@ -640,8 +661,10 @@ def _place_dir_parts(parts, branch, known, kind="dir"):
 
     - A name already in the branch (any ancestor / any earlier token, not only the last one) merges into it;
       several anchors ("C/2") must appear in that order.
+    - A token 'a_b' that is not in the branch but whose pieces 'a', 'b' are (in that order) merges into them: the
+      filename reads 'a_b' either way. The whole token wins when both exist.
     - A branch name (generated by an earlier value) missing from this branch means the override belongs to another
-      branch: returns None (inactive here).
+      branch: returns None (inactive here). For 'a_b' that is the case when one of its pieces is such a name.
     - Any other name is new: a folder below the branch's deepest folder, or a token at the end of the filename.
     Returns the list of new names to append."""
     new_parts = []
@@ -652,9 +675,24 @@ def _place_dir_parts(parts, branch, known, kind="dir"):
             continue
         except ValueError:
             pass
+        pieces = tag_pieces(p) if kind == "tag" else None
+        if pieces:
+            at = _index_in_order(branch, pieces, search_from)
+            if at is not None:
+                search_from = at
+                continue
         if (kind, p) in known: return None
+        if pieces and all((kind, x) in known or x in branch for x in pieces) and any(x not in branch for x in pieces):
+            return None
         new_parts.append(p)
     return new_parts
+
+def _index_in_order(branch, names, start):
+    """Position after the last of `names` found in `branch` in that order from `start`, or None."""
+    for n in names:
+        try: start = branch.index(n, start) + 1
+        except ValueError: return None
+    return start
 
 def walk_override_branch(overrides, combo, known_before=None):
     """Walk overrides top-to-bottom for one (possibly partial) combo, tracking the branch's folders and filename
@@ -690,11 +728,12 @@ def walk_override_branch(overrides, combo, known_before=None):
             inp = ovr_chosen.get(input_name)
             if inp is None: continue
             known_inp = known_before.get((id(ovr), input_name), known)
-            dir_parts, tag_parts = _value_name_parts(inp)
-            # Only explicitly named folders / tokens anchor; names derived from the value are always new
-            new_dirs = _place_dir_parts(dir_parts, dir_branch, known_inp, "dir") if is_explicit_name(inp.dir_tag) else dir_parts
-            new_tags = _place_dir_parts(tag_parts, tag_branch, known_inp, "tag") if is_explicit_name(inp.tag) else tag_parts
+            parts = _value_name_parts(inp)
+            # Only the anchors typed in a field are placed; names derived from the value are always new
+            new_dirs = _place_dir_parts(parts["dir"][0], dir_branch, known_inp, "dir")
+            new_tags = _place_dir_parts(parts["tag"][0], tag_branch, known_inp, "tag")
             if new_dirs is None or new_tags is None: continue
+            new_dirs, new_tags = new_dirs + parts["dir"][1], new_tags + parts["tag"][1]
             active.add(id(inp))
 
             param_key = _param_key(ovr, input_name)
@@ -933,13 +972,6 @@ def log_to_console(job, text):
             job.console_logs.add().text = line
         while len(job.console_logs) > 300: job.console_logs.remove(0)
         job.console_index = len(job.console_logs) - 1
-
-def apply_tag(base, tag):
-    """Tag rules: '_tag' appends, 'tag_' prepends, a bare 'tag' replaces `base`; no tag keeps `base`."""
-    if not tag: return base
-    if tag.startswith("_"): return f"{base}{tag}"
-    if tag.endswith("_"): return f"{tag}{base}"
-    return tag
 
 def join_name_segments(segments):
     """Concatenate (names, is_fixed) segments of folders or filename tokens. Fixed segments come from plain fields
@@ -2060,7 +2092,7 @@ _PATH_STEP = re.compile(r"(\w+)\[(\d+)\]")
 #   sweep steps) of the same input never appear in the same permutation, so they exclude each other. The folder and
 #   the token of the *same* value do appear together. A name created by several inputs (e.g. "1" from two number
 #   inputs) excludes nothing, since it can come from either.
-# - Only explicitly named value folders / tokens (is_explicit_name) merge; names derived from the value are new.
+# - Only the anchors typed in a value field (value_name_parts) merge; names derived from the value are new.
 # - A context is the set of branch keys a block is merged into (plus what those names themselves require).
 # - A name created inside a merged block exists only in that context, e.g. "X" made under a block merged into "A"
 #   is never available inside a block merged into "C".
@@ -2072,23 +2104,11 @@ def block_parts(block, kind):
     return split_path_parts(getattr(block, "sub_path", "")) if kind == "dir" else split_tag_parts(getattr(block, "tag", ""))
 
 def _value_step_names(ng_ptr, node, inp, val):
-    """[(folder names, filename tokens)] per step of one UI value (one step unless it is a sweep)."""
+    """[{kind: (anchors, names)}] per step of one UI value (one step unless it is a sweep)."""
     target = 'MODIFIER' if not node.name or node.name == "<Modifier Interface>" else 'NODE'
     tmp = MockInput(inp, val, is_temp=True)
     steps = parse_sweep_values(MockOverride(target, ng_ptr, node.name, [tmp]), tmp) if tmp.use_sweep else [get_input_value(tmp)]
-    out = []
-    for v in steps:
-        dirs = split_path_parts(value_dir_label(v, tmp.dir_tag).strip(" .")) if tmp.use_dir else []
-        label = value_dir_label(v, tmp.tag) if tmp.use_tag else ""
-        out.append((dirs, [label] if label else []))
-    return out
-
-def _value_names(ng_ptr, node, inp, val):
-    """All folder names and all filename tokens one UI value can create."""
-    dirs, tags = [], []
-    for d, t in _value_step_names(ng_ptr, node, inp, val):
-        dirs.extend(d); tags.extend(t)
-    return dirs, tags
+    return [value_parts(tmp, v) for v in steps]
 
 def _block_where(ng, node=None):
     return ng.group_name if node is None else f"{ng.group_name} › {clean_node_name(node.name) or 'Modifier'}"
@@ -2134,7 +2154,7 @@ class BranchScope:
         Returns (new_ctx, hits, dead) with names: `hits` merge into existing ones, `dead` are branch names that cannot
         exist in this context (the exporter then never applies the block). With `desc`, new names are recorded."""
         ctx, hits, dead = set(ctx), [], []
-        for p in parts:
+        for p in self.expand(kind, parts):
             key = (kind, p)
             reqs = self._req_set(key, ctx)
             if reqs is not None:
@@ -2147,19 +2167,28 @@ class BranchScope:
                 self.add(key, desc, ctx)
         return frozenset(ctx), hits, dead
 
+    def expand(self, kind, parts):
+        """Typed tokens 'a_b' that are not known but whose pieces are stand for those pieces (see _place_dir_parts)."""
+        if kind != "tag": return parts
+        out = []
+        for p in parts:
+            pieces = tag_pieces(p)
+            if (kind, p) not in self.entries and pieces and all((kind, x) in self.entries for x in pieces): out.extend(pieces)
+            else: out.append(p)
+        return out
+
     def enter_block(self, block, ctx, ng, node=None, record=True):
         """Context inside a node group / node block (its sub-folder, then its tag), recording its new names."""
         for kind in SCOPE_KINDS:
             ctx = self.resolve(kind, block_parts(block, kind), ctx, _block_desc(kind, ng, node) if record else None)[0]
         return ctx
 
-    def resolve_value(self, val, dirs, tags, ctx):
-        """resolve() for the folder names and tokens of one value step, in context `ctx`: only explicitly named fields
-        anchor, derived names are always new. Returns (new_ctx, {kind: (hits, dead)})."""
+    def resolve_value(self, anchors, ctx):
+        """resolve() for the anchors of one value ({kind: names}, see value_field_anchors) in context `ctx`; names
+        derived from the value are always new. Returns (new_ctx, {kind: (hits, dead)})."""
         res = {}
-        for kind, names, field in (("dir", dirs, val.dir_tag), ("tag", tags, val.tag)):
-            if is_explicit_name(field): ctx, hits, dead = self.resolve(kind, names, ctx)
-            else: hits, dead = [], []
+        for kind in SCOPE_KINDS:
+            ctx, hits, dead = self.resolve(kind, anchors[kind], ctx)
             res[kind] = (hits, dead)
         return frozenset(ctx), res
 
@@ -2168,11 +2197,12 @@ class BranchScope:
         group = (ng.group_name, clean_node_name(node.name), inp.name)
         descs = {"dir": f"Branch · {ng.group_name} › {inp.name}", "tag": f"Name branch · {ng.group_name} › {inp.name}"}
         for v_idx, val in enumerate(inp.values):
-            for s_idx, (dirs, tags) in enumerate(_value_step_names(ng_ptr, node, inp, val)):
-                v_ctx, res = self.resolve_value(val, dirs, tags, ctx)
+            for s_idx, parts in enumerate(_value_step_names(ng_ptr, node, inp, val)):
+                anchors = {kind: self.expand(kind, parts[kind][0]) for kind in SCOPE_KINDS}
+                v_ctx, res = self.resolve_value(anchors, ctx)
                 if res["dir"][1] or res["tag"][1]: continue  # this value never applies, so its names never exist
-                for kind, names in (("dir", dirs), ("tag", tags)):
-                    for n in names:
+                for kind in SCOPE_KINDS:
+                    for n in anchors[kind] + parts[kind][1]:
                         if n not in res[kind][0]: self.add((kind, n), descs[kind], v_ctx, group, (v_idx, s_idx))
 
     def suggestions(self, kind, ctx, exclude=()):
@@ -2250,14 +2280,20 @@ def make_scope_search_cb(kind, prop_name, multi_part=True):
     branch, to merge into. Free text is still allowed.
 
     With `multi_part` the suggestion completes the last '/'-separated part inside the branch chosen so far, so 'C/'
-    offers 'C/2', 'C/3', ... but not 'C/A' (A and C are alternatives of the same input)."""
-    split = split_path_parts if kind == "dir" else split_tag_parts
+    offers 'C/2', 'C/3', ... but not 'C/A' (A and C are alternatives of the same input).
+    A value field ending in its "names, then the value" mark (folder '\\' or '/', tag '_', see value_name_parts)
+    completes the last name before the mark and keeps the mark: 'B\\' offers 'B\\', 'C/2\\' offers 'C/2\\', 'C/3\\', ..."""
+    split = split_path_parts if kind == "dir" else split_tag_parts if multi_part else split_value_tag_parts
     other = "tag" if kind == "dir" else "dir"
+    marks = "" if multi_part else ("\\/" if kind == "dir" else "_")
     def search(self, context, edit_text):
         current = getattr(self, prop_name, "")
-        if edit_text == current and "/" not in current and "\\" not in current: edit_text = ""
+        mark = ""
+        if edit_text[-1:] and edit_text[-1] in marks:
+            mark, edit_text = edit_text[-1], edit_text[:-1]
+        if edit_text + mark == current and "/" not in edit_text and "\\" not in edit_text: edit_text = ""
         prefix, query = "", edit_text
-        if multi_part:
+        if multi_part or mark:
             cut = max(edit_text.rfind("/"), edit_text.rfind("\\"))
             if cut >= 0: prefix, query = edit_text[:cut + 1], edit_text[cut + 1:]
         scope, ctx = upstream_scope(self)
@@ -2267,7 +2303,7 @@ def make_scope_search_cb(kind, prop_name, multi_part=True):
         used = split(prefix)
         ctx = scope.resolve(kind, used, ctx)[0]
         q = query.lower()
-        return [(prefix + name, desc) for name, desc in scope.suggestions(kind, ctx, exclude=used).items()
+        return [(prefix + name + mark, desc) for name, desc in scope.suggestions(kind, ctx, exclude=used).items()
                 if not q or q in name.lower()]
     return search
 
@@ -2280,10 +2316,10 @@ class BatchSTLValue(bpy.types.PropertyGroup):
     value_menu: bpy.props.StringProperty(name="Value", default="", search=search_menu_items_cb, update=on_value_update("value_menu", "Edit Override Value"))
     use_tag: bpy.props.BoolProperty(name="Use Tag", default=False, update=mark_dirty)
     prev_tag: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    tag: bpy.props.StringProperty(name="Tag", description="Filename tag: '_tag' appends, 'tag_' prepends, 'tag' replaces the value. A replacing name that matches an upstream name token merges into that branch", default="", search=make_scope_search_cb("tag", "tag", multi_part=False), update=on_no_spaces_update("tag", "Edit Override Tag"))
+    tag: bpy.props.StringProperty(name="Tag", description="Filename tag: 'name' replaces the value, 'name_' adds the token 'name' and then the value. '/' separates tokens. A name that exists upstream merges into that branch", default="", search=make_scope_search_cb("tag", "tag", multi_part=False), update=on_no_spaces_update("tag", "Edit Override Tag"))
     use_dir: bpy.props.BoolProperty(name="Use Dir", default=True, update=mark_dirty)
     prev_dir_tag: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    dir_tag: bpy.props.StringProperty(name="Directory", description="Folder name: '_tag' appends, 'tag_' prepends, 'tag' replaces the value. A replacing name that matches an upstream folder merges into that branch", default="", search=make_scope_search_cb("dir", "dir_tag", multi_part=False), update=on_no_spaces_update("dir_tag", "Edit Override Directory"))
+    dir_tag: bpy.props.StringProperty(name="Directory", description="Folder name: 'name' replaces the value, 'name\\' puts a folder per value inside folder 'name'. '/' separates folders. A folder that exists upstream merges into that branch", default="", search=make_scope_search_cb("dir", "dir_tag", multi_part=False), update=on_no_spaces_update("dir_tag", "Edit Override Directory"))
     use_sweep: bpy.props.BoolProperty(name="Sweep", default=False, update=mark_dirty)
     sweep_range: bpy.props.StringProperty(name="Sweep Range", default="", update=mark_dirty)
     prev_sweep_start: bpy.props.StringProperty(default="0", options={'HIDDEN'})
@@ -3409,8 +3445,7 @@ def _draw_overrides_table(layout, wm, nodegroups, is_collection, is_open_prop, t
             # Directory and filename tag: each toggle drives only its own field.
             # A folder / token that merges into an upstream one shows the merge icon on its toggle; red when
             # it cannot exist in this block's branch (the value never applies).
-            v_dirs, v_tags = _value_names(ng_ptr, node, inp, val)
-            v_res = scope.resolve_value(val, v_dirs, v_tags, n_ctx)[1]
+            v_res = scope.resolve_value(value_field_anchors(val), n_ctx)[1]
             (vd_hits, vd_dead), (vt_hits, vt_dead) = v_res["dir"], v_res["tag"]
             s_dir_tag = c_dir.split(factor=0.5, align=True)
             c_d = s_dir_tag.row(align=True)

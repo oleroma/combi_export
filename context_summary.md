@@ -29,13 +29,17 @@ Rules per name (`_place_dir_parts(parts, branch, known, kind)`):
    override/value **inactive** for this branch.
 3. Anything else → new folder / new token.
 Matching is case-sensitive.
-**Explicit value names only** (`is_explicit_name`): a value's folder/token goes through these rules only when its field
-names it outright (replace rule, e.g. `B`). Names derived from the value (blank, `_x`, `x_`) are always new, so two
-inputs sharing a value (`1`, `True`) multiply (`1/1`) instead of merging (bug found 2026-10-09: 3×3 gave 3 variants).
-They are still branch names that blocks anchor to.
+**Only typed value names anchor** (`value_name_parts` → `(anchors, names)`): a value's anchors (the names typed in its
+field: replace `B`, folder `B\` / `C/2\`, tag `B_`) go through these rules; the value's own folder / token (blank
+field, or after `B\` / `B_`) is always new. No append / prepend rules any more (removed 2026-10-10). Tag anchor `a_b`
+not in the branch matches tokens `a`, `b` in order (`tag_pieces`, whole token wins). Value names never anchor, so two inputs sharing a value (`1`, `True`)
+multiply (`1/1`) instead of merging (bug found 2026-10-09: 3×3 gave 3 variants). They are still branch names that
+blocks anchor to.
 
 ### Key functions
-- `value_dir_label(val, tag)` (tag rules: `_x` append, `x_` prepend, `x` replace), `value_dir_names`, `value_tag_names`.
+- `value_name_parts(val, field, kind)` (blank = value, `x` replace, folder `x\` = folder x then the value folder, tag
+  `x_` = token x then the value token), `split_value_tag_parts` (keeps edge `_`), `tag_pieces`, `value_parts`,
+  `value_field_anchors`, `value_branch_names`.
 - `split_path_parts` (folders) / `split_tag_parts` (literal tag fields: `/` separates tokens, edge spaces and `_` stripped).
 - `_known_branch_dirs(overrides)` – `("dir", name)` / `("tag", name)` keys known before each override (`id(ovr)`) and
   each input (`(id(ovr), input_name)`).
