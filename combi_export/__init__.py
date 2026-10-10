@@ -2439,19 +2439,22 @@ def make_scope_search_cb(kind, prop_name, multi_part=True):
 
     The suggestion completes the last '/'-separated part (in a value tag field also '_'-separated) inside the branch
     chosen so far, so 'C/' offers 'C/2', 'C/3', ... but not 'C/A' (A and C are alternatives of the same input).
-    `multi_part` is False for a value field. A value field ending in its "names, then the value" mark (folder '\\' or '/', tag '_', see value_name_parts)
-    completes the last name before the mark and keeps the mark, and offers the next link of the chain: 'B\\' offers
-    'B\\' and 'B\\1\\', 'B\\2\\', ...; tag 'B_' offers 'B_' and 'B_1_', 'B_2_', ... (a tag chain is split at '_')."""
+    `multi_part` is False for a value field. Its suggestions always end in the "names, then the value" mark (folder
+    '\\', tag '_', see value_name_parts), so picking one merges and keeps the value; deleting the mark replaces the
+    value with the names instead. A folder field typed with '/' as its mark keeps '/'. Once the mark is typed, the
+    next link of the chain is offered too: 'B\\' offers 'B\\' and 'B\\1\\', 'B\\2\\', ...; tag 'B_' offers 'B_' and
+    'B_1_', 'B_2_', ... (a tag chain is split at '_')."""
     split = split_path_parts if kind == "dir" else split_tag_parts if multi_part else split_value_tag_parts
     other = "tag" if kind == "dir" else "dir"
     marks = "" if multi_part else ("\\/" if kind == "dir" else "_")
     seps = "/\\_" if kind == "tag" else "/\\"
     def search(self, context, edit_text):
         current = getattr(self, prop_name, "")
-        mark = ""
+        typed_mark = ""
         if edit_text[-1:] and edit_text[-1] in marks:
-            mark, edit_text = edit_text[-1], edit_text[:-1]
-        if edit_text + mark == current and not any(c in edit_text for c in seps): edit_text = ""
+            typed_mark, edit_text = edit_text[-1], edit_text[:-1]
+        mark = typed_mark or marks[:1]
+        if edit_text + typed_mark == current and not any(c in edit_text for c in seps): edit_text = ""
         scope, ctx = upstream_scope(self)
         # The other field of the same block / value (sub-folder vs tag) must still fit every suggestion: both are
         # placed in the same branch
@@ -2480,7 +2483,7 @@ def make_scope_search_cb(kind, prop_name, multi_part=True):
             return [(prefix + name + mark, desc) for name, desc in names.items() if not q or q in name.lower()]
 
         items = complete(edit_text)
-        if mark and edit_text: items += complete(edit_text + mark)  # the next link of the chain
+        if typed_mark and edit_text: items += complete(edit_text + typed_mark)  # the next link of the chain
         return list(dict.fromkeys(items))
     return search
 
@@ -2493,10 +2496,10 @@ class BatchSTLValue(bpy.types.PropertyGroup):
     value_menu: bpy.props.StringProperty(name="Value", default="", search=search_menu_items_cb, update=on_value_update("value_menu", "Edit Override Value"))
     use_tag: bpy.props.BoolProperty(name="Use Tag", description="Add this value to the filename, named by the tag field. Drag across several buttons to toggle them together", default=False, update=mark_dirty)
     prev_tag: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    tag: bpy.props.StringProperty(name="Tag", description="Filename tag: 'name' replaces the value, 'name_' adds the token 'name' and then the value. Chain names with '_' or '/' ('B_2_' merges into branch B, then its branch 2). A name that exists upstream merges into that branch", default="", search=make_scope_search_cb("tag", "tag", multi_part=False), update=on_no_spaces_update("tag", "Edit Override Tag"))
+    tag: bpy.props.StringProperty(name="Tag", description="Filename tag: 'name' replaces the value, 'name_' adds the token 'name' and then the value. Chain names with '_' or '/' ('B_2_' merges into branch B, then its branch 2). A name that exists upstream merges into that branch. Suggestions end in '_': delete it to replace the value", default="", search=make_scope_search_cb("tag", "tag", multi_part=False), update=on_no_spaces_update("tag", "Edit Override Tag"))
     use_dir: bpy.props.BoolProperty(name="Use Dir", description="Put this value's files in a sub-folder, named by the directory field. Drag across several buttons to toggle them together", default=True, update=mark_dirty)
     prev_dir_tag: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    dir_tag: bpy.props.StringProperty(name="Directory", description="Folder name: 'name' replaces the value, 'name\\' puts a folder per value inside folder 'name'. Chain folders with '\\' or '/' ('B\\2\\' merges into folder B, then its folder 2). A folder that exists upstream merges into that branch", default="", search=make_scope_search_cb("dir", "dir_tag", multi_part=False), update=on_no_spaces_update("dir_tag", "Edit Override Directory"))
+    dir_tag: bpy.props.StringProperty(name="Directory", description="Folder name: 'name' replaces the value, 'name\\' puts a folder per value inside folder 'name'. Chain folders with '\\' or '/' ('B\\2\\' merges into folder B, then its folder 2). A folder that exists upstream merges into that branch. Suggestions end in '\': delete it to replace the value", default="", search=make_scope_search_cb("dir", "dir_tag", multi_part=False), update=on_no_spaces_update("dir_tag", "Edit Override Directory"))
     use_sweep: bpy.props.BoolProperty(name="Sweep", default=False, update=mark_dirty)
     sweep_range: bpy.props.StringProperty(name="Sweep Range", default="", update=mark_dirty)
     prev_sweep_start: bpy.props.StringProperty(default="0", options={'HIDDEN'})
