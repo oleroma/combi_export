@@ -2450,6 +2450,7 @@ def make_scope_search_cb(kind, prop_name, multi_part=True):
     seps = "/\\_" if kind == "tag" else "/\\"
     def search(self, context, edit_text):
         current = getattr(self, prop_name, "")
+        typed = edit_text
         typed_mark = ""
         if edit_text[-1:] and edit_text[-1] in marks:
             typed_mark, edit_text = edit_text[-1], edit_text[:-1]
@@ -2484,6 +2485,10 @@ def make_scope_search_cb(kind, prop_name, multi_part=True):
 
         items = complete(edit_text)
         if typed_mark and edit_text: items += complete(edit_text + typed_mark)  # the next link of the chain
+        # Blender highlights the only result (or one equal to the text) and Enter applies the highlighted one, so
+        # deleting a mark and pressing Enter would bring the mark back. The text as typed comes first instead: Enter
+        # keeps it, arrow down picks a suggestion.
+        if typed and all(name != typed for name, _desc in items): items.insert(0, (typed, "Keep as typed"))
         return list(dict.fromkeys(items))
     return search
 
