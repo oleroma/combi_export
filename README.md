@@ -88,6 +88,7 @@ Generate variant permutations across any socket. A sweep is typed in the value f
   | `15 @ #` | `15/` | `Box_15` | both |
   | `15 @big` | `big/` | | the name replaces the value |
   | `15 @B\` | `B/15/` | | folder `B`, then a folder per value (`@B/` works too) |
+  | `15 @size_` | `size_15/` | | one folder joining the name and the value |
   | `15 #x` | | `Box_x` | the token replaces the value |
   | `15 #x_` | | `Box_x_15` | token `x`, then the value |
   | `0:0.5:5 @` | `0/` … `2/` | | a sweep: `start:step:count` |
@@ -100,6 +101,7 @@ Generate variant permutations across any socket. A sweep is typed in the value f
   - Empty: the formatted parameter value (`15`).
   - `name`: replaces the value (`name`).
   - Folder `name\` (or `name/`): folder `name` with a folder per value inside it (`name/15`).
+  - Folder `name_`: one folder per value joining `name` and the value (`name_15`). It can end a chain: `@C/2/size_` → `C/2/size_15`. The joined folder comes from the value, so `size` itself never merges; a block or a later value can merge into `size_15` (`@size_15`). A folder name that ends in `_` cannot be typed as a plain replacement any more.
   - Tag `name_`: token `name` followed by the value (`Box_name_15`).
   - **Chains:** several names merge one branch level after another. `@B\2\` (or `@B/2\`) goes into folder `B`, then its folder `2`: `B/2/15`. `#B_2_` (or `#B/2_`) goes into token `B`, then its token `2`: `Box_B_2_15`. With letters `A B` and numbers `1 2` upstream, only the `B_2` files get the value; `A_1`, `A_2` and `B_1` stay as they are. A name in the chain that does not exist yet is created at that point: `#B_new_` → `Box_B_1_new_15`, `Box_B_2_new_15`.
   - A tag chain is split at `_`, but a token that exists upstream keeps its `_`: with a value `a_b` upstream, `#a_b_` merges into that token, and `#x__` is the token `x_` followed by the value. The branch's own tokens decide first, so `#a_b_` also merges into `a` and `b` coming from two inputs.

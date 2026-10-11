@@ -163,3 +163,11 @@ blocks anchor to.
   a strict fake layout, and a headless worker export whose files match the tree preview. Probe gotcha: Python references
   to collection items go stale after `add()` on the same collection (Blender reallocates), so probes must look items up
   again. Not verified interactively: the search popup itself, tooltips with line breaks, undo entries.
+- Joined value folders (2026-10-11): folder spec ending in `_` makes ONE folder `name_value` (`@size_` → `size_15`,
+  `@C/2/size_` → `C/2/size_15`) in `value_name_parts` (`value_name` builds the name). The joined name is a value name
+  (never an anchor, always new, a branch name blocks can merge into). A literal folder ending in `_` can no longer
+  replace the value (before, `@x_` meant folder `x_` for every value). Tags are unchanged (`#x_` already gives `x_15`).
+- Known pre-existing prediction gap (found by the walker-vs-BranchScope fuzz, also without joined folders): a chain
+  that names folders in a different order than the path holds them (block `x_1/A` on path `A/x_1`) is predicted alive
+  but never applies; `chain_states` lets a plain (non-branch) name be "created anew" even where it already exists
+  earlier in the path, which the walker never does.

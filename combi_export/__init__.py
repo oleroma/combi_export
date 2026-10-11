@@ -592,20 +592,30 @@ def value_name_parts(val, field, kind):
     - Blank: the value ('15').
     - 'name' replaces the value.
     - Folder 'name\\' (or 'name/') and tag 'name_': `name`, then the value ('name/15', 'Box_name_15').
-    '/' separates several names: 'C/2\\' gives 'C/2/15', 'C/2_' gives 'Box_C_2_15'. Only the last character is a mark,
-    so a tag name may contain '_' itself ('x__' is the token 'x_', then the value).
+    - Folder 'name_': one folder joining `name` and the value ('name_15').
+    '/' separates several names: 'C/2\\' gives 'C/2/15', 'C/2/name_' gives 'C/2/name_15', 'C/2_' gives 'Box_C_2_15'.
+    Only the last character is a mark, so a tag name may contain '_' itself ('x__' is the token 'x_', then the value).
     `anchors` are the names typed in the field: one that is already in the branch merges into it (see
     _place_dir_parts). `names` come from the value and are always new: two independent inputs that happen to share a
-    value (1, True, a menu item) must multiply, not merge into each other."""
+    value (1, True, a menu item) must multiply, not merge into each other. A joined folder ('name_15') comes from the
+    value too, so 'name' is no anchor there."""
+    if kind == "dir" and field.endswith("_"):
+        anchors = split_path_parts(field)
+        prefix = anchors.pop() if anchors else ""
+        name = value_name(val, kind, prefix)
+        return anchors, [name] if name else []
     mark = "\\/" if kind == "dir" else "_"
     then_value = not field or field[-1] in mark
     typed = field[:-1] if field and then_value else field
     anchors = split_path_parts(typed) if kind == "dir" else split_value_tag_parts(typed)
     if not then_value: return anchors, []
-    val_str = f"{val:.10g}" if isinstance(val, float) else str(val).replace(" ", "_")
-    name = sanitize_name(val_str)
-    if kind == "dir": name = name.strip(" .")
+    name = value_name(val, kind)
     return anchors, [name] if name else []
+
+def value_name(val, kind, prefix=""):
+    """File-safe folder name (kind "dir") or filename token of a value, after `prefix`."""
+    name = sanitize_name(prefix + (f"{val:.10g}" if isinstance(val, float) else str(val).replace(" ", "_")))
+    return name.strip(" .") if kind == "dir" else name
 
 def split_value_tag_parts(text):
     """Split a value tag field into filename tokens: '/' separates tokens. Unlike split_tag_parts, '_' at the edges is
@@ -666,6 +676,7 @@ def split_tag_parts(text):
 #   15 @big       folder 'big' instead of the value             15 #big      token 'big' instead of the value
 #   15 @B\        folder B, then a folder per value: B/15       15 #B_       token B, then the value: B_15
 #   15 @C/2\      a chain merges branch by branch: C/2/15       15 #C_2_     C_2_15
+#   15 @size_     one folder joining the name and the value: size_15 (in a chain: @C/size_ gives C/size_15)
 # The value part also holds sweeps: numbers 'start:step:count', strings '{a, b, c}', menus and booleans '*'.
 # Node group and node blocks use the sections without a value (BatchSTLNodeGroup.naming): '@C/2 #B'.
 # '@' and '#' start a section only outside double quotes: '"a#b" #' is the string a#b; '""' is a quote inside quotes.
@@ -2500,9 +2511,8 @@ def value_info(ng_ptr, node, inp, val, res, scope):
     specs = value_specs(val)
     for kind, label, joiner in (("dir", "Folder", " / "), ("tag", "Filename token", "_")):
         if specs[kind] is None: continue
-        anchors, names = value_name_parts(steps[0], specs[kind], kind)
-        if names and len(steps) > 1: names = ["<value>"]
-        lines.append(f"{label}: {joiner.join(anchors + names)}")
+        first, last = (joiner.join(sum(value_name_parts(step, specs[kind], kind), [])) for step in (steps[0], steps[-1]))
+        lines.append(f"{label}: {first}" + (f" … {last}" if last != first else ""))
     if all(spec is None for spec in specs.values()): lines.append("No folder and no filename token")
     hits = [(k, n) for k in SCOPE_KINDS for n in res[k][0]]
     dead = [(k, n) for k in SCOPE_KINDS for n in res[k][1]]
@@ -2829,6 +2839,7 @@ EXPR_DESCRIPTION = (
     "The value and its naming: the value, then '@' for a folder and '#' for a filename token.\n"
     "15: value only · 15 @: folder 15 · 15 #: token 15 · 15 @ #: both\n"
     "@big, #big: the name instead of the value · @B\\, #B_: B, then the value (B/15, B_15)\n"
+    "@size_: one folder joining the name and the value (size_15)\n"
     "Names that exist upstream merge into that branch. Chains: @C/2\\ (C/2/15), #C_2_ (C_2_15)\n"
     "Sweeps: 0:0.5:5 (start:step:count), {a, b} (strings), * (every menu item, True and False)\n"
     "Quote text that holds @ or #: \"a#b\". Clear the field to delete the value")
@@ -2848,7 +2859,7 @@ class BatchSTLValue(bpy.types.PropertyGroup):
     use_tag: bpy.props.BoolProperty(name="Use Tag", description="Add this value to the filename, named by `tag` (the '#' section)", default=False, update=mark_dirty)
     tag: bpy.props.StringProperty(name="Tag", description="Filename tag: 'name' replaces the value, 'name_' adds the token 'name' and then the value. Chain names with '_' or '/' ('B_2_' merges into branch B, then its branch 2)", default="", update=mark_dirty)
     use_dir: bpy.props.BoolProperty(name="Use Dir", description="Put this value's files in a sub-folder, named by `dir_tag` (the '@' section)", default=True, update=mark_dirty)
-    dir_tag: bpy.props.StringProperty(name="Directory", description="Folder name: 'name' replaces the value, 'name\\' puts a folder per value inside folder 'name'. Chain folders with '\\' or '/' ('B\\2\\' merges into folder B, then its folder 2)", default="", update=mark_dirty)
+    dir_tag: bpy.props.StringProperty(name="Directory", description="Folder name: 'name' replaces the value, 'name\\' puts a folder per value inside folder 'name', 'name_' joins them into one folder ('name_15'). Chain folders with '\\' or '/' ('B\\2\\' merges into folder B, then its folder 2)", default="", update=mark_dirty)
     use_sweep: bpy.props.BoolProperty(name="Sweep", default=False, update=mark_dirty)
     sweep_range: bpy.props.StringProperty(name="Sweep Range", default="", update=mark_dirty)
     prev_sweep_start: bpy.props.StringProperty(default="0", options={'HIDDEN'})
@@ -4142,6 +4153,7 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
             child_col.label(text="  • 15 = value only · 15 @ = folder 15 · 15 # = filename token 15", icon=ICONS['BLANK'])
             child_col.label(text="  • @big / #big: the name instead of the value", icon=ICONS['DIR'])
             child_col.label(text="  • @B\\ / #B_: B, then the value (B/15, Box_B_15)", icon=ICONS['TAG'])
+            child_col.label(text="  • @size_: one folder joining name and value (size_15)", icon=ICONS['DIR'])
             child_col.label(text="  • Sweeps: 0:0.5:5 = start:step:count · {a, b} = strings · * = all items", icon=ICONS['SWEEP'])
             child_col.label(text="  • Quote text holding @ or #: \"a#b\" · Clear the field to delete the value", icon=ICONS['BLANK'])
             child_col.label(text="  • Group / Node naming: @C/2 #B = folders C/2 and token B", icon=ICONS['NODE'])
