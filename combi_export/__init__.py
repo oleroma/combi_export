@@ -2833,7 +2833,8 @@ def get_value_expr(self):
 def set_value_expr(self, text):
     """Parse an expression (see EXPR_SIGILS) into the value's fields. Text that does not fit the input type, a single
     value another value of the input already has, or a name with a space is rejected: the field shows the stored value
-    again. An empty field deletes the value (in the update, on_value_expr_update)."""
+    again. An empty field deletes the value, and '*' (every menu item, True and False) replaces the input's other values
+    like Shift + '+' (both in the update, on_value_expr_update)."""
     owner = value_owner(self)
     if owner is None: return
     ng, node, inp = owner
@@ -2847,29 +2848,39 @@ def set_value_expr(self, text):
     if not fields["use_sweep"]:
         prop, new = next((p, v) for p, v in fields.items() if p in VALUE_PROPS)
         if any(o != self and not o.use_sweep and same_value(inp.override_type, getattr(o, prop), new) for o in inp.values): return
-    # Typing over a blank value (a string just added as a permutation shows '@') fills in the value: its naming stays
+    # Typing over a blank value (a string just added as a permutation shows '@') fills in the value, and '*' makes the
+    # input permute: without '@' / '#' typed, the value keeps its naming
+    sweep_all = fields["use_sweep"] and inp.override_type in ('BOOLEAN', 'MENU')
     blank = not self.use_sweep and getattr(self, "value_menu" if inp.override_type in ('BOOLEAN', 'MENU') else "value_string") == ""
-    if blank and all(spec is None for spec in specs.values()): specs = value_specs(self)
+    if (blank or sweep_all) and all(spec is None for spec in specs.values()): specs = value_specs(self)
     fields.update(use_dir=specs["dir"] is not None, dir_tag=specs["dir"] or "", use_tag=specs["tag"] is not None, tag=specs["tag"] or "")
     changed = {p: v for p, v in fields.items() if getattr(self, p) != v}
-    if not changed: return
+    solo = sweep_all and (changed or len(inp.values) > 1)
+    if not changed and not solo: return
     with raw_edits():
         for p, v in changed.items(): setattr(self, p, v)
-    _expr_edits[self.as_pointer()] = "changed"
+    _expr_edits[self.as_pointer()] = "solo" if solo else "changed"
 
 def on_value_expr_update(self, context):
     edit = _expr_edits.pop(self.as_pointer(), None)
     mark_dirty()
     if edit is None or _raw_edit_depth: return
-    if edit == "delete":
+    if edit in ("delete", "solo"):
         owner = value_owner(self)
         if owner is None: return
         inp = owner[2]
         idx = next((i for i, v in enumerate(inp.values) if v == self), None)
         if idx is None: return
         with nested_edits():
-            with raw_edits(): inp.values.remove(idx)
-            if len(inp.values) == 0: inp.name = ""  # deletes the input, and an emptied node and node group
+            if edit == "delete":
+                with raw_edits(): inp.values.remove(idx)
+                if len(inp.values) == 0: inp.name = ""  # deletes the input, and an emptied node and node group
+            else:
+                # '*' already holds every item: the other values go, and the sweep gets a folder per value when plain
+                with raw_edits():
+                    for j in reversed(range(len(inp.values))):
+                        if j != idx: inp.values.remove(j)
+                name_permutations(inp.values, 0)
     push_search_undo("Edit Override Value")
 
 def search_value_expr(self, context, edit_text):
@@ -2979,7 +2990,7 @@ EXPR_DESCRIPTION = (
     "@big, #big: the name instead of the value · @B\\, #B_: B, then the value (B/15, B_15)\n"
     "@size_: one folder joining the name and the value (size_15)\n"
     "Names that exist upstream merge into that branch. Chains: @C/2\\ (C/2/15), #C_2_ (C_2_15)\n"
-    "Sweeps: 0:0.5:5 (start:step:count), {a, b} (strings), * (every menu item, True and False)\n"
+    "Sweeps: 0:0.5:5 (start:step:count), {a, b} (strings), * (every menu item, True and False; replaces the other values)\n"
     "Quote text that holds @ or #: \"a#b\". Clear the field to delete the value")
 
 BLOCK_NAMING_DESCRIPTION = (
@@ -4298,7 +4309,7 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
             child_col.label(text="  • @big / #big: the name instead of the value", icon=ICONS['DIR'])
             child_col.label(text="  • @B\\ / #B_: B, then the value (B/15, Box_B_15)", icon=ICONS['TAG'])
             child_col.label(text="  • @size_: one folder joining name and value (size_15)", icon=ICONS['DIR'])
-            child_col.label(text="  • Sweeps: 0:0.5:5 = start:step:count · {a, b} = strings · * = all items", icon=ICONS['SWEEP'])
+            child_col.label(text="  • Sweeps: 0:0.5:5 = start:step:count · {a, b} = strings · * = all items (replaces other values)", icon=ICONS['SWEEP'])
             child_col.label(text="  • Quote text holding @ or #: \"a#b\" · Clear the field to delete the value", icon=ICONS['BLANK'])
             child_col.label(text="  • Group / Node naming: @C/2 #B = folders C/2 and token B", icon=ICONS['NODE'])
             child_col.label(text="  • Hover the icon before a value to see its folder, token and merges", icon=ICONS['INFO'])
