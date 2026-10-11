@@ -68,7 +68,8 @@ blocks anchor to.
 
 ## 2. Data model changes (this session)
 - `BatchSTLValue`: `dir_tag` folder name, separate from `tag` (filename). Stored data only: the UI edits a value
-  through one computed field, `expr` (section 7).
+  through one computed field, `expr` (section 7). New values are plain (`add_value`; the RNA `use_dir` default stays
+  True for old data); `name_permutations` adds `@` (or copies the input's naming) once `+` / a sweep makes it permute.
 - `BatchSTLNodeGroup` / `BatchSTLNode`: `tag` next to `sub_path`, edited through the computed `naming` field.
 - `MockOverride` carries `ng_sub_path`, `node_sub_path`, `ng_tag`, `node_tag` (set in `get_flat_overrides`,
   kept by `resolve_overrides`). A block with only a sub-folder/tag and no inputs still becomes an override.

@@ -789,6 +789,41 @@ def compose_expr(value_text, specs):
 def value_expr(val, override_type):
     return compose_expr(expr_value_text(val, override_type), value_specs(val))
 
+# --- New values ------------------------------------------------------------------------------------------------------
+# A new input starts with a plain value ('15'): one value applies to every export and needs no folder or token. Once
+# the input permutes (a second value, or a sweep), values without naming would all write the same file, so they get
+# a folder per value ('15 @', '16 @') or the naming the input already uses ('15 #' gives '16 #').
+FOLDER_PER_VALUE = {"dir": "", "tag": None}
+
+def set_value_specs(val, specs):
+    """Write a value's folder and tag naming ({kind: spec or None}, see value_specs)."""
+    val.use_dir, val.dir_tag = specs["dir"] is not None, specs["dir"] or ""
+    val.use_tag, val.tag = specs["tag"] is not None, specs["tag"] or ""
+
+def has_naming(val): return val.use_dir or val.use_tag
+
+def names_each_value(val):
+    """True when the value's naming gives each value its own folder or token ('@', '@B\\', '#x_'); a fixed name
+    ('@big') or no naming gives every value the same path."""
+    return any(names for _anchors, names in value_parts(val, "x").values())
+
+def add_value(values):
+    """A new plain value of an input."""
+    val = values.add()
+    val.use_dir = False  # the RNA default stays True: .blend files and older presets do not store unedited fields
+    return val
+
+def name_permutations(values, idx):
+    """Name values[idx], a value that just made its input permute (added next to other values, or turned into a sweep).
+    While every value is plain, all of them get a folder per value. Otherwise a plain values[idx] takes the naming of
+    the last other value that names each value, else a folder per value; naming already set is kept."""
+    if not any(has_naming(v) for v in values):
+        for v in values: set_value_specs(v, FOLDER_PER_VALUE)
+        return
+    if has_naming(values[idx]): return
+    template = next((v for i, v in reversed(list(enumerate(values))) if i != idx and names_each_value(v)), None)
+    set_value_specs(values[idx], value_specs(template) if template else FOLDER_PER_VALUE)
+
 def _known_branch_dirs(overrides):
     """Branch names that values *earlier* in the stack can generate, as ("dir", folder) / ("tag", token) keys.
 
@@ -2120,7 +2155,7 @@ def on_input_name_update(self, context):
     self.prev_name = self.name
     if name_changed and self.name != "":
         self.values.clear()
-        self.values.add()
+        add_value(self.values)
 
     if hasattr(context.scene, "batch_stl_presets"):
         try: sync_input_type(self, context.scene, update_value=name_changed)
@@ -2812,6 +2847,9 @@ def set_value_expr(self, text):
     if not fields["use_sweep"]:
         prop, new = next((p, v) for p, v in fields.items() if p in VALUE_PROPS)
         if any(o != self and not o.use_sweep and same_value(inp.override_type, getattr(o, prop), new) for o in inp.values): return
+    # Typing over a blank value (a string just added as a permutation shows '@') fills in the value: its naming stays
+    blank = not self.use_sweep and getattr(self, "value_menu" if inp.override_type in ('BOOLEAN', 'MENU') else "value_string") == ""
+    if blank and all(spec is None for spec in specs.values()): specs = value_specs(self)
     fields.update(use_dir=specs["dir"] is not None, dir_tag=specs["dir"] or "", use_tag=specs["tag"] is not None, tag=specs["tag"] or "")
     changed = {p: v for p, v in fields.items() if getattr(self, p) != v}
     if not changed: return
@@ -3014,7 +3052,7 @@ def on_node_name_update(self, context):
             inp = self.inputs.add()
             inp.name = source_inputs[0]
         else:
-            self.inputs.add().values.add()
+            add_value(self.inputs.add().values)
 
     self.prev_name = self.name
 
@@ -3418,7 +3456,7 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
                 for s_name in source_inputs:
                     if s_name and s_name not in existing:
                         inp = node.inputs.add()
-                        inp.values.add()
+                        add_value(inp.values)
                         inp.name = s_name
                 return
 
@@ -3426,11 +3464,11 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
                 for s_name in source_inputs:
                     if s_name and s_name not in existing:
                         inp = inputs.add()
-                        inp.values.add()
+                        add_value(inp.values)
                         inp.name = s_name
                         break
             else:
-                inputs.add().values.add()
+                add_value(inputs.add().values)
 
     def _handle_value_action(self, ng_list):
         if not (0 <= self.ng_idx < len(ng_list)): return
@@ -3445,11 +3483,11 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
                 if inp_obj.override_type == 'BOOLEAN':
                     existing = {v.value_menu for v in vals if not v.use_sweep}
                     if 'True' not in existing:
-                        v = vals.add()
+                        v = add_value(vals)
                         v.value_menu = 'True'
                         return v
                     elif 'False' not in existing:
-                        v = vals.add()
+                        v = add_value(vals)
                         v.value_menu = 'False'
                         return v
                     return None
@@ -3459,7 +3497,7 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
                     existing = {v.value_menu for v in vals if not v.use_sweep}
                     for item in items:
                         if item not in existing:
-                            v = vals.add()
+                            v = add_value(vals)
                             v.value_menu = item
                             return v
                     return None
@@ -3471,7 +3509,7 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
                                 existing.append(float(v.value_string))
                             except ValueError:
                                 pass
-                    v = vals.add()
+                    v = add_value(vals)
                     if existing:
                         new_val = max(existing) + 1
                         v.value_string = str(int(new_val) if inp_obj.override_type == 'INT' else round(new_val, 4))
@@ -3479,12 +3517,16 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
                 elif inp_obj.override_type == 'STRING':
                     # A blank string is invalid and would duplicate the previous blank one: fill it in first.
                     if any(not v.use_sweep and v.value_string == "" for v in vals): return None
-                    return vals.add()
+                    return add_value(vals)
                 else:
-                    return vals.add()
+                    return add_value(vals)
+
+            def add_permutation():
+                # A second value makes the input permute: see name_permutations
+                if add_smart_value() is not None and len(vals) > 1: name_permutations(vals, len(vals) - 1)
 
             if self.v_idx < 0:
-                add_smart_value()
+                add_permutation()
             elif 0 <= self.v_idx < len(vals):
                 val = vals[self.v_idx]
                 if not val.use_sweep:
@@ -3492,8 +3534,9 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
                         val.use_sweep = True
                         for j in reversed(range(len(vals))):
                             if j != self.v_idx: vals.remove(j)
+                        name_permutations(vals, 0)
                     else:
-                        add_smart_value()
+                        add_permutation()
                 else:
                     val.use_sweep = False
                     if self.shift_pressed and inp_obj.override_type in ['FLOAT', 'INT', 'MENU', 'BOOLEAN', 'STRING']:
@@ -4251,6 +4294,7 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
             split.column()
             child_col = split.column()
             child_col.label(text="  • 15 = value only · 15 @ = folder 15 · 15 # = filename token 15", icon=ICONS['BLANK'])
+            child_col.label(text="  • New inputs start as value only; + or a sweep adds @ so permutations don't collide", icon=ICONS['ADD'])
             child_col.label(text="  • @big / #big: the name instead of the value", icon=ICONS['DIR'])
             child_col.label(text="  • @B\\ / #B_: B, then the value (B/15, Box_B_15)", icon=ICONS['TAG'])
             child_col.label(text="  • @size_: one folder joining name and value (size_15)", icon=ICONS['DIR'])

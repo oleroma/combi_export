@@ -95,6 +95,8 @@ Generate variant permutations across any socket. A sweep is typed in the value f
   | `{a, b} #` | | `Box_a`, `Box_b` | a string list |
   | `* @` | one per item | | every menu item, or `True` and `False` |
 
+  A new input starts with its value only (`15`): one value applies to every file. Adding a value with `+` or switching to a sweep (Shift + `+`) makes the input permute, so values without naming get a folder each (`15 @`, `16 @`) and the files don't overwrite each other. When the input already names its values, a new value takes that naming instead (`15 #` → `16 #`, `15 @B\` → `16 @B\`); naming you typed is never changed. A blank new value (a string) keeps its naming when you type the value without `@` / `#`.
+
   `@` and `#` only start a section outside double quotes: a string or menu item that contains them is quoted (`"a#b" #`; a quote inside quotes is written `""`). Spaces around the sections do not matter; names inside a section have none. Text that does not fit the input (a letter in a number, an unknown menu item, a value the input already has) is rejected and the field shows the stored value again. Menu items are matched case-insensitively.
 * **Icon before each value:** Hover it to see what the field gives (`Value: 5`, `Folder: A / 5`, `Filename token: x_5`) and what merges. It shows a folder or tag icon, the blue merge icon when a folder / token merges into an upstream one, and turns red when the value can never apply.
 * **Value Naming Rules (inside `@` and `#`):**
