@@ -163,6 +163,8 @@ blocks anchor to.
 - UI preference: merges must be visually obvious; blue = merge, red (`alert`) = invalid / never applies.
 
 ## 7. One field per value (2026-10-10)
+**The `@` / `#` syntax below was replaced by the `\` / `_` syntax on 2026-10-11 (section 8).** The merge prediction
+notes and fuzz results in this section still apply: they work on `(anchors, names)`, which did not change.
 - Request: replace the value / directory / tag fields of the overrides table with ONE field using symbols, keeping
   every variation and the merge predictions. Decision: `value @folder #tag` (`EXPR_SIGILS`), section text = the old
   field text (same `value_name_parts` rules), missing section = naming off. Sweeps in the value part: `start:step:count`,
@@ -232,3 +234,33 @@ blocks anchor to.
   - Fuzz script: `fuzz5.py` in the 2026-10-11 session scratchpad
     (`%TEMP%\claude\D--extensions-combi-export\923fb300-8b14-4647-b867-80bbe5846ee8\scratchpad`), args
     `seeds offset [heavy] [under] [nosugg] [path=REPO]`; reports carry their seed.
+
+## 8. `\` / `_` value syntax (2026-10-11)
+User request: only `\` and `_` as marks, the value written where it goes: `15` value only, `\15` folder per value,
+`\big` typed folder, `\15_big` joined folder, `_15` / `_big` / `_15_big` tokens, `\15\_15` both, `\big\_15`,
+`\big\_small`, `\0:1:5`, `_0:1:5`, `\*`, `_*`; merging must keep working. The user said not to ask questions, so the
+decisions below are mine (README section 9 documents them for users):
+- **Storage changed (DATA_VERSION 3):** `dir_tag` / `tag` hold templates with `VALUE_SLOT` (`*`) where the value
+  goes (`B/*`, `size_*`, `*_mm/x`, `B_*`, `*_mm`); empty = `*`. `value_name_parts(val, template, kind)` still returns
+  `(anchors, names)` (typed names before the value = anchors; the value's name and everything after = new), so the
+  walker and BranchScope are unchanged. `legacy_naming_template` converts old specs (.blend migration in
+  `migrate_scene_data`, JSON via `upgrade_preset_dict`; presets now carry `data_version`). Block fields unchanged.
+- **Parsing** (`parse_value_field`, see the comment above `lex_expr`): value part = text before the first `\` (or
+  a `_` at the start / after a space; inside it `_` cuts after the longest valid value, `_value_cut`). No value part:
+  the stored value where it is written, else the longest valid run in the last folder name / the tag that no
+  sibling has and leaves typeable text (`\1\2` → value 2), else keep the stored value (`\big` on 15 = `15\big`).
+  Sections ending in their separator (`\B\`, `_B_`, `15\`, `15_`) put the value after their names. In a folder
+  section `_` is part of the name except after `\` / a space. Quotes = literal (never the value). Typed names may not
+  hold spaces or `<>:"/\|?*` (now also rejected in block names, which used to be sanitized silently).
+- **Display** (`compose_value_field`): first candidate spelling that parses back to the same data (memoized).
+  Unrepresentable only for string values holding `\` / quotes combined with joined names (lossy best effort).
+- **Search:** completes the typed chain before the value (`_chain_end`) and writes the value after it
+  (`\B\` → `\B\15`, `\B\1\15`); new sections / menu items are composed from data.
+- **Verified (background Blender 5.2):** user examples and edge cases (`t_parse.py`, 0 failures; 6,000 random
+  compose → parse round trips, 0 failures); old spec vs migrated template `value_name_parts` on 20,000 random specs
+  and full `generate_named_combinations` on 400 random stacks vs `HEAD`, identical (`t_legacy.py`); property set /
+  get / taken values / menus / solo / delete / block naming / search / export paths / panel draw (`t_blender.py`);
+  a .blend and JSON saved by `HEAD` load with identical paths and read back unchanged (`t_mig_old.py`,
+  `t_mig_new.py`); the headless worker writes exactly the predicted files for both files. Draw time of a 200-value
+  table equals `HEAD` once warm (~45 ms; first draw +15 ms). Scripts in the session scratchpad
+  (`%TEMP%\claude\D--extensions-combi-export\b816ebe1-32a8-4f2d-b246-05d2b13ff4ed\scratchpad`).
