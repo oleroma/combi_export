@@ -795,8 +795,8 @@ def _known_branch_dirs(overrides):
     Keyed by id(ovr) for the override's own sub-paths and tags and by (id(ovr), input_name) for its values.
     A sub-path, tag or value naming one of these is an anchor into an existing branch, not a new folder / token.
     ("group", id(ovr)) holds what was known before the override's node group: the group's sub-folder and tag are
-    placed again for each of its nodes, and must mean the same for all of them (a value of the first node merging
-    into the group's folder must not turn that folder into a branch name for the next node)."""
+    placed once, before its first node (walk_override_branch), and mean the same for all of its nodes (a value of the
+    first node merging into the group's folder must not turn that folder into a branch name for the next node)."""
     known_before = {}
     known = set()
     group, group_known = None, frozenset()
@@ -841,18 +841,15 @@ def _place_dir_parts(parts, branch, known, kind="dir"):
         new_parts.append(p)
     return new_parts
 
-def _place_blocks(ovr, dir_branch, tag_branch, known, group_known):
-    """(new folders, new tokens) of an override's node group and node blocks, or None when one of them belongs to
-    another branch. The node block is placed after its group's, so it can merge into what the group added. The
-    group's block resolves against what was known before the group (`group_known`, see _known_branch_dirs)."""
-    new_dirs, new_tags = [], []
-    for is_group, block_dirs, block_tags in _block_name_parts(ovr):
-        b_known = group_known if is_group else known
-        b_dirs = _place_dir_parts(block_dirs, dir_branch + new_dirs, b_known, "dir")
-        b_tags = _place_dir_parts(block_tags, tag_branch + new_tags, b_known, "tag")
-        if b_dirs is None or b_tags is None: return None
-        new_dirs += b_dirs; new_tags += b_tags
-    return new_dirs, new_tags
+def _place_block(ovr, is_group, dir_branch, tag_branch, known):
+    """(new folders, new tokens) of an override's node group block (`is_group`) or node block, or None when it belongs
+    to another branch. A block without a sub-folder or tag adds nothing."""
+    block = next(((dirs, tags) for g, dirs, tags in _block_name_parts(ovr) if g == is_group), None)
+    if block is None: return [], []
+    b_dirs = _place_dir_parts(block[0], dir_branch, known, "dir")
+    b_tags = _place_dir_parts(block[1], tag_branch, known, "tag")
+    if b_dirs is None or b_tags is None: return None
+    return b_dirs, b_tags
 
 def walk_override_branch(overrides, combo, known_before=None):
     """Walk overrides top-to-bottom for one (possibly partial) combo, tracking the branch's folders and filename
@@ -870,14 +867,26 @@ def walk_override_branch(overrides, combo, known_before=None):
     tags_by_level = {"GLOBAL": [], "PRESET": [], "COLLECTION": [], "OBJECT": [], "NONE": []}
     active = set()
     processed_params = set()
+    group, group_new = None, None
 
     for ovr in overrides:
         level = getattr(ovr, "level", "NONE")
         known = known_before.get(id(ovr), frozenset())
 
-        placed = _place_blocks(ovr, dir_branch, tag_branch, known, known_before.get(("group", id(ovr)), known))
+        uid = getattr(ovr, "group_uid", None)
+        if uid is None or uid != group:
+            # A node group's sub-folder and tag are placed once, before its first node, so they mean the same for
+            # every node (like the UI's BranchScope.enter_block). Placed again after a node added them, a chain 'Y/2'
+            # (Y new, 2 upstream) would find Y behind 2 and drop the later nodes. They go in with the first node that
+            # applies.
+            group = uid
+            group_new = _place_block(ovr, True, dir_branch, tag_branch, known_before.get(("group", id(ovr)), known))
+        if group_new is None: continue
+        new_dirs, new_tags = list(group_new[0]), list(group_new[1])
+        placed = _place_block(ovr, False, dir_branch + new_dirs, tag_branch + new_tags, known)
         if placed is None: continue
-        new_dirs, new_tags = placed
+        new_dirs += placed[0]; new_tags += placed[1]
+        group_new = [], []
         dir_branch.extend(new_dirs); paths_by_level[level].extend(new_dirs)
         tag_branch.extend(new_tags); tags_by_level[level].extend(new_tags)
 
@@ -2276,8 +2285,11 @@ class BranchScope:
         # "inst": every way the name exists (one per creating block / value step): the value that creates it
         #   (`group` is its input, `alt` the value; None for a block), the context keys it requires (`reqs`), its
         #   creation order (`pos`) and whether it can exist without an earlier instance (`base`). Names of one branch keep that order, and the exporter only merges a chain
-        #   whose names appear in order (_place_dir_parts).
+        #   whose names appear in order (_place_dir_parts). `needs`: every key a branch with the instance has (`reqs`,
+        #   the name itself and the value that makes it).
         # A context is a set of keys the branch contains: names (kind, name) and chosen values ("alt", group, alt).
+        #   ("not", keys) says the branch lacks at least one of `keys`: a chain that creates a plain name anew only
+        #   does so in branches without the instances it could have merged into (chain_states).
         self.entries = {}
         self.seq = 0
         # satisfiable() / _keys_fit() results, keyed with `seq`: new instances can make a context possible
@@ -2294,6 +2306,7 @@ class BranchScope:
 
     def _fits_key(self, inst, key):
         """Whether the instance can exist in a branch that contains `key`."""
+        if key[0] == "not": return not key[1] <= inst["needs"]
         if key[0] == "alt": return not (inst["group"] == key[1] and inst["alt"] != key[2])
         e = self.entries.get(key)
         return bool(e) and any(not self._clash(inst, j) for j in e["inst"] if j["base"])
@@ -2302,7 +2315,9 @@ class BranchScope:
         """Whether a key an instance required when it was made (at position `before`) fits a context key."""
         memo = (a, b, before, self.seq)
         if memo in self._fit: return self._fit[memo]
-        if a[0] == "alt": result = self._fits_key({"group": a[1], "alt": a[2]}, b)
+        # A required absence only clashes with a context key that is all it excludes
+        if a[0] == "not": result = not a[1] <= {b}
+        elif a[0] == "alt": result = self._fits_key({"group": a[1], "alt": a[2], "needs": frozenset((a,))}, b)
         else:
             e = self.entries.get(a)
             result = bool(e) and any(self._fits_key(i, b) for i in e["inst"] if i["base"] and i["pos"] < before)
@@ -2329,27 +2344,41 @@ class BranchScope:
         self.seq += 1
         # An instance made inside a context that already has the name (a value's folder A inside a block merged into
         # A) only exists where an earlier one does: it can be merged into, but does not show the name can exist.
-        e["inst"].append({"group": group, "alt": alt, "reqs": frozenset(k for k in ctx if k != key), "pos": self.seq,
+        reqs = frozenset(k for k in ctx if k != key)
+        needs = reqs | {key} | ({("alt", group, alt)} if group is not None else set())
+        e["inst"].append({"group": group, "alt": alt, "reqs": reqs, "needs": needs, "pos": self.seq,
                           "base": key not in ctx})
 
     def satisfiable(self, ctx, budget=4000):
         """Whether one choice of values gives a branch with every key of `ctx`: each name through one of its instances
         (made before the instance that required it), each with what it requires in turn. _fits only compares keys in
         pairs and misses conflicts between three or more, e.g. a token B from input I0 or I1 next to names that need
-        I0=A and I1=C. Past `budget` steps it gives up and says yes, so a prediction is never hidden by a guess."""
+        I0=A and I1=C. Past `budget` steps it gives up and says yes, so a prediction is never hidden by a guess.
+        A ("not", keys) key fails a choice that gives every one of `keys`."""
         memo = (frozenset(ctx), self.seq)
         if memo in self._sat: return self._sat[memo]
         steps = [budget]
 
-        def solve(goals, assign, done):
-            if not goals: return True
+        def solve(goals, assign, done, absent):
+            if not goals:
+                if not absent: return True
+                has = set(done | absent | {("alt", g, a) for g, a in assign.items()})
+                # The choice also gives every name whose requirements are all there (the value I0=B makes its token B)
+                grew = True
+                while grew:
+                    grew = False
+                    for key, e in self.entries.items():
+                        if key not in has and any(i["base"] and i["needs"] - {key} <= has for i in e["inst"]):
+                            has.add(key); grew = True
+                return not any(n[1] <= has for n in absent)
             steps[0] -= 1
             if steps[0] < 0: return True
             (key, before), rest = goals[0], goals[1:]
+            if key[0] == "not": return solve(rest, assign, done, absent | {key})
             if key[0] == "alt":
                 chosen = assign.get(key[1], key[2])
-                return chosen == key[2] and solve(rest, {**assign, key[1]: key[2]}, done)
-            if key in done: return solve(rest, assign, done)
+                return chosen == key[2] and solve(rest, {**assign, key[1]: key[2]}, done, absent)
+            if key in done: return solve(rest, assign, done, absent)
             e = self.entries.get(key)
             if not e: return False
             for i in e["inst"]:
@@ -2358,10 +2387,10 @@ class BranchScope:
                 if i["group"] is not None:
                     if assign.get(i["group"], i["alt"]) != i["alt"]: continue
                     a = {**assign, i["group"]: i["alt"]}
-                if solve(rest + [(r, i["pos"]) for r in i["reqs"]], a, done | {key}): return True
+                if solve(rest + [(r, i["pos"]) for r in i["reqs"]], a, done | {key}, absent): return True
             return False
 
-        result = self._sat[memo] = solve([(k, float("inf")) for k in ctx], {}, frozenset())
+        result = self._sat[memo] = solve([(k, float("inf")) for k in ctx], {}, frozenset(), frozenset())
         return result
 
     def chain_states(self, kind, parts, ctx):
@@ -2377,10 +2406,13 @@ class BranchScope:
             for c, cur, merged in states:
                 found = self.candidates(key, c, cur)
                 if not branch:
-                    # A plain folder / token merges where the branch has it and is created anew elsewhere. Neither
-                    # narrows the branch. An instance whose requirements the context already has is surely there.
+                    # A plain folder / token merges where the branch has it and is created anew elsewhere. An instance
+                    # whose requirements the context already has is surely there. Created anew, the branch has none of
+                    # the instances: the chain 'x/A' on the path 'A/x' cannot go on to merge into A.
                     if found: nxt.setdefault((c, min(i["pos"] for i in found)), merged + ((p, True),))
-                    if not any(i["reqs"] <= c for i in found): nxt.setdefault((c, cur), merged + ((p, False),))
+                    if not any(i["reqs"] <= c for i in found):
+                        c2 = c | {("not", i["reqs"]) for i in found}
+                        if c2 == c or self.satisfiable(c2): nxt.setdefault((c2, cur), merged + ((p, False),))
                     continue
                 # A branch name must be merged, into one of its instances; each brings the branches it requires
                 for i in found:

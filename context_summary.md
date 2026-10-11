@@ -43,8 +43,10 @@ blocks anchor to.
 - `split_path_parts` (folders) / `split_tag_parts` (literal tag fields: `/` separates tokens, edge spaces and `_` stripped).
 - `_known_branch_dirs(overrides)` – `("dir", name)` / `("tag", name)` keys known before each override (`id(ovr)`),
   each input (`(id(ovr), input_name)`) and the override's node group (`("group", id(ovr))`, via `MockOverride.group_uid`).
-- `_place_blocks` – group block, then node block, each its own chain (node can merge into the group's names); the
-  group block resolves against names known before the group, the same for each of its nodes.
+- `_place_block` – group block, then node block, each its own chain (node can merge into the group's names). The
+  walker places the group block ONCE, before its first node, against names known before the group; its names join
+  the branch with the first node that applies (2026-10-11: re-placing it per node made chain `Y/2`, Y new, drop every
+  node after the first, and `Y/P` with P plain gave later nodes an extra `P` folder).
 - `walk_override_branch(overrides, combo, known_before)` – **single source of truth**. Walks overrides top-to-bottom
   with `dir_branch` and `tag_branch`; returns `(active_input_ids, tags_by_level, paths_by_level)`.
 - `generate_named_combinations` – recursion over `_build_override_pools`, keeps only variations the walker marks
@@ -76,10 +78,13 @@ blocks anchor to.
 
 ## 3. Merge predictions in the UI (`BranchScope`)
 - Entries `(kind, name)` → desc, `known` (exporter branch name), instances (`group`/`alt` = input/value or None for
-  blocks, `reqs`, `pos` creation order, `base`). Context = name keys + `("alt", input, value)` keys.
+  blocks, `reqs`, `needs` = reqs + name + alt, `pos` creation order, `base`). Context = name keys +
+  `("alt", input, value)` keys + `("not", keys)` (the branch lacks at least one of `keys`).
 - `chain_states` (every placement, chain order via `pos`, branch names must merge), `segmentation` (tag split like
   the walker), `place(chains, ctx)` (folder + tag chains of one block / value jointly) → hits / dead / fresh names.
-  `satisfiable(ctx)` = backtracking over value choices (three-way conflicts; step budget → yes), cached per `seq`.
+  `satisfiable(ctx)` = backtracking over value choices (three-way conflicts; step budget → yes), cached per `seq`;
+  `not` keys are checked at the leaf against the solved keys closed over instances whose requirements are met.
+  A plain name created anew adds `("not", reqs)` per instance it skipped, so `x_1/A` on path `A/x_1` is dead.
 - Dead blocks / values: their value names stay `known` without instances (the walker still anchors to them). Sibling
   values of one input resolve against the scope before the input. Verified 2026-10-10 by a randomized cross-check of
   predictions and suggestions against `walk_override_branch` (0 mismatches in 1,000 setups; 2 in 600 setups whose
@@ -167,7 +172,10 @@ blocks anchor to.
   `@C/2/size_` → `C/2/size_15`) in `value_name_parts` (`value_name` builds the name). The joined name is a value name
   (never an anchor, always new, a branch name blocks can merge into). A literal folder ending in `_` can no longer
   replace the value (before, `@x_` meant folder `x_` for every value). Tags are unchanged (`#x_` already gives `x_15`).
-- Known pre-existing prediction gap (found by the walker-vs-BranchScope fuzz, also without joined folders): a chain
-  that names folders in a different order than the path holds them (block `x_1/A` on path `A/x_1`) is predicted alive
-  but never applies; `chain_states` lets a plain (non-branch) name be "created anew" even where it already exists
-  earlier in the path, which the walker never does.
+- Out-of-order chains fixed (2026-10-11): block `x_1/A` on path `A/x_1` was predicted alive (fix: `not` keys in
+  `chain_states` / `satisfiable`); node group chains like `Y/2` dropped later nodes in the walker (fix: group block
+  placed once). Fuzz (walker vs BranchScope, multi-name block chains, 600 stacks): 0 false alive / false dead apart from
+  remaining pre-existing gaps: (1) the UI keeps a group's names in branches where none of its nodes apply (the walker
+  adds them only with a node that applies) → false alive / bad suggestions; (2) `place()` records fresh names from its
+  first placement only, so a value anchor merged in one branch but created anew in another is missing there (rare
+  false dead); (3) a few predicted merges that never fully merge (7 in 100 stacks).
