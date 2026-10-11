@@ -86,7 +86,11 @@ blocks anchor to.
   `not` keys are checked at the leaf against the solved keys closed over instances whose requirements are met.
   A plain name created anew adds `("not", reqs)` per instance it skipped, so `x_1/A` on path `A/x_1` is dead.
 - Dead blocks / values: their value names stay `known` without instances (the walker still anchors to them). Sibling
-  values of one input resolve against the scope before the input. Verified 2026-10-10 by a randomized cross-check of
+  values of one input resolve against the scope before the input.
+- Node group names (2026-10-11): `enter_block(ng)` records the group's fresh names wherever the group fits, so its
+  nodes / values merge into them. `close_group()` then narrows each to one instance per context a node of the group
+  applies in, keeping the group's `pos`. It runs at the next group's `enter_block` and at the end of `upstream_scope`'s
+  `add_group`. This mirrors the walker, which adds a group's names with its first applying node. Verified 2026-10-10 by a randomized cross-check of
   predictions and suggestions against `walk_override_branch` (0 mismatches in 1,000 setups; 2 in 600 setups whose
   values contain `_`, from the walker's per-branch spelling of `a_b`).
 - `upstream_scope(item)` → `(scope, ctx)` at any field via `item.path_from_id()` (`_PATH_STEP`). Export order:
@@ -175,7 +179,23 @@ blocks anchor to.
 - Out-of-order chains fixed (2026-10-11): block `x_1/A` on path `A/x_1` was predicted alive (fix: `not` keys in
   `chain_states` / `satisfiable`); node group chains like `Y/2` dropped later nodes in the walker (fix: group block
   placed once). Fuzz (walker vs BranchScope, multi-name block chains, 600 stacks): 0 false alive / false dead apart from
-  remaining pre-existing gaps: (1) the UI keeps a group's names in branches where none of its nodes apply (the walker
-  adds them only with a node that applies) → false alive / bad suggestions; (2) `place()` records fresh names from its
+  remaining pre-existing gaps: (1) the UI kept a group's names in branches where none of its nodes apply (the walker
+  adds them only with a node that applies) → false alive / bad suggestions, and false dead for later chains through
+  them (`X/Y`); **fixed 2026-10-11** (`BranchScope.close_group`, section 3); (2) `place()` records fresh names from its
   first placement only, so a value anchor merged in one branch but created anew in another is missing there (rare
   false dead); (3) a few predicted merges that never fully merge (7 in 100 stacks).
+- Group-name fix, fuzz results against `HEAD` (`fuzz5.py`: values plus per-node dead / alive):
+  - 800 regular stacks: false alive 101 → 10, false dead 44 → 6, hit mismatches 8 → 7, bad suggestions 50 → 17.
+  - 300 heavy stacks (more group / node naming, empty nodes and groups): false alive 18 → 0, hit mismatches 110 → 0,
+    bad suggestions 106 → 6, false dead 3 → 3.
+  - 60 heavy stacks with `_` names: bad suggestions 36 → 0.
+  - Every remaining report is byte-identical to `HEAD`'s, so none of them is new. Only their identity with `HEAD` is
+    verified, not which gap each one is:
+    - false dead: regular seeds 200–299 (2) and 700–799 (4), heavy 1200–1299 (2 values, 1 node). Probably gap (2).
+    - hit mismatches: regular 100–199 (7). Gap (3).
+    - false alive / bad suggestions: regular seed 684 (10 false alive, 10 bad suggestions), seed 693 (7 bad
+      suggestions), heavy 1100–1199 (6 bad suggestions, e.g. `Y\Y\`). Their named groups each have a node without
+      naming, so this fix does not touch them. Not diagnosed.
+  - Fuzz script: `fuzz5.py` in the 2026-10-11 session scratchpad
+    (`%TEMP%\claude\D--extensions-combi-export\923fb300-8b14-4647-b867-80bbe5846ee8\scratchpad`), args
+    `seeds offset [heavy] [under] [nosugg] [path=REPO]`; reports carry their seed.

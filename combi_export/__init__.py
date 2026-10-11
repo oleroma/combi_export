@@ -878,7 +878,7 @@ def walk_override_branch(overrides, combo, known_before=None):
             # A node group's sub-folder and tag are placed once, before its first node, so they mean the same for
             # every node (like the UI's BranchScope.enter_block). Placed again after a node added them, a chain 'Y/2'
             # (Y new, 2 upstream) would find Y behind 2 and drop the later nodes. They go in with the first node that
-            # applies.
+            # applies, so a branch where none of its nodes applies never gets them (BranchScope.close_group mirrors it).
             group = uid
             group_new = _place_block(ovr, True, dir_branch, tag_branch, known_before.get(("group", id(ovr)), known))
         if group_new is None: continue
@@ -2294,6 +2294,9 @@ class BranchScope:
         self.seq = 0
         # satisfiable() / _keys_fit() results, keyed with `seq`: new instances can make a context possible
         self._sat, self._fit = {}, {}
+        # The node group block entered last, until close_group(): the instances of the names it creates and the
+        # contexts its nodes apply in
+        self._group = None
 
     def __contains__(self, key): return key in self.entries
     def desc(self, key): return self.entries[key]["desc"]
@@ -2340,14 +2343,15 @@ class BranchScope:
         the exporter knows them, so anchoring to them is dead."""
         e = self.entries.setdefault(key, {"desc": desc, "known": False, "inst": []})
         if group is not None: e["known"] = True
-        if not alive: return
+        if not alive: return None
         self.seq += 1
         # An instance made inside a context that already has the name (a value's folder A inside a block merged into
         # A) only exists where an earlier one does: it can be merged into, but does not show the name can exist.
         reqs = frozenset(k for k in ctx if k != key)
         needs = reqs | {key} | ({("alt", group, alt)} if group is not None else set())
-        e["inst"].append({"group": group, "alt": alt, "reqs": reqs, "needs": needs, "pos": self.seq,
-                          "base": key not in ctx})
+        inst = {"group": group, "alt": alt, "reqs": reqs, "needs": needs, "pos": self.seq, "base": key not in ctx}
+        e["inst"].append(inst)
+        return inst
 
     def satisfiable(self, ctx, budget=4000):
         """Whether one choice of values gives a branch with every key of `ctx`: each name through one of its instances
@@ -2464,13 +2468,38 @@ class BranchScope:
 
     def enter_block(self, block, ctx, ng, node=None, alive=True):
         """Context inside a node group / node block (its sub-folder, then its tag), recording its new names.
-        Returns (ctx, {kind: (hits, dead)})."""
+        Returns (ctx, {kind: (hits, dead)}).
+
+        A node group's names only go into the branches where one of its nodes applies: walk_override_branch adds them
+        with the first such node. Until close_group() they exist wherever the group fits, so its nodes and values
+        merge into them; then they are narrowed to the contexts its nodes apply in. A node group block closes the
+        one before."""
+        if node is None: self.close_group()
         ctx, res, fresh = self.place([(kind, block_parts(block, kind)) for kind in SCOPE_KINDS], ctx)
         # Recorded once both fields are placed: a block whose tag never applies does not create its folders either
         alive = alive and not scope_dead(res)
-        for kind, names in fresh.items():
-            for n in names: self.add((kind, n), _block_desc(kind, ng, node), ctx, alive=alive)
+        made = [((kind, n), self.add((kind, n), _block_desc(kind, ng, node), ctx, alive=alive))
+                for kind, names in fresh.items() for n in names]
+        if node is None: self._group = {"inst": [(key, inst) for key, inst in made if inst], "ctxs": []}
+        elif alive and self._group: self._group["ctxs"].append(ctx)
         return ctx, res
+
+    def close_group(self):
+        """End the node group block entered last (see enter_block): each name it creates gets one instance per
+        context its nodes apply in, at the group's position (before the names of its nodes). Without a node that can
+        apply, its names never exist."""
+        g, self._group = self._group, None
+        if not g or not g["inst"]: return
+        own = {key for key, _inst in g["inst"]}
+        # A node's context can hold the group's own names (merged as branch names); they come with the node anyway.
+        # A context that holds another adds nothing: the names exist wherever the smaller one does.
+        reqs = list(dict.fromkeys(frozenset(c - own) for c in g["ctxs"]))
+        reqs = [r for r in reqs if not any(o < r for o in reqs)]
+        self.seq += 1
+        for key, inst in g["inst"]:
+            e = self.entries[key]
+            at = next(n for n, i in enumerate(e["inst"]) if i is inst)
+            e["inst"][at:at + 1] = [{**inst, "reqs": r, "needs": r | {key}} for r in reqs]
 
     def resolve_value(self, anchors, ctx):
         """place() for the anchors of one value ({kind: names}, see value_field_anchors) in context `ctx`; names
@@ -2604,6 +2633,7 @@ def upstream_scope(item):
         ng_ptr = bpy.data.node_groups.get(ng.group_name)
         ng_ctx, res = scope.enter_block(ng, empty, ng)
         for node in ng.nodes: add_node(ng, ng_ptr, node, ng_ctx, not scope_dead(res))
+        scope.close_group()
 
     for lst in lists[:-1]:
         for ng in lst: add_group(ng)
