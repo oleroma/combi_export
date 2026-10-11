@@ -2278,6 +2278,8 @@ def scope_dead(res):
     return any(res[kind][1] for kind in res)
 
 class BranchScope:
+    MAX_WAYS = 64  # ways chain_states() / place() follow at most
+
     def __init__(self):
         # (kind, name) -> {"desc", "known": bool, "inst": [{"group", "alt", "reqs": frozenset, "pos": int}]}
         # "known": a branch name for the exporter (_known_branch_dirs), i.e. a name some value names. Missing from a
@@ -2290,8 +2292,12 @@ class BranchScope:
         # A context is a set of keys the branch contains: names (kind, name) and chosen values ("alt", group, alt).
         #   ("not", keys) says the branch lacks at least one of `keys`: a chain that creates a plain name anew only
         #   does so in branches without the instances it could have merged into (chain_states).
+        #   ("any", rests) says the branch has every key of at least one of `rests` (frozensets of keys): a block or
+        #   value that can be placed in several ways only exists in the branches of one of them (place).
         self.entries = {}
         self.seq = 0
+        # Set when chain_states() dropped ways past MAX_WAYS: the ways left do not cover every branch
+        self.cut = False
         # satisfiable() / _keys_fit() results, keyed with `seq`: new instances can make a context possible
         self._sat, self._fit = {}, {}
         # The node group block entered last, until close_group(): the instances of the names it creates and the
@@ -2309,6 +2315,7 @@ class BranchScope:
 
     def _fits_key(self, inst, key):
         """Whether the instance can exist in a branch that contains `key`."""
+        if key[0] == "any": return any(all(self._fits_key(inst, k) for k in rest) for rest in key[1])
         if key[0] == "not": return not key[1] <= inst["needs"]
         if key[0] == "alt": return not (inst["group"] == key[1] and inst["alt"] != key[2])
         e = self.entries.get(key)
@@ -2318,8 +2325,10 @@ class BranchScope:
         """Whether a key an instance required when it was made (at position `before`) fits a context key."""
         memo = (a, b, before, self.seq)
         if memo in self._fit: return self._fit[memo]
+        if b[0] == "any": result = any(all(self._keys_fit(a, k, before) for k in rest) for rest in b[1])
+        elif a[0] == "any": result = any(all(self._keys_fit(k, b, before) for k in rest) for rest in a[1])
         # A required absence only clashes with a context key that is all it excludes
-        if a[0] == "not": result = not a[1] <= {b}
+        elif a[0] == "not": result = not a[1] <= {b}
         elif a[0] == "alt": result = self._fits_key({"group": a[1], "alt": a[2], "needs": frozenset((a,))}, b)
         else:
             e = self.entries.get(a)
@@ -2358,10 +2367,14 @@ class BranchScope:
         (made before the instance that required it), each with what it requires in turn. _fits only compares keys in
         pairs and misses conflicts between three or more, e.g. a token B from input I0 or I1 next to names that need
         I0=A and I1=C. Past `budget` steps it gives up and says yes, so a prediction is never hidden by a guess.
-        A ("not", keys) key fails a choice that gives every one of `keys`."""
+        A ("not", keys) key fails a choice that gives every one of `keys`; an ("any", rests) key needs every key of
+        one of `rests`."""
         memo = (frozenset(ctx), self.seq)
         if memo in self._sat: return self._sat[memo]
         steps = [budget]
+
+        def holds(key, has):
+            return key in has or key[0] == "any" and any(all(holds(k, has) for k in rest) for rest in key[1])
 
         def solve(goals, assign, done, absent):
             if not goals:
@@ -2372,13 +2385,17 @@ class BranchScope:
                 while grew:
                     grew = False
                     for key, e in self.entries.items():
-                        if key not in has and any(i["base"] and i["needs"] - {key} <= has for i in e["inst"]):
+                        if key not in has and any(i["base"] and all(holds(k, has) for k in i["needs"] if k != key)
+                                                  for i in e["inst"]):
                             has.add(key); grew = True
-                return not any(n[1] <= has for n in absent)
+                return not any(all(holds(k, has) for k in n[1]) for n in absent)
             steps[0] -= 1
             if steps[0] < 0: return True
             (key, before), rest = goals[0], goals[1:]
             if key[0] == "not": return solve(rest, assign, done, absent | {key})
+            if key[0] == "any":
+                if key in done: return solve(rest, assign, done, absent)
+                return any(solve(rest + [(k, before) for k in r], assign, done | {key}, absent) for r in key[1])
             if key[0] == "alt":
                 chosen = assign.get(key[1], key[2])
                 return chosen == key[2] and solve(rest, {**assign, key[1]: key[2]}, done, absent)
@@ -2409,22 +2426,21 @@ class BranchScope:
             nxt = {}
             for c, cur, merged in states:
                 found = self.candidates(key, c, cur)
-                if not branch:
-                    # A plain folder / token merges where the branch has it and is created anew elsewhere. An instance
-                    # whose requirements the context already has is surely there. Created anew, the branch has none of
-                    # the instances: the chain 'x/A' on the path 'A/x' cannot go on to merge into A.
-                    if found: nxt.setdefault((c, min(i["pos"] for i in found)), merged + ((p, True),))
-                    if not any(i["reqs"] <= c for i in found):
-                        c2 = c | {("not", i["reqs"]) for i in found}
-                        if c2 == c or self.satisfiable(c2): nxt.setdefault((c2, cur), merged + ((p, False),))
-                    continue
-                # A branch name must be merged, into one of its instances; each brings the branches it requires
+                # A name merges into one of its instances, which brings the branches it requires (_merged): a plain
+                # name too, so 'Y/Y' only merges into a second Y made under I0=C together with I0=C. A branch name
+                # must merge.
                 for i in found:
-                    k = {key} | i["reqs"]
-                    if i["group"] is not None: k.add(("alt", i["group"], i["alt"]))
+                    k = self._merged(key, i)
                     if (c | k, i["pos"]) not in nxt and self.satisfiable(c | k): nxt[(c | k, i["pos"])] = merged + ((p, True),)
+                # A plain folder / token is created anew where the branch has none of its instances. An instance whose
+                # requirements the context already has is surely there. Created anew, the branch lacks each instance:
+                # the chain 'x/A' on the path 'A/x' cannot go on to merge into A.
+                if not branch and not any(i["reqs"] <= c for i in found):
+                    c2 = c | {("not", i["reqs"]) for i in found}
+                    if c2 == c or self.satisfiable(c2): nxt.setdefault((c2, cur), merged + ((p, False),))
             if not nxt: return [], p
-            states = [(c, cur, merged) for (c, cur), merged in list(nxt.items())[:64]]
+            if len(nxt) > self.MAX_WAYS: self.cut = True
+            states = [(c, cur, merged) for (c, cur), merged in list(nxt.items())[:self.MAX_WAYS]]
         return states, None
 
     def segmentation(self, kind, parts, ctx):
@@ -2446,8 +2462,9 @@ class BranchScope:
         branch (a folder chain using the 1 of input I0 and a tag that needs another value of I0 never do).
 
         Returns (new_ctx, {kind: (hits, dead)}, {kind: fresh}): `hits` merge into existing names, `dead` the branch
-        name a chain that never applies gets stuck on, `fresh` the names it creates, `new_ctx` what every way of
-        placing them requires."""
+        name a chain that never applies gets stuck on, `fresh` the names it creates, `new_ctx` the branches it is
+        placed in (see join)."""
+        self.cut = False
         states = [(frozenset(ctx), {})]  # (context, {kind: ((name, merged), ...)})
         for kind, parts in chains:
             nxt, stuck = [], None
@@ -2460,11 +2477,25 @@ class BranchScope:
                 res.update({k: ([p for p, m in ms if m], []) for k, ms in states[0][1].items()})
                 res[kind] = ([], [stuck])
                 return frozenset(ctx), res, {}
-            states = nxt[:64]
+            if len(nxt) > self.MAX_WAYS: self.cut = True
+            states = nxt[:self.MAX_WAYS]
         first = states[0][1]
         res = {k: ([p for p, m in first[k] if m], []) for k, _ps in chains}
         fresh = {k: [p for p, m in first[k] if not m] for k, _ps in chains}
-        return frozenset.intersection(*(c for c, _m in states)), res, fresh
+        return self.join([c for c, _m in states], not self.cut), res, fresh
+
+    @staticmethod
+    def join(ctxs, complete=True):
+        """One context for the branches of several ways (contexts `ctxs`): the keys every way requires, plus
+        ("any", rests) with what each way requires beyond them. Values of a node 'B/B' placed through I0=B and I1=B
+        or through I0=B and I3=B never apply together with I1=C and I3=C; the keys every way shares (I0=B) do not
+        show that. A way that requires no more than the shared keys makes `rests` pointless. With ways dropped
+        (`complete` False) the others do not cover every branch, so only the shared keys are kept."""
+        ctxs = set(ctxs)
+        common = frozenset.intersection(*ctxs)
+        rests = {c - common for c in ctxs}
+        rests = frozenset(r for r in rests if not any(o < r for o in rests))
+        return common | {("any", rests)} if complete and len(rests) > 1 else common
 
     def enter_block(self, block, ctx, ng, node=None, alive=True):
         """Context inside a node group / node block (its sub-folder, then its tag), recording its new names.
@@ -2539,14 +2570,21 @@ class BranchScope:
                 and any(fits(c2) for c, cur, _m in states for c2 in self._merge_ctxs((k, n), c, cur))}
 
     def _merge_ctxs(self, key, ctx, cursor):
-        """The contexts a chain placed with context `ctx` up to `cursor` can have after merging into `key` next."""
-        found = self.candidates(key, ctx, cursor)
-        if not self.is_branch(key): return [ctx] if found else []
+        """The contexts a chain placed with context `ctx` up to `cursor` can have after merging into `key` next: the
+        branches with one of its instances (a plain name is created anew in the others, see chain_states)."""
         out = []
-        for i in found:
-            c = ctx | {key} | i["reqs"] | ({("alt", i["group"], i["alt"])} if i["group"] is not None else set())
+        for i in self.candidates(key, ctx, cursor):
+            c = ctx | self._merged(key, i)
             if self.satisfiable(c): out.append(c)
         return out
+
+    def _merged(self, key, inst):
+        """Context keys of a branch that merges into instance `inst` of `key`: the branches it requires, and for a
+        branch name the name and the value that makes it. A plain name (made by a block) exists wherever its
+        requirements hold, like chain_states assumes, so contexts never hold one: they say which branches a field is
+        in, and the search leaves those out."""
+        if not self.is_branch(key): return inst["reqs"]
+        return inst["reqs"] | {key} | ({("alt", inst["group"], inst["alt"])} if inst["group"] is not None else set())
 
 def merge_tooltip(hits, dead, scope):
     """`hits` / `dead` are lists of (kind, name) keys."""

@@ -79,12 +79,19 @@ blocks anchor to.
 ## 3. Merge predictions in the UI (`BranchScope`)
 - Entries `(kind, name)` → desc, `known` (exporter branch name), instances (`group`/`alt` = input/value or None for
   blocks, `reqs`, `needs` = reqs + name + alt, `pos` creation order, `base`). Context = name keys +
-  `("alt", input, value)` keys + `("not", keys)` (the branch lacks at least one of `keys`).
+  `("alt", input, value)` keys + `("not", keys)` (the branch lacks at least one of `keys`) + `("any", rests)` (the
+  branch has every key of at least one rest).
 - `chain_states` (every placement, chain order via `pos`, branch names must merge), `segmentation` (tag split like
   the walker), `place(chains, ctx)` (folder + tag chains of one block / value jointly) → hits / dead / fresh names.
   `satisfiable(ctx)` = backtracking over value choices (three-way conflicts; step budget → yes), cached per `seq`;
   `not` keys are checked at the leaf against the solved keys closed over instances whose requirements are met.
   A plain name created anew adds `("not", reqs)` per instance it skipped, so `x_1/A` on path `A/x_1` is dead.
+- (2026-10-11) A merge brings its instance's requirements (`_merged`), for plain block names too (before, a plain
+  merge required nothing, so `Y/Y` merging into a Y made under I0=C was offered next to a tag needing I0=A). A plain
+  name itself never enters a context: it exists wherever its requirements hold, and the search leaves out the names
+  in a field's context. `place` returns `join(ways)`: the keys every way shares plus `("any", rests)` (before: the
+  shared keys only, so a value inside node `B/B`, placed via I1=B or via I3=B, looked possible with I1=C and I3=C).
+  Ways are capped at `MAX_WAYS` (64); after a cut, `join` keeps only the shared keys.
 - Dead blocks / values: their value names stay `known` without instances (the walker still anchors to them). Sibling
   values of one input resolve against the scope before the input.
 - Node group names (2026-10-11): `enter_block(ng)` records the group's fresh names wherever the group fits, so its
@@ -194,8 +201,33 @@ blocks anchor to.
     - false dead: regular seeds 200–299 (2) and 700–799 (4), heavy 1200–1299 (2 values, 1 node). Probably gap (2).
     - hit mismatches: regular 100–199 (7). Gap (3).
     - false alive / bad suggestions: regular seed 684 (10 false alive, 10 bad suggestions), seed 693 (7 bad
-      suggestions), heavy 1100–1199 (6 bad suggestions, e.g. `Y\Y\`). Their named groups each have a node without
-      naming, so this fix does not touch them. Not diagnosed.
+      suggestions), heavy 1100–1199 (6 bad suggestions, e.g. `Y\Y\`). **Diagnosed and fixed later on 2026-10-11**
+      (BranchScope only, see below).
+- Ways / plain-merge fix (2026-10-11, section 3, uncommitted). Two causes:
+  (a) `place()` returned only the keys shared by all ways, which lost the alternatives (seeds 684, 693, heavy 1180,
+  1186). Example: node `B/B` via I1=B or I3=B, with a value tag needing I1=C and I3=C. Fixed with `join` /
+  `("any", rests)`.
+  (b) Merging into a plain block name required nothing (heavy 1152, `Y\Y\` with the second Y only under I0=C).
+  Fixed with `_merged`.
+  Fuzz against the pre-fix tree:
+  - regular 0–799: false alive 10 → 0, false dead 6 → 6, hit mismatches 7 → 0 (seed 141, gap (3)), bad
+    suggestions 17 → 0.
+  - heavy 1000–1299: bad suggestions 6 → 0, false dead 2 + 1 node unchanged.
+  - heavy + `_` 2000–2059: still all 0.
+  - No new reports; the remaining ones are byte-identical to the pre-fix run.
+  - Remaining heavy false dead (seed 1234, node `B/2/2`) diagnosed as gap (2).
+  Suggestion comparison old vs new (1,160 stacks, 51,203 suggestions): new ⊂ old; 43 bad removed, 26 good lost.
+  20 of the lost ones are redundant merges into a name the field's branch surely has (now in its context, so the
+  search leaves it out). 6 (seeds 1180, 2013, second link after `Y\`) need a name a block creates in a non-first way:
+  gap (2), which the old unconstrained plain merge hid.
+  **Open: performance.** Small fuzz stacks are +10–20% (scope build ~0.4–0.7 ms). Large heavy stacks (10–12 groups,
+  `perf.py ... big`) are 8.7 → 32.7 ms on average and 36 → 423 ms worst (seed 1000). A likely cause is
+  tautological `any` keys nesting into instance requirements: a plain merge vs create-anew gives
+  `any{{reqs}, {not reqs}}`. Next steps: drop such tautologies in `join`, or cap the nesting.
+  Fixing gap (2) (record fresh names per way) would recover the 6 lost suggestions and probably seed 1234.
+  Scripts (session scratchpad `%TEMP%\claude\D--extensions-combi-export\0f48d4bd-559b-4118-9f7e-dff327d1accd\scratchpad`):
+  `fuzz5.py` (`all` prints every report), `runjobs.sh`, `summ.py` (totals + report diff), `cmp_sugg.py`
+  (old vs new suggestions), `probe.py` / `dbg_sugg.py` (one stack), `perf.py`.
   - Fuzz script: `fuzz5.py` in the 2026-10-11 session scratchpad
     (`%TEMP%\claude\D--extensions-combi-export\923fb300-8b14-4647-b867-80bbe5846ee8\scratchpad`), args
     `seeds offset [heavy] [under] [nosugg] [path=REPO]`; reports carry their seed.
