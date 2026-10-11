@@ -839,14 +839,30 @@ def _value_runs(chars, accept, seps="_"):
     return runs
 
 def _value_places(sections):
-    """[(chars, separators)] where a value can be written, in the order the value is looked for: the folder names from
-    the last one, then the filename section. A section that ends in its separator holds typed names only."""
+    """[(kind, chars, separators)] where a value can be written, in the order the value is looked for: the folder
+    names from the last one, then the filename section. A section that ends in its separator holds typed names only."""
     places = []
     for kind, chars, _start, closed in sorted(sections, key=lambda s: s[0] != "dir"):
         if _is_open(kind, chars, closed): continue
-        if kind == "dir": places += [(nm, "_") for nm in reversed(_dir_names(chars))]
-        elif chars: places.append((chars, "_/"))
+        if kind == "dir": places += [(kind, nm, "_") for nm in reversed(_dir_names(chars))]
+        elif chars: places.append((kind, chars, "_/"))
     return places
+
+def _can_be_typed(chars, seps):
+    """Whether text can be a typed name (see _typed_text): a sweep or a value with a space cannot."""
+    try: _typed_text(chars, seps.replace("_", ""))
+    except ValueError: return False
+    return True
+
+def _slot_shape(kind, template):
+    """What stays the same when the value written in a name is edited in place: the folder name holding the value (with
+    the text around it) and the folders after it, or the text after the value token. None without the value."""
+    template = template or VALUE_SLOT
+    if VALUE_SLOT not in template: return None
+    if kind == "dir":
+        names = template.split("/")
+        return tuple(names[next(k for k, n in enumerate(names) if VALUE_SLOT in n):])
+    return template.split(VALUE_SLOT, 1)[1]
 
 def _slot_run(chars, is_value, seps):
     """(start, end) of the last place in `chars` the value is written at, preferring one that leaves typed text
@@ -948,40 +964,57 @@ def _value_readers(override_type, items):
         return True
     return read, readable
 
-def _infer_value(sections, read, matches, stored, taken):
-    """The value (read_expr_value's form) a field without a value part holds: the stored value where it is written,
-    else the last name that can be a value another value of the input does not have (the longest), else the stored
-    value, with every name typed. Raises ValueError when there is none (a blank value, no name that is a value)."""
+def _infer_value(sections, read, matches, stored, taken, stored_templates=None, upstream=None):
+    """The value (read_expr_value's form) a field without a value part holds (see the comment above lex_expr):
+    1. the stored value, where it is written;
+    2. a value written where the stored value was (same text around it, same names after it, see _slot_shape; a missing
+       section counts as the value alone), unless that name exists upstream (`upstream(kind, name)`): typed, it merges;
+    3. text that cannot be a typed name (a sweep, a value with a space), or before the value is set (`stored` None) any
+       text that is a value: the last such name, the longest;
+    4. else the stored value stays and every name is typed.
+    Values another value of the input has (`taken`) are skipped. Raises ValueError when there is no value."""
     places = _value_places(sections)
-    if stored is not None and any(_value_runs(ch, lambda r: matches(r, stored), seps) for ch, seps in places): return stored
+    if stored is not None and any(_value_runs(ch, lambda r: matches(r, stored), seps) for _k, ch, seps in places): return stored
     def free(chars):
         try: fields = read(chars)
         except ValueError: return None
         return None if taken and taken(fields) else fields
-    def typeable(chars, s, e, seps):
+    def runs_in(chars, seps):
         # The rest of the name must be typed text: in '\\mode_*' the value is the sweep '*', not the item 'mode'
-        try: _typed_text(chars[:s], seps); _typed_text(chars[e:], seps)
-        except ValueError: return False
-        return True
-    for chars, seps in places:
-        runs = [(s, e) for s, e in _value_runs(chars, lambda r: free(r) is not None, seps) if typeable(chars, s, e, seps.replace("_", ""))]
-        if runs:
-            s, e = max(runs, key=lambda r: (r[1] - r[0], r[0]))
-            return free(chars[s:e])
+        runs = [(s, e) for s, e in _value_runs(chars, lambda r: free(r) is not None, seps)
+                if _can_be_typed(chars[:s], seps) and _can_be_typed(chars[e:], seps)]
+        return sorted(runs, key=lambda r: (r[1] - r[0], r[0]), reverse=True)
+
+    if stored is not None and stored_templates is not None:
+        for kind, chars, _start, closed in sections:
+            want = _slot_shape(kind, stored_templates.get(kind) or VALUE_SLOT)
+            if want is None or _is_open(kind, chars, closed): continue
+            for _kind, place, seps in (p for p in places if p[0] == kind):
+                for s, e in runs_in(place, seps):
+                    fields = free(place[s:e])
+                    try: template = section_template(kind, chars, closed, lambda r: matches(r, fields))
+                    except ValueError: continue
+                    if _slot_shape(kind, template) != want: continue
+                    if upstream and upstream(kind, expr_text(place if kind == "dir" else place[s:e])): continue
+                    return fields
+    for _kind, place, seps in places:
+        runs = [(s, e) for s, e in runs_in(place, seps) if stored is None or not _can_be_typed(place[s:e], seps)]
+        if runs: return free(place[runs[0][0]:runs[0][1]])
     if stored is not None: return stored
     raise ValueError("no value")
 
-def parse_value_field(text, override_type, items=None, stored=None, taken=None):
-    """(fields, {kind: template or None}) of a value field (see the comment above): the value in read_expr_value's
-    form, and its folder / tag templates (None: no section). `stored` is the stored value (value_fields), `taken(fields)`
-    whether another value of the input has that value. Raises ValueError for text that does not fit the input, a name
-    that cannot be a file name, or a section given twice."""
+def parse_value_field(text, override_type, items=None, stored=None, taken=None, stored_templates=None, upstream=None):
+    """(fields, {kind: template or None}) of a value field (see the comment above lex_expr): the value in
+    read_expr_value's form, and its folder / tag templates (None: no section). `stored` / `stored_templates` are the
+    value and naming the field held (value_fields, value_specs), `taken(fields)` whether another value of the input has
+    that value, `upstream(kind, name)` whether a folder / token of that name exists upstream (see _infer_value). Raises
+    ValueError for text that does not fit the input, a name that cannot be a file name, or a section given twice."""
     read, readable = _value_readers(override_type, items)
     def matches(chars, fields):
         try: return same_fields(override_type, read(chars), fields)
         except ValueError: return False
     value, sections = split_field(lex_expr(text), readable)
-    fields = read(value) if value else _infer_value(sections, read, matches, stored, taken)
+    fields = read(value) if value else _infer_value(sections, read, matches, stored, taken, stored_templates, upstream)
     templates = dict.fromkeys(SCOPE_KINDS)
     for kind, chars, _start, closed in sections:
         templates[kind] = section_template(kind, chars, closed, lambda r: matches(r, fields))
@@ -1036,15 +1069,21 @@ def _quote_value_part(vtext, fields, override_type, always=False):
 
 _compose_memo = {}
 
-def compose_value_field(fields, templates, override_type, items=None):
-    """Text of a value field (see the comment above): the first of a few ways to write the value and its templates
-    that parse_value_field reads back as the same, the value written in the names when it has a place there."""
+def compose_value_field(fields, templates, override_type, items=None, current=None, upstream=None):
+    """Text of a value field (see the comment above lex_expr): the first of a few ways to write the value and its
+    templates that parse_value_field reads back as the same. The naming alone comes first: the value written in the
+    names where it has a place, and not shown at all when the names replace it ('\\big'). `current` is the
+    (value, templates) the field holds when the text is typed into it (by default the result itself, as the field
+    shows it), `upstream` as in parse_value_field: a search suggestion must read back as offered when it is picked."""
     templates = {kind: templates.get(kind) for kind in SCOPE_KINDS}
     if fields is None: vtext = ""
     else: vtext = fields_text(fields, override_type)
-    key = (override_type, tuple(sorted(fields.items())) if fields else None, tuple(templates.values()), tuple(items) if items else None)
-    text = _compose_memo.get(key)
-    if text is not None: return text
+    key = None
+    if current is None and upstream is None:
+        key = (override_type, tuple(sorted(fields.items())) if fields else None, tuple(templates.values()), tuple(items) if items else None)
+        text = _compose_memo.get(key)
+        if text is not None: return text
+    stored, stored_templates = current if current is not None else (fields, templates)
 
     def sections(always=False, short=False, value=vtext):
         d, t = templates["dir"], templates["tag"]
@@ -1053,13 +1092,13 @@ def compose_value_field(fields, templates, override_type, items=None):
         return out
     norm = lambda tpl: None if tpl is None else tpl or VALUE_SLOT
     def reads_back(text):
-        try: f, tps = parse_value_field(text, override_type, items, fields)
+        try: f, tps = parse_value_field(text, override_type, items, stored, None, stored_templates, upstream)
         except ValueError: return False
         return same_fields(override_type, f, fields) and all(norm(tps[k]) == norm(templates[k]) for k in SCOPE_KINDS)
 
     candidates = []
     if fields is not None:
-        if vtext and any(VALUE_SLOT in (t or VALUE_SLOT) for t in templates.values() if t is not None):
+        if any(t is not None for t in templates.values()):
             candidates += [sections(), sections(always=True)]
         for always in (False, True):
             head = _quote_value_part(vtext, fields, override_type, always)
@@ -1069,8 +1108,9 @@ def compose_value_field(fields, templates, override_type, items=None):
                 if secs.startswith("_"): candidates.append(head + " " + secs)
     text = next((c for c in candidates if reads_back(c)), None)
     if text is None: text = (_quote_value_part(vtext, fields, override_type) if fields else "") + sections(short=True)
-    if len(_compose_memo) > 20000: _compose_memo.clear()
-    _compose_memo[key] = text
+    if key is not None:
+        if len(_compose_memo) > 20000: _compose_memo.clear()
+        _compose_memo[key] = text
     return text
 
 def value_specs(val):
