@@ -41,10 +41,10 @@ Define temporary parameter overrides and sweeps across an 8-tier hierarchy:
 * **Menu/Enum Auto-Populate:** Lists the items of every menu socket: Menu Switch nodes, menus on the modifier interface (also behind reroutes and nested groups), group node menus and the menus of built-in nodes (e.g. *Merge by Distance* mode).
 
 ### 4. Parametric Sweeping & Combinatorial Engine
-Generate variant permutations across any socket:
-* **Float / Int Ranges:** Define numeric sweeps via explicit Value start, Value step, and Number of steps (1 to 1000) controls.
-* **String Lists:** String sweeps take a comma-separated list of values.
-* **Boolean & Menu Combinations:** Automatically iterates through `True`/`False` states or all enum options.
+Generate variant permutations across any socket. A sweep is typed in the value field (see *One Field per Value*), or Shift + click the value's `+` button to switch it into sweep mode:
+* **Float / Int Ranges:** `start:step:count`, e.g. `0:0.5:5` gives `0, 0.5, 1, 1.5, 2` (1 to 1000 steps).
+* **String Lists:** `{a, b, c}`, a comma-separated list in braces.
+* **Boolean & Menu Combinations:** `*` iterates through `True`/`False` or all enum options.
 * **Branch-Aware Combinations:** Every parameter combination is generated, except where an override is limited to one branch of the folder tree (see *Branch Merging*). Such an override only multiplies the permutations of that branch.
 
 ### 5. Predictive Directory Tree & Overwrite Protection
@@ -55,8 +55,7 @@ Generate variant permutations across any socket:
 ### 6. Power-User Shortcuts & Ergonomics
 * **Shift + Up/Down Arrows:** Shift + Up moves an override group to the parent tier (e.g., from Object up to its Collection). Shift + Down copies it to every nested child tier and removes it from the current one (e.g., from Preset down to all its Collections, or Collection down to all its Objects).
 * **Shift + Add Input (+):** Auto-populates all available and exposed inputs for the selected Geometry Node.
-* **Instant Deletion:** Emptying a Node Group, Node, Input, or Value field (and submitting) instantly deletes the iteration.
-* **Clear Button (X):** Float, integer and string value fields have an inline clear button that deletes the value (and the input when it was the last value) in a single undo step. Menu and boolean values keep Blender's own clear button.
+* **Instant Deletion:** Emptying a Node Group, Node, Input, or Value field (and submitting) instantly deletes the iteration. Clearing a value field (or clicking its clear button) deletes the value, and the input when it was the last value, in a single undo step.
 * **Validation Check:** Real-time socket validation rejects invalid inputs/nodes and instantly reverts to the last known valid state.
 * **Clear View:** The arrow of an override table that has inputs collapses only its node group and node rows: the inputs and their values stay listed and editable. An input whose node group or node merges shows the merge icon at the start of its row (red when that block never applies); hover it for the merge details.
 
@@ -78,37 +77,53 @@ Generate variant permutations across any socket:
 * **Filename Structure:** The file name (object name unless edited) followed by every tag token in hierarchy order, joined with `_`:
   `Object` → Global override tags → Preset override tags → Collection tag → Collection override tags → Object tag → Object override tags.
   Example: object `Box`, Global letter `A`, collection tag `v2`, Collection number `1`, object tag `lid` → `Box_A_v2_1_lid.stl`.
-* **Collection, Object, Node Group and Node Tags:** Plain filename tokens placed at their level (several tokens separated by `/`; leading/trailing `_` are ignored, so `_lid` and `lid` are the same). The object tag no longer renames the object.
-* **Two Separate Fields per Value:** Each value has a directory field and a filename-tag field side by side. Each toggle button enables only its own field (a disabled field is greyed out). Click and drag across several folder or tag buttons to switch them all at once (one undo step).
-* **Sub-Directory Creation (`FILE_FOLDER`):** Route variant exports into dedicated sub-folders per value iteration, named by the directory field.
-* **Filename Tag (`BOOKMARKS`):** Add the value to the exported filename, formatted by the tag field.
-* **Value Naming Rules:**
-  - Blank: The formatted parameter value (`15`).
-  - `name`: Replaces the value (`name`).
-  - Directory `name\` (or `name/`): Folder `name` with a folder per value inside it (`name/15`).
-  - Tag `name_`: Token `name` followed by the value (`Box_name_15`).
-  - **Chains:** several names merge one branch level after another. Directory `B\2\` (or `B/2\`) goes into folder `B`, then its folder `2`: `B/2/15`. Tag `B_2_` (or `B/2_`) goes into token `B`, then its token `2`: `Box_B_2_15`. With letters `A B` and numbers `1 2` upstream, only the `B_2` files get the value; `A_1`, `A_2` and `B_1` stay as they are. A name in the chain that does not exist yet is created at that point: `B_new_` → `Box_B_1_new_15`, `Box_B_2_new_15`.
-  - A tag chain is split at `_`, but a token that exists upstream keeps its `_`: with a value `a_b` upstream, `a_b_` merges into that token, and `x__` is the token `x_` followed by the value. The branch's own tokens decide first, so `a_b_` also merges into `a` and `b` coming from two inputs.
+* **Collection and Object Tags:** Plain filename tokens placed at their level (several tokens separated by `/`; leading/trailing `_` are ignored, so `_lid` and `lid` are the same). The object tag no longer renames the object.
+* **One Field per Value:** Each value is one text field holding the value and how it is named: the value, then `@` for its folder and `#` for its filename token. A missing section means no folder / no token.
+
+  | Field | Folder | File name | Meaning |
+  |---|---|---|---|
+  | `15` | | `Box` | the value only |
+  | `15 @` | `15/` | `Box` | a folder per value |
+  | `15 #` | | `Box_15` | a filename token per value |
+  | `15 @ #` | `15/` | `Box_15` | both |
+  | `15 @big` | `big/` | | the name replaces the value |
+  | `15 @B\` | `B/15/` | | folder `B`, then a folder per value (`@B/` works too) |
+  | `15 #x` | | `Box_x` | the token replaces the value |
+  | `15 #x_` | | `Box_x_15` | token `x`, then the value |
+  | `0:0.5:5 @` | `0/` … `2/` | | a sweep: `start:step:count` |
+  | `{a, b} #` | | `Box_a`, `Box_b` | a string list |
+  | `* @` | one per item | | every menu item, or `True` and `False` |
+
+  `@` and `#` only start a section outside double quotes: a string or menu item that contains them is quoted (`"a#b" #`; a quote inside quotes is written `""`). Spaces around the sections do not matter; names inside a section have none. Text that does not fit the input (a letter in a number, an unknown menu item, a value the input already has) is rejected and the field shows the stored value again. Menu items are matched case-insensitively.
+* **Icon before each value:** Hover it to see what the field gives (`Value: 5`, `Folder: A / 5`, `Filename token: x_5`) and what merges. It shows a folder or tag icon, the blue merge icon when a folder / token merges into an upstream one, and turns red when the value can never apply.
+* **Value Naming Rules (inside `@` and `#`):**
+  - Empty: the formatted parameter value (`15`).
+  - `name`: replaces the value (`name`).
+  - Folder `name\` (or `name/`): folder `name` with a folder per value inside it (`name/15`).
+  - Tag `name_`: token `name` followed by the value (`Box_name_15`).
+  - **Chains:** several names merge one branch level after another. `@B\2\` (or `@B/2\`) goes into folder `B`, then its folder `2`: `B/2/15`. `#B_2_` (or `#B/2_`) goes into token `B`, then its token `2`: `Box_B_2_15`. With letters `A B` and numbers `1 2` upstream, only the `B_2` files get the value; `A_1`, `A_2` and `B_1` stay as they are. A name in the chain that does not exist yet is created at that point: `#B_new_` → `Box_B_1_new_15`, `Box_B_2_new_15`.
+  - A tag chain is split at `_`, but a token that exists upstream keeps its `_`: with a value `a_b` upstream, `#a_b_` merges into that token, and `#x__` is the token `x_` followed by the value. The branch's own tokens decide first, so `#a_b_` also merges into `a` and `b` coming from two inputs.
   - Typed names merge into an upstream folder / token of the same name (see *Branch Merging*); the value itself is always new.
+* **Node Group and Node Naming:** The naming field of a node group or node row uses the same sections without a value: `@C/2 #B` puts everything in the block into folders `C/2` and adds the token `B`. `/` separates names in both sections. Text typed without `@` / `#` is a folder (`C/2` = `@C/2`). Clearing the field removes the block's folder and token (the block stays).
 
 ### 10. Branch Merging
 Values with a folder or filename tag create branches, e.g. letters `A B C` × numbers `1 2 3` give `A/1 … C/3` (folders) or `Box_A_1 … Box_C_3` (names). An override further down the stack can be attached to an existing branch instead of multiplying every permutation:
-* **Merge by Folder:** When a node group sub-folder, node sub-folder, or value directory names a folder that already exists upstream, the override merges into it. A value merges through the folder names typed in its directory field: `B` (the value is replaced by `B`) or `B\` (merges into `B`, then a folder per value inside it: numbers `1 2` → `B/1`, `B/2`, while `A` and `C` stay as they are). A folder made from the value itself (blank, or the value folder after `B\`) is always new, so two inputs that share a value (`1`, `True`, a menu item) still multiply: `A=1, B=1` → `1/1`. Its own folders are created inside the branch, below the folders already there.
-* **Merge by Filename:** The same works with filename tokens (again, only the tokens typed in a value tag merge: `B` replaces the value, `B_` merges into `B` and adds the value after it, so numbers `1 2` → `Box_B_1`, `Box_B_2`, while `Box_A` and `Box_C` stay as they are). Chains like `B_2_` narrow the merge to a branch of a branch (see *Value Naming Rules*). A node group tag, node tag, or value tag that names an upstream token only applies to the files that already contain it, and its own tokens are appended at the end of the name: tag `B` → `Box_B_1_X`, `Box_B_1_Y`, … while `Box_A_*` and `Box_C_*` stay as they are. `C/2` and `2` work like their folder counterparts. Folder and tag anchors of one block must both match.
-  - Sub-folder `B` → only the B permutations get the new values: `B/1/X`, `B/1/Y`, … The A and C branches stay as they are.
-  - Sub-folder `C/2` → only `C/2/X`, `C/2/Y`, …
-  - Sub-folder `2` → every `2` branch: `A/2/X`, `B/2/X`, `C/2/X`, …
+* **Merge by Folder:** When a node group or node folder (`@B`), or a value folder, names a folder that already exists upstream, the override merges into it. A value merges through the folder names typed in its `@` section: `15 @B` (the value is replaced by `B`) or `15 @B\` (merges into `B`, then a folder per value inside it: numbers `1 2` → `B/1`, `B/2`, while `A` and `C` stay as they are). A folder made from the value itself (`@` alone, or the value folder after `@B\`) is always new, so two inputs that share a value (`1`, `True`, a menu item) still multiply: `A=1, B=1` → `1/1`. Its own folders are created inside the branch, below the folders already there.
+* **Merge by Filename:** The same works with filename tokens (again, only the tokens typed in a value's `#` section merge: `#B` replaces the value, `#B_` merges into `B` and adds the value after it, so numbers `1 2` → `Box_B_1`, `Box_B_2`, while `Box_A` and `Box_C` stay as they are). Chains like `#B_2_` narrow the merge to a branch of a branch (see *Value Naming Rules*). A node group, node or value token that names an upstream token only applies to the files that already contain it, and its own tokens are appended at the end of the name: `#B` → `Box_B_1_X`, `Box_B_1_Y`, … while `Box_A_*` and `Box_C_*` stay as they are. `C/2` and `2` work like their folder counterparts. Folder and tag anchors of one block must both match.
+  - Block `@B` → only the B permutations get the new values: `B/1/X`, `B/1/Y`, … The A and C branches stay as they are.
+  - Block `@C/2` → only `C/2/X`, `C/2/Y`, …
+  - Block `@2` → every `2` branch: `A/2/X`, `B/2/X`, `C/2/X`, …
 * **Matching Rules:** A name may match any parent folder (or any earlier token) of the branch, not only the last one. A preset prefix, collection or object sub-folder (or collection / object tag) equal to the neighbouring override folder (or token) collapses into it. Several names (`C/2`) must appear in that order. A branch name that is missing from a branch means the override does not apply there; any other name simply becomes a new folder.
-* **Folders and Tags Together:** A value's directory and tag (and a block's sub-folder and tag) are matched independently, so each can merge into a different branch, but both must fit the same files: directory `B\` with tag `2_` only applies where folder `B` and token `2` exist together; directory `B\` with tag `A_` never applies when `A` and `B` are values of one input.
-* **Node Group and Node:** A node's sub-folder and tag are matched after its group's, on their own: they may merge into the group's folder / token (group `X` + node `X` → `X`). The group's sub-folder and tag mean the same for every node of the group.
-* **Upstream Suggestions:** Folder and tag fields are searchable and list the folders / name tokens that exist above them, labelled *Branch* / *Name branch* (created by a value) or *Folder* / *Tag* (a plain sub-folder or block tag) with their source. Free text is still allowed. In sub-folder paths the suggestion completes the last part, so typing `C/` offers `C/1`, `C/2`, … Value field suggestions always end in `\` (directory) or `_` (tag), so picking one merges into that name and keeps the value after it (`B\` → `B/15`); delete the ending to replace the value with the name instead (`B`). Once the ending is typed, the next link of the chain is offered too: `B_` offers `B_`, `B_1_`, `B_2_`.
+* **Folders and Tags Together:** The `@` and `#` sections of a value (or of a block) are matched independently, so each can merge into a different branch, but both must fit the same files: `15 @B\ #2_` only applies where folder `B` and token `2` exist together; `15 @B\ #A_` never applies when `A` and `B` are values of one input.
+* **Node Group and Node:** A node's folder and tag are matched after its group's, on their own: they may merge into the group's folder / token (group `X` + node `X` → `X`). The group's folder and tag mean the same for every node of the group.
+* **Upstream Suggestions:** Value and naming fields are searchable. The last section typed (`@…` or `#…`) lists the folders / name tokens that exist above the field, labelled *Branch* / *Name branch* (created by a value) or *Folder* / *Tag* (a plain block folder or tag) with their source. Free text is still allowed. In block paths the suggestion completes the last part, so typing `@C/` offers `@C/1`, `@C/2`, … Value suggestions always end in `\` (folder) or `_` (tag), so picking one merges into that name and keeps the value after it (`15 @B\` → `B/15`); delete the ending to replace the value with the name instead (`15 @B`). Once the ending is typed, the next link of the chain is offered too: `15 #B_` offers `15 #B_`, `15 #B_1_`, `15 #B_2_`. A value without sections offers `15 @` and `15 #`, and each upstream name to merge into (`15 @B\`, `15 #B_`); a section not typed yet is offered after the other one (`15 @B\ #`). Menus and booleans also list their items (and `*`) while the value is not one of them or when the field opens, keeping the sections typed after the value.
 * **Branch-Aware Predictions:** Suggestions only list chains the export will actually merge:
   - names that can exist together with the merges already made above the field, across folders and tags: inside a block placed in folder `C`, the alternatives `A` and `B` are not offered, and neither are folders or tokens that only exist under `A`;
-  - names that still fit the field's other half: with tag `B_`, the directory field only offers folders that exist in files with token `B`;
-  - in chain order: after `2\` only names that come after `2` in a path (`A` made before `2` is not offered);
+  - names that still fit the other section: in `15 #B_ @`, the folder section only offers folders that exist in files with token `B`;
+  - in chain order: after `@2\` only names that come after `2` in a path (`A` made before `2` is not offered);
   - only after a chain that merges as a whole, and never names of values that never apply.
-* **Merge Highlighting:** A node group or node that merges shows a blue *Merges into …* bar on top of its block (folders first, then `name …` for tokens), covering everything inside it. The merging field's icon becomes a merge icon. A value whose folder or tag merges shows the merge icon on that toggle. Hover the bar to see where each folder comes from.
-* **Dead Merge Warning:** If the chosen folders can never exist together (e.g. `C/X` when `X` only exists under `A`), the bar turns red (*Never applies*) because that block is never exported. A value with such a folder or tag gets a red toggle.
+* **Merge Highlighting:** A node group or node that merges shows a blue *Merges into …* bar on top of its block (folders first, then `name …` for tokens), covering everything inside it, and its naming field shows the merge icon. A value whose folder or tag merges shows the blue merge icon before its field. Hover the bar or icon to see where each folder comes from.
+* **Dead Merge Warning:** If the chosen folders can never exist together (e.g. `C/X` when `X` only exists under `A`), the bar turns red (*Never applies*) because that block is never exported. A value with such a folder or tag gets a red icon and a red field.
 
 ### 11. JSON Preset Portability & Clipboard Buffer
 * **Import / Export Setup:** Save or restore presets, collections, object lists, exclusion states, and override matrices to external JSON files. Presets saved before directory and tag were split into two fields reuse their old tag as the directory name, so their folders keep their names. Files and `.blend` data from version 1.0.0 keep their number, boolean and sweep values.

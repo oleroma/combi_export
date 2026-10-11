@@ -44,7 +44,7 @@ ICONS = {
     'TIME': 'TIME', 'MODIFIER': 'MODIFIER', 'TREE': 'OUTLINER_OB_EMPTY', 'ERROR': 'ERROR',
     'RIGHT': 'TRIA_RIGHT', 'BLANK': 'BLANK1', 'FILE': 'FILE_3D',
     'EXPAND_ALL': 'FULLSCREEN_ENTER', 'COLLAPSE_ALL': 'FULLSCREEN_EXIT', 'EXPAND_LAST': 'TRIA_DOWN_BAR',
-    'MERGE': 'AUTOMERGE_ON'
+    'MERGE': 'AUTOMERGE_ON', 'PLAIN': 'DOT'
 }
 
 SUPPORTED_OBJECT_TYPES = {"MESH", "CURVE", "SURFACE", "META", "FONT"}
@@ -656,6 +656,127 @@ def split_tag_parts(text):
     if not text: return []
     parts = (sanitize_name(p).strip(" _") for p in re.split(r"[\\/]", text))
     return [p for p in parts if p]
+
+# --- Value expressions ---------------------------------------------------------------------------------------------
+# The override table edits a value and its naming in one text field (BatchSTLValue.expr):   value  @folder  #tag
+# A section holds what the value's Directory / Tag field holds (dir_tag / tag, see value_name_parts); a missing section
+# turns that naming off (use_dir / use_tag). The expression is only a view: the fields stay the stored data.
+#   15            the value only: no folder, no filename token
+#   15 @          a folder named by the value                   15 #         a filename token from the value
+#   15 @big       folder 'big' instead of the value             15 #big      token 'big' instead of the value
+#   15 @B\        folder B, then a folder per value: B/15       15 #B_       token B, then the value: B_15
+#   15 @C/2\      a chain merges branch by branch: C/2/15       15 #C_2_     C_2_15
+# The value part also holds sweeps: numbers 'start:step:count', strings '{a, b, c}', menus and booleans '*'.
+# Node group and node blocks use the sections without a value (BatchSTLNodeGroup.naming): '@C/2 #B'.
+# '@' and '#' start a section only outside double quotes: '"a#b" #' is the string a#b; '""' is a quote inside quotes.
+EXPR_SIGILS = {"@": "dir", "#": "tag"}
+EXPR_MARKS = {kind: sigil for sigil, kind in EXPR_SIGILS.items()}
+
+def lex_expr(text):
+    """Split an expression at its unquoted '@' / '#': [(sigil, chars, start)], the value part first (sigil ''), each
+    char as (char, quoted) and `start` the position of the sigil. A quote left open runs to the end."""
+    parts = [("", [], 0)]
+    quoted, i = False, 0
+    while i < len(text):
+        c = text[i]
+        if c == '"':
+            if quoted and text[i + 1:i + 2] == '"':
+                parts[-1][1].append(('"', True))
+                i += 1
+            else: quoted = not quoted
+        elif not quoted and c in EXPR_SIGILS: parts.append((c, [], i))
+        else: parts[-1][1].append((c, quoted))
+        i += 1
+    return parts
+
+def expr_strip(chars):
+    """Lexed chars without the unquoted spaces at their edges."""
+    start, end = 0, len(chars)
+    while start < end and chars[start][0].isspace() and not chars[start][1]: start += 1
+    while end > start and chars[end - 1][0].isspace() and not chars[end - 1][1]: end -= 1
+    return chars[start:end]
+
+def expr_text(chars): return "".join(c for c, _quoted in chars)
+
+def expr_specs(parts):
+    """{kind: spec text or None} of lexed sections (see lex_expr); a section given twice keeps the last."""
+    specs = dict.fromkeys(SCOPE_KINDS)
+    for sigil, chars, _start in parts:
+        specs[EXPR_SIGILS[sigil]] = expr_text(expr_strip(chars))
+    return specs
+
+def parse_expr(text):
+    """(value chars, {kind: spec text or None}) of an expression. Raises ValueError for a section given twice or a
+    folder / tag name with a space."""
+    parts = lex_expr(text)
+    sigils = [sigil for sigil, _chars, _start in parts[1:]]
+    if len(set(sigils)) < len(sigils): raise ValueError("a section is given twice")
+    specs = expr_specs(parts[1:])
+    if any(spec and any(c.isspace() for c in spec) for spec in specs.values()): raise ValueError("a name has a space")
+    return expr_strip(parts[0][1]), specs
+
+def quote_expr(text, always=False):
+    """`text` as written in an expression: in quotes when it holds '@', '#' or '"', or starts or ends with a space."""
+    if always or any(c in text for c in '@#"') or text != text.strip():
+        return '"' + text.replace('"', '""') + '"'
+    return text
+
+def quote_value(text):
+    """A menu item or string as the value part of an expression ('*' and '{...}' would read as sweeps)."""
+    return quote_expr(text, always=text == "*" or text.startswith("{"))
+
+def read_expr_value(chars, override_type, items=None):
+    """{property: value} the value part of an expression sets on a BatchSTLValue. Raises ValueError when it does not
+    fit the input type. `items` are the menu items, when they are known (a menu value is then one of them)."""
+    text = expr_text(chars)
+    if not text: raise ValueError("no value")
+    if override_type in ('FLOAT', 'INT'):
+        parse = float if override_type == 'FLOAT' else int
+        if ":" in text:
+            pieces = [p.strip() for p in text.split(":")]
+            if len(pieces) != 3: raise ValueError("a number sweep is start:step:count")
+            parse(pieces[0]); parse(pieces[1])
+            if not 1 <= int(pieces[2]) <= MAX_SWEEP_STEPS: raise ValueError(f"a sweep has 1 to {MAX_SWEEP_STEPS} steps")
+            return {"use_sweep": True, "sweep_start": pieces[0], "sweep_step": pieces[1], "sweep_count": pieces[2]}
+        parse(text)
+        return {"use_sweep": False, "value_string": text}
+    if override_type == 'STRING':
+        if len(chars) > 1 and chars[0] == ("{", False) and chars[-1] == ("}", False):
+            inner = expr_text(chars[1:-1])
+            if not any(s.strip() for s in inner.split(",")): raise ValueError("an empty list")
+            return {"use_sweep": True, "sweep_range": inner}
+        return {"use_sweep": False, "value_string": text}
+    if override_type in ('BOOLEAN', 'MENU'):
+        if chars == [("*", False)]: return {"use_sweep": True}
+        if override_type == 'BOOLEAN': items = ['True', 'False']
+        if items:
+            match = text if text in items else next((i for i in items if i.lower() == text.lower()), None)
+            if match is None: raise ValueError(f"'{text}' is not an item")
+            text = match
+        return {"use_sweep": False, "value_menu": text}
+    raise ValueError("unsupported socket type")
+
+def expr_value_text(val, override_type):
+    """The value part of a value's expression."""
+    if val.use_sweep:
+        if override_type in ('FLOAT', 'INT'): return f"{val.sweep_start}:{val.sweep_step}:{val.sweep_count}"
+        if override_type == 'STRING': return "{" + quote_expr(val.sweep_range.strip()) + "}"
+        return "*"
+    if override_type in ('FLOAT', 'INT'): return val.value_string
+    return quote_value(val.value_menu if override_type in ('BOOLEAN', 'MENU') else val.value_string)
+
+def value_specs(val):
+    """{kind: spec or None} of a value's folder and tag naming (None: turned off)."""
+    return {"dir": val.dir_tag if val.use_dir else None, "tag": val.tag if val.use_tag else None}
+
+def compose_expr(value_text, specs):
+    """Expression of a value part and its sections ({kind: spec or None}), folder first."""
+    pieces = [value_text] if value_text else []
+    pieces += [EXPR_MARKS[kind] + quote_expr(specs[kind]) for kind in SCOPE_KINDS if specs.get(kind) is not None]
+    return " ".join(pieces)
+
+def value_expr(val, override_type):
+    return compose_expr(expr_value_text(val, override_type), value_specs(val))
 
 def _known_branch_dirs(overrides):
     """Branch names that values *earlier* in the stack can generate, as ("dir", folder) / ("tag", token) keys.
@@ -2020,21 +2141,6 @@ def search_input_name_cb(self, context, edit_text):
                 return [s for s in names if edit_text.lower() in s.lower()] if edit_text else names
     return []
 
-def search_menu_items_cb(self, context, edit_text):
-    if not context or not getattr(context, "scene", None): return []
-    for _lvl, ng in HierarchyIterator.iterate(context.scene):
-        for n in ng.nodes:
-            for i in n.inputs:
-                if self in i.values.values():
-                    if i.override_type == 'BOOLEAN':
-                        items = ['True', 'False']
-                    else:
-                        ng_ptr = bpy.data.node_groups.get(ng.group_name)
-                        items = get_menu_switch_items(ng_ptr, n.name, i.name) if ng_ptr else []
-                    if edit_text == self.value_menu: edit_text = ""
-                    return [item for item in items if edit_text.lower() in item.lower()] if edit_text else items
-    return []
-
 def on_value_update(prop_name, label=""):
     @edit_callback(label, prop_name, "prev_" + prop_name)
     def update(self, context):
@@ -2130,11 +2236,15 @@ def block_parts(block, kind):
     """Folder names (sub_path) or filename tokens (tag) a node group / node block adds."""
     return split_path_parts(getattr(block, "sub_path", "")) if kind == "dir" else split_tag_parts(getattr(block, "tag", ""))
 
-def _value_step_names(ng_ptr, node, inp, val):
-    """[{kind: (anchors, names)}] per step of one UI value (one step unless it is a sweep)."""
+def _value_steps(ng_ptr, node, inp, val):
+    """(MockInput, [values]) of one UI value: one value unless it is a sweep."""
     target = 'MODIFIER' if not node.name or node.name == "<Modifier Interface>" else 'NODE'
     tmp = MockInput(inp, val, is_temp=True)
-    steps = parse_sweep_values(MockOverride(target, ng_ptr, node.name, [tmp]), tmp) if tmp.use_sweep else [get_input_value(tmp)]
+    return tmp, parse_sweep_values(MockOverride(target, ng_ptr, node.name, [tmp]), tmp) if tmp.use_sweep else [get_input_value(tmp)]
+
+def _value_step_names(ng_ptr, node, inp, val):
+    """[{kind: (anchors, names)}] per step of one UI value (one step unless it is a sweep)."""
+    tmp, steps = _value_steps(ng_ptr, node, inp, val)
     return [value_parts(tmp, v) for v in steps]
 
 def _block_where(ng, node=None):
@@ -2378,6 +2488,43 @@ def merge_tooltip(hits, dead, scope):
         lines.append("This block and everything inside it is placed inside these existing folders / name tokens")
     return "\n".join(lines)
 
+def format_step(value): return f"{value:.10g}" if isinstance(value, float) else str(value)
+
+def value_info(ng_ptr, node, inp, val, res, scope):
+    """(icon, merges, dead, tooltip) of the button before a value's expression field: what the expression gives, and
+    the upstream names its folder / tag merge into (`res` is {kind: (hits, dead)}, see BranchScope.resolve_value)."""
+    _tmp, steps = _value_steps(ng_ptr, node, inp, val)
+    steps = steps or [""]
+    shown = ", ".join(format_step(v) for v in steps[:6]) + (", …" if len(steps) > 6 else "")
+    lines = [f"Value: {shown}" if len(steps) == 1 else f"{len(steps)} values: {shown}"]
+    specs = value_specs(val)
+    for kind, label, joiner in (("dir", "Folder", " / "), ("tag", "Filename token", "_")):
+        if specs[kind] is None: continue
+        anchors, names = value_name_parts(steps[0], specs[kind], kind)
+        if names and len(steps) > 1: names = ["<value>"]
+        lines.append(f"{label}: {joiner.join(anchors + names)}")
+    if all(spec is None for spec in specs.values()): lines.append("No folder and no filename token")
+    hits = [(k, n) for k in SCOPE_KINDS for n in res[k][0]]
+    dead = [(k, n) for k in SCOPE_KINDS for n in res[k][1]]
+    if hits or dead:
+        lines.append("")
+        lines += [f"Merges into {name}  ({scope.desc((kind, name))})" for kind, name in hits]
+        lines += [f"{name}  ({scope.desc((kind, name))}) cannot exist here" for kind, name in dead]
+        if dead: lines.append("No branch contains all of these names together, so this value never applies")
+        elif any(scope.is_branch(k) for k in hits): lines.append("This value only applies to the branches that contain these names")
+        else: lines.append("Its folders / name tokens go inside these existing ones")
+    if dead: icon = ICONS['ERROR']
+    elif hits: icon = ICONS['MERGE']
+    elif specs["dir"] is not None: icon = ICONS['DIR']
+    elif specs["tag"] is not None: icon = ICONS['TAG']
+    else: icon = ICONS['PLAIN']
+    return icon, bool(hits), bool(dead), "\n".join(lines)
+
+def naming_icon(block, res):
+    """Icon of a node group / node naming field: merge when a name merges into an upstream one."""
+    if any(res[kind][0] or res[kind][1] for kind in SCOPE_KINDS): return ICONS['MERGE']
+    return ICONS['TAG'] if block.tag and not block.sub_path else ICONS['DIR']
+
 def upstream_scope(item):
     """(BranchScope, context) at `item` in the override stack: the names that exist before it and the branches the
     blocks around it are merged into.
@@ -2433,86 +2580,275 @@ def upstream_scope(item):
     if isinstance(item, BatchSTLNode) or n_pos >= len(ng.nodes): return scope, ng_ctx
     return scope, add_node(ng, ng_ptr, ng.nodes[n_pos], ng_ctx, ng_alive, input_limit=pos.get("inputs", 0))
 
-def make_scope_search_cb(kind, prop_name, multi_part=True):
-    """Search list for a folder (kind "dir") or filename-tag (kind "tag") field: upstream names that can exist in this
-    branch, to merge into. Free text is still allowed.
+OTHER_KIND = {"dir": "tag", "tag": "dir"}
 
-    The suggestion completes the last '/'-separated part (in a value tag field also '_'-separated) inside the branch
-    chosen so far, so 'C/' offers 'C/2', 'C/3', ... but not 'C/A' (A and C are alternatives of the same input).
-    `multi_part` is False for a value field. Its suggestions always end in the "names, then the value" mark (folder
+def naming_completions(scope, ctx, kind, text, current, other_parts, multi_part):
+    """[(spec, description)] completing the folder (kind "dir") or filename-tag (kind "tag") spec `text` of a section
+    with upstream names that can exist in this branch, to merge into. `scope` / `ctx` are the BranchScope and context
+    at the field (upstream_scope), `current` the stored spec, and `other_parts` the names of the other section, which
+    every suggestion must still fit: a block's or value's folder and tag are placed in the same branch.
+
+    The suggestion completes the last '/'-separated part (in a value tag also '_'-separated) inside the branch chosen
+    so far, so 'C/' offers 'C/2', 'C/3', ... but not 'C/A' (A and C are alternatives of the same input).
+    `multi_part` is False for a value section. Its suggestions always end in the "names, then the value" mark (folder
     '\\', tag '_', see value_name_parts), so picking one merges and keeps the value; deleting the mark replaces the
-    value with the names instead. A folder field typed with '/' as its mark keeps '/'. Once the mark is typed, the
-    next link of the chain is offered too: 'B\\' offers 'B\\' and 'B\\1\\', 'B\\2\\', ...; tag 'B_' offers 'B_' and
-    'B_1_', 'B_2_', ... (a tag chain is split at '_')."""
+    value with the names instead. A folder typed with '/' as its mark keeps '/'. Once the mark is typed, the next link
+    of the chain is offered too: 'B\\' offers 'B\\' and 'B\\1\\', 'B\\2\\', ...; tag 'B_' offers 'B_' and 'B_1_',
+    'B_2_', ... (a tag chain is split at '_')."""
     split = split_path_parts if kind == "dir" else split_tag_parts if multi_part else split_value_tag_parts
-    other = "tag" if kind == "dir" else "dir"
+    other = OTHER_KIND[kind]
     marks = "" if multi_part else ("\\/" if kind == "dir" else "_")
     seps = "/\\_" if kind == "tag" else "/\\"
-    def search(self, context, edit_text):
-        current = getattr(self, prop_name, "")
-        typed = edit_text
-        typed_mark = ""
-        if edit_text[-1:] and edit_text[-1] in marks:
-            typed_mark, edit_text = edit_text[-1], edit_text[:-1]
-        mark = typed_mark or marks[:1]
-        # Opening a field that holds one name lists its alternatives; one that ends in the mark ('A_') goes on with
-        # the next link of the chain ('A_C_', 'A_D_') instead
-        if edit_text + typed_mark == current and not typed_mark and not any(c in edit_text for c in seps): edit_text = ""
+    typed_mark = ""
+    if text[-1:] and text[-1] in marks:
+        typed_mark, text = text[-1], text[:-1]
+    mark = typed_mark or marks[:1]
+    # Opening a field that holds one name lists its alternatives; one that ends in the mark ('A_') goes on with the
+    # next link of the chain ('A_C_', 'A_D_') instead
+    if text + typed_mark == current and not typed_mark and not any(c in text for c in seps): text = ""
+    def fits(c): return not other_parts or bool(scope.chain_states_any(other, other_parts, c)[0])
+
+    def merged_states(prefix):
+        """Ways to place the chain typed so far where every name of it merges: only such a chain is completed (after a
+        name that does not merge, or a chain that never applies, a suggestion would not merge as a whole)."""
+        if not prefix: return [(ctx, 0, ())]
+        states = scope.chain_states_any(kind, split(prefix), ctx)[0]
+        return [st for st in states if all(m for _p, m in st[2]) and fits(st[0])]
+
+    def complete(text):
+        # Complete after the last separator whose prefix merges; '_' may also be part of a name ('a_b'), so a prefix
+        # that does not merge falls back to an earlier separator
+        for cut in sorted((i for i, c in enumerate(text) if c in seps), reverse=True) + [-1]:
+            prefix, query = text[:cut + 1], text[cut + 1:]
+            states = merged_states(prefix)
+            if states: break
+        # Only names the chain can reach next, in its order; the branches the field is already in are left out
+        names = scope.suggestions(kind, states, exclude=ctx, fits=fits)
+        q = query.lower()
+        out = [(prefix + name + mark, desc) for name, desc in names.items() if not q or q in name.lower()]
+        # Text typed after the merged chain that names nothing upstream ('A_B_custom_') keeps the chain on offer, to
+        # go back to it
+        if prefix and query and not out: out.append((prefix if not multi_part else prefix[:-1], "Merged so far"))
+        return out
+
+    items = complete(text)
+    if typed_mark and text: items += complete(text + typed_mark)  # the next link of the chain
+    return items
+
+def search_results(typed, offers):
+    """Search list from [(text, description)]: duplicates dropped, and the text as typed first. Blender highlights the
+    only result (or one equal to the text) and Enter applies the highlighted one, so deleting a mark and pressing Enter
+    would bring the mark back: Enter keeps the text as typed, arrow down picks a suggestion."""
+    unique = {}
+    for text, desc in offers: unique.setdefault(text, desc)
+    if typed and typed not in unique: unique = {typed: "Keep as typed", **unique}
+    return list(unique.items())
+
+_VALUE_PATH = re.compile(r"^(.*nodegroups\[\d+\])\.nodes\[(\d+)\]\.inputs\[(\d+)\]\.values\[\d+\]$")
+
+def value_owner(val):
+    """(node group, node, input) entries a BatchSTLValue belongs to, or None."""
+    try:
+        m = _VALUE_PATH.match(val.path_from_id())
+        if not m: return None
+        ng = val.id_data.path_resolve(m.group(1))
+        node = ng.nodes[int(m.group(2))]
+        return ng, node, node.inputs[int(m.group(3))]
+    except (ValueError, AttributeError, IndexError, KeyError, TypeError): return None
+
+def input_items(ng, node, inp):
+    """Items a menu or boolean value can take; None for other types, or a menu that lists none."""
+    if inp.override_type == 'BOOLEAN': return ['True', 'False']
+    if inp.override_type == 'MENU':
+        return get_menu_switch_items(bpy.data.node_groups.get(ng.group_name), node.name, inp.name) or None
+    return None
+
+# Edits of an expression field: set() parses and writes the stored fields, then update() (called right after it)
+# records the undo step or deletes the value. Keyed by as_pointer() of the edited item.
+_expr_edits = {}
+
+@contextlib.contextmanager
+def nested_edits():
+    """Property writes inside record no undo step of their own: the edit around them records one."""
+    global _undo_suppress_depth
+    _undo_suppress_depth += 1
+    try: yield
+    finally: _undo_suppress_depth -= 1
+
+def same_value(override_type, a, b):
+    if override_type in ('FLOAT', 'INT'):
+        try: return float(a) == float(b)
+        except ValueError: pass
+    return a == b
+
+def get_value_expr(self):
+    owner = value_owner(self)
+    return value_expr(self, owner[2].override_type if owner else 'STRING')
+
+def set_value_expr(self, text):
+    """Parse an expression (see EXPR_SIGILS) into the value's fields. Text that does not fit the input type, a single
+    value another value of the input already has, or a name with a space is rejected: the field shows the stored value
+    again. An empty field deletes the value (in the update, on_value_expr_update)."""
+    owner = value_owner(self)
+    if owner is None: return
+    ng, node, inp = owner
+    if not text.strip():
+        _expr_edits[self.as_pointer()] = "delete"
+        return
+    try:
+        value_chars, specs = parse_expr(text)
+        fields = read_expr_value(value_chars, inp.override_type, input_items(ng, node, inp))
+    except ValueError: return
+    if not fields["use_sweep"]:
+        prop, new = next((p, v) for p, v in fields.items() if p in VALUE_PROPS)
+        if any(o != self and not o.use_sweep and same_value(inp.override_type, getattr(o, prop), new) for o in inp.values): return
+    fields.update(use_dir=specs["dir"] is not None, dir_tag=specs["dir"] or "", use_tag=specs["tag"] is not None, tag=specs["tag"] or "")
+    changed = {p: v for p, v in fields.items() if getattr(self, p) != v}
+    if not changed: return
+    with raw_edits():
+        for p, v in changed.items(): setattr(self, p, v)
+    _expr_edits[self.as_pointer()] = "changed"
+
+def on_value_expr_update(self, context):
+    edit = _expr_edits.pop(self.as_pointer(), None)
+    mark_dirty()
+    if edit is None or _raw_edit_depth: return
+    if edit == "delete":
+        owner = value_owner(self)
+        if owner is None: return
+        inp = owner[2]
+        idx = next((i for i, v in enumerate(inp.values) if v == self), None)
+        if idx is None: return
+        with nested_edits():
+            with raw_edits(): inp.values.remove(idx)
+            if len(inp.values) == 0: inp.name = ""  # deletes the input, and an emptied node and node group
+    push_search_undo("Edit Override Value")
+
+def search_value_expr(self, context, edit_text):
+    """Search list of a value's expression field (see EXPR_SIGILS). Free text is still allowed.
+    - Menus and booleans list their items (and '*', every item) while the value is not one of them and when the field
+      opens, keeping the sections typed after the value.
+    - The last section typed completes like a folder / tag field (naming_completions): upstream names that can exist in
+      this branch and still fit the other section, ending in the "names, then the value" mark ('\\', '_').
+    - A section not typed yet is offered: one per value ('15 @'), and while no section is typed also merged into each
+      upstream name ('15 @B\\', '15 #B_')."""
+    owner = value_owner(self)
+    if owner is None: return []
+    ng, node, inp = owner
+    parts = lex_expr(edit_text)
+    value_chars, sections = expr_strip(parts[0][1]), parts[1:]
+    typed_specs = expr_specs(sections)
+    rest = edit_text[sections[0][2]:].strip() if sections else ""
+    opened = edit_text == value_expr(self, inp.override_type)
+    items = input_items(ng, node, inp)
+    try: valid = bool(read_expr_value(value_chars, inp.override_type, items))
+    except ValueError: valid = False
+    offers = []
+
+    if items is not None and (opened or not valid):
+        query = "" if opened else expr_text(value_chars).lower()
+        offers += [((quote_value(i) + " " + rest).strip(), f"Value · {i}") for i in items if query in i.lower()]
+        if not query:
+            offers.append((("* " + rest).strip(), "True and False" if inp.override_type == 'BOOLEAN' else f"Every item ({len(items)} values)"))
+
+    if valid:
         scope, ctx = upstream_scope(self)
-        # The other field of the same block / value (sub-folder vs tag) must still fit every suggestion: both are
-        # placed in the same branch
-        if isinstance(self, (BatchSTLNodeGroup, BatchSTLNode)): other_parts = block_parts(self, other)
-        elif isinstance(self, BatchSTLValue): other_parts = value_field_anchors(self)[other]
-        else: other_parts = []
-        def fits(c): return not other_parts or bool(scope.chain_states_any(other, other_parts, c)[0])
+        stored = value_specs(self)
+        def other_parts(kind):
+            spec = typed_specs[OTHER_KIND[kind]]
+            return value_name_parts("", spec, OTHER_KIND[kind])[0] if spec is not None else []
+        if sections:
+            sigil, chars, start = sections[-1]
+            kind = EXPR_SIGILS[sigil]
+            completions = naming_completions(scope, ctx, kind, expr_text(expr_strip(chars)), stored[kind] or "", other_parts(kind), False)
+            offers += [(edit_text[:start + 1] + quote_expr(spec), desc) for spec, desc in completions]
+        base = edit_text.rstrip()
+        for kind, sigil in EXPR_MARKS.items():
+            if typed_specs[kind] is not None: continue
+            offers.append((f"{base} {sigil}", "Folder per value" if kind == "dir" else "Filename token per value"))
+            if not sections:
+                offers += [(f"{base} {sigil}{quote_expr(spec)}", desc) for spec, desc in naming_completions(scope, ctx, kind, "", "", [], False)]
+    return search_results(edit_text, offers)
 
-        def merged_states(prefix):
-            """Ways to place the chain typed so far where every name of it merges: only such a chain is completed
-            (after a name that does not merge, or a chain that never applies, a suggestion would not merge as a whole)."""
-            if not prefix: return [(ctx, 0, ())]
-            states = scope.chain_states_any(kind, split(prefix), ctx)[0]
-            return [st for st in states if all(m for _p, m in st[2]) and fits(st[0])]
+def get_block_naming(self):
+    return compose_expr("", {"dir": self.sub_path or None, "tag": self.tag or None})
 
-        def complete(text):
-            # Complete after the last separator whose prefix merges; '_' may also be part of a name ('a_b'), so a
-            # prefix that does not merge falls back to an earlier separator
-            for cut in sorted((i for i, c in enumerate(text) if c in seps), reverse=True) + [-1]:
-                prefix, query = text[:cut + 1], text[cut + 1:]
-                states = merged_states(prefix)
-                if states: break
-            # Only names the chain can reach next, in its order; the branches the field is already in are left out
-            names = scope.suggestions(kind, states, exclude=ctx, fits=fits)
-            q = query.lower()
-            out = [(prefix + name + mark, desc) for name, desc in names.items() if not q or q in name.lower()]
-            # Text typed after the merged chain that names nothing upstream ('A_B_custom_') keeps the chain on offer,
-            # to go back to it
-            if prefix and query and not out: out.append((prefix if not multi_part else prefix[:-1], "Merged so far"))
-            return out
+def set_block_naming(self, text):
+    """Parse a node group / node naming field ('@folder #tag', see EXPR_SIGILS) into its sub-folder and tag. Text
+    before the first '@' / '#' is the folder: 'C/2 #B' is '@C/2 #B'."""
+    try: value_chars, specs = parse_expr(text)
+    except ValueError: return
+    if value_chars:
+        folder = expr_text(value_chars)
+        if specs["dir"] is not None or any(c.isspace() for c in folder): return
+        specs["dir"] = folder
+    changed = {p: v for p, v in (("sub_path", specs["dir"] or ""), ("tag", specs["tag"] or "")) if getattr(self, p) != v}
+    if not changed: return
+    with raw_edits():
+        for p, v in changed.items(): setattr(self, p, v)
+    _expr_edits[self.as_pointer()] = "changed"
 
-        items = complete(edit_text)
-        if typed_mark and edit_text: items += complete(edit_text + typed_mark)  # the next link of the chain
-        # Blender highlights the only result (or one equal to the text) and Enter applies the highlighted one, so
-        # deleting a mark and pressing Enter would bring the mark back. The text as typed comes first instead: Enter
-        # keeps it, arrow down picks a suggestion.
-        unique = {}
-        for name, desc in items: unique.setdefault(name, desc)
-        if typed and typed not in unique: unique = {typed: "Keep as typed", **unique}
-        return list(unique.items())
-    return search
+def block_naming_update(label):
+    def update(self, context):
+        edit = _expr_edits.pop(self.as_pointer(), None)
+        mark_dirty()
+        if edit and not _raw_edit_depth: push_search_undo(label)
+    return update
+
+def search_block_naming(self, context, edit_text):
+    """Search list of a node group / node naming field ('@folder #tag'). The last section typed completes with
+    upstream names that can exist in this branch and still fit the other section ('@C/' offers '@C/1', '@C/2', ...);
+    a section not typed yet is offered merged into each upstream name. Text typed without '@' / '#' is a folder."""
+    parts = lex_expr(edit_text)
+    sections = [(sigil, chars, start + 1) for sigil, chars, start in parts[1:]]  # start: where the spec begins
+    bare = expr_strip(parts[0][1])
+    if bare and all(sigil != "@" for sigil, _c, _s in sections): sections.insert(0, ("@", bare, 0))
+    typed_specs = expr_specs(sections)
+    scope, ctx = upstream_scope(self)
+    stored = {"dir": self.sub_path, "tag": self.tag}
+    def other_parts(kind):
+        spec = typed_specs[OTHER_KIND[kind]]
+        return split_path_parts(spec) if kind == "tag" else split_tag_parts(spec)
+    offers = []
+    if sections:
+        sigil, chars, start = sections[-1]
+        kind = EXPR_SIGILS[sigil]
+        head = edit_text[:start] if start else sigil  # a bare folder gets its '@'
+        completions = naming_completions(scope, ctx, kind, expr_text(expr_strip(chars)), stored[kind], other_parts(kind), True)
+        offers += [(head + quote_expr(spec), desc) for spec, desc in completions]
+    base = edit_text.rstrip()
+    for kind, sigil in EXPR_MARKS.items():
+        if typed_specs[kind] is not None: continue
+        completions = naming_completions(scope, ctx, kind, "", "", other_parts(kind), True)
+        offers += [(f"{base} {sigil}{quote_expr(spec)}".lstrip(), desc) for spec, desc in completions]
+    return search_results(edit_text, offers)
 
 class BatchSTLLogLine(bpy.types.PropertyGroup): text: bpy.props.StringProperty()
+
+EXPR_DESCRIPTION = (
+    "The value and its naming: the value, then '@' for a folder and '#' for a filename token.\n"
+    "15: value only · 15 @: folder 15 · 15 #: token 15 · 15 @ #: both\n"
+    "@big, #big: the name instead of the value · @B\\, #B_: B, then the value (B/15, B_15)\n"
+    "Names that exist upstream merge into that branch. Chains: @C/2\\ (C/2/15), #C_2_ (C_2_15)\n"
+    "Sweeps: 0:0.5:5 (start:step:count), {a, b} (strings), * (every menu item, True and False)\n"
+    "Quote text that holds @ or #: \"a#b\". Clear the field to delete the value")
+
+BLOCK_NAMING_DESCRIPTION = (
+    "Sub-folder and filename tokens of everything in this block: '@' for folders, '#' for tokens.\n"
+    "@X: folder X · #X: token X · @C/2 #B: folders C/2 and token B · '/' between names\n"
+    "Names that exist upstream merge into that branch: @B applies only to the B branches")
+
 class BatchSTLValue(bpy.types.PropertyGroup):
+    # The table edits the value and its naming through `expr` (see EXPR_SIGILS); the fields below are the stored data.
+    expr: bpy.props.StringProperty(name="Value", description=EXPR_DESCRIPTION, get=get_value_expr, set=set_value_expr, search=search_value_expr, update=on_value_expr_update)
     prev_value_string: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    # Plain text field (no search list): Blender records its undo step, so the callback must not push another one.
     value_string: bpy.props.StringProperty(name="Value", default="", update=on_value_update("value_string"))
     prev_value_menu: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    value_menu: bpy.props.StringProperty(name="Value", default="", search=search_menu_items_cb, update=on_value_update("value_menu", "Edit Override Value"))
-    use_tag: bpy.props.BoolProperty(name="Use Tag", description="Add this value to the filename, named by the tag field. Drag across several buttons to toggle them together", default=False, update=mark_dirty)
-    prev_tag: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    tag: bpy.props.StringProperty(name="Tag", description="Filename tag: 'name' replaces the value, 'name_' adds the token 'name' and then the value. Chain names with '_' or '/' ('B_2_' merges into branch B, then its branch 2). A name that exists upstream merges into that branch. Suggestions end in '_': delete it to replace the value", default="", search=make_scope_search_cb("tag", "tag", multi_part=False), update=on_no_spaces_update("tag", "Edit Override Tag"))
-    use_dir: bpy.props.BoolProperty(name="Use Dir", description="Put this value's files in a sub-folder, named by the directory field. Drag across several buttons to toggle them together", default=True, update=mark_dirty)
-    prev_dir_tag: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    dir_tag: bpy.props.StringProperty(name="Directory", description="Folder name: 'name' replaces the value, 'name\\' puts a folder per value inside folder 'name'. Chain folders with '\\' or '/' ('B\\2\\' merges into folder B, then its folder 2). A folder that exists upstream merges into that branch. Suggestions end in '\': delete it to replace the value", default="", search=make_scope_search_cb("dir", "dir_tag", multi_part=False), update=on_no_spaces_update("dir_tag", "Edit Override Directory"))
+    value_menu: bpy.props.StringProperty(name="Value", default="", update=on_value_update("value_menu", "Edit Override Value"))
+    use_tag: bpy.props.BoolProperty(name="Use Tag", description="Add this value to the filename, named by `tag` (the '#' section)", default=False, update=mark_dirty)
+    tag: bpy.props.StringProperty(name="Tag", description="Filename tag: 'name' replaces the value, 'name_' adds the token 'name' and then the value. Chain names with '_' or '/' ('B_2_' merges into branch B, then its branch 2)", default="", update=mark_dirty)
+    use_dir: bpy.props.BoolProperty(name="Use Dir", description="Put this value's files in a sub-folder, named by `dir_tag` (the '@' section)", default=True, update=mark_dirty)
+    dir_tag: bpy.props.StringProperty(name="Directory", description="Folder name: 'name' replaces the value, 'name\\' puts a folder per value inside folder 'name'. Chain folders with '\\' or '/' ('B\\2\\' merges into folder B, then its folder 2)", default="", update=mark_dirty)
     use_sweep: bpy.props.BoolProperty(name="Sweep", default=False, update=mark_dirty)
     sweep_range: bpy.props.StringProperty(name="Sweep Range", default="", update=mark_dirty)
     prev_sweep_start: bpy.props.StringProperty(default="0", options={'HIDDEN'})
@@ -2574,10 +2910,9 @@ def on_node_name_update(self, context):
 class BatchSTLNode(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty(name="Target Node", default="", search=search_target_node_cb, update=on_node_name_update, description="Select <Modifier Interface> to target the modifier directly")
     prev_name: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    prev_sub_path: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    sub_path: bpy.props.StringProperty(name="Sub-folder", default="", description="Sub-folder path; pick an upstream folder to merge into that branch", search=make_scope_search_cb("dir", "sub_path"), update=on_no_spaces_update("sub_path", "Edit Override Node Sub-folder"))
-    prev_tag: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    tag: bpy.props.StringProperty(name="Tag", default="", description="Filename tokens added by this node, '/' between tokens; pick an upstream name token to merge into that branch", search=make_scope_search_cb("tag", "tag"), update=on_no_spaces_update("tag", "Edit Override Node Tag"))
+    naming: bpy.props.StringProperty(name="Naming", description=BLOCK_NAMING_DESCRIPTION, get=get_block_naming, set=set_block_naming, search=search_block_naming, update=block_naming_update("Edit Override Node Naming"))
+    sub_path: bpy.props.StringProperty(name="Sub-folder", default="", description="Sub-folder path added by this node (the '@' section)", update=mark_dirty)
+    tag: bpy.props.StringProperty(name="Tag", default="", description="Filename tokens added by this node, '/' between tokens (the '#' section)", update=mark_dirty)
     inputs: bpy.props.CollectionProperty(type=BatchSTLInput)
 
 @edit_callback("Edit Override Node Group", "group_name", "prev_group_name")
@@ -2622,10 +2957,9 @@ def search_group_name_cb(self, context, edit_text):
 class BatchSTLNodeGroup(bpy.types.PropertyGroup):
     group_name: bpy.props.StringProperty(name="Node Group", default="", search=search_group_name_cb, update=on_group_name_update)
     prev_group_name: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    prev_sub_path: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    sub_path: bpy.props.StringProperty(name="Sub-folder", default="", description="Sub-folder path; pick an upstream folder to merge into that branch", search=make_scope_search_cb("dir", "sub_path"), update=on_no_spaces_update("sub_path", "Edit Override Group Sub-folder"))
-    prev_tag: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    tag: bpy.props.StringProperty(name="Tag", default="", description="Filename tokens added by this node group, '/' between tokens; pick an upstream name token to merge into that branch", search=make_scope_search_cb("tag", "tag"), update=on_no_spaces_update("tag", "Edit Override Group Tag"))
+    naming: bpy.props.StringProperty(name="Naming", description=BLOCK_NAMING_DESCRIPTION, get=get_block_naming, set=set_block_naming, search=search_block_naming, update=block_naming_update("Edit Override Group Naming"))
+    sub_path: bpy.props.StringProperty(name="Sub-folder", default="", description="Sub-folder path added by this node group (the '@' section)", update=mark_dirty)
+    tag: bpy.props.StringProperty(name="Tag", default="", description="Filename tokens added by this node group, '/' between tokens (the '#' section)", update=mark_dirty)
     nodes: bpy.props.CollectionProperty(type=BatchSTLNode)
 
 def get_export_name(self):
@@ -2881,7 +3215,6 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
         if act == 'MOVE_NODE_DOWN': return "Move Target Node down"
         if act == 'ADD_INPUT': return "Add an Input Parameter override (Shift: Auto-populate all available socket inputs)"
         if act == 'VALUE_ACTION': return "Add Permutation (Shift: Toggle Sweep range mode)"
-        if act == 'CLEAR_VALUE_STRING': return "Clear this value (deletes it, and the input if it is the last value)"
         if act == 'TOGGLE_COLLECTION_USE_TAG': return "Toggle collection-level filename prefix/suffix tag"
         if act == 'TOGGLE_OBJECT_EXPORT': return "Toggle object active export state"
         return "Perform structural table action"
@@ -3083,11 +3416,7 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
                 ng_list = self._resolve_context_list(context, preset)
                 if ng_list is None: return {'CANCELLED'}
 
-                if self.action == 'CLEAR_VALUE_STRING':
-                    # Same as emptying the field by hand: on_value_update deletes the value (and an emptied input)
-                    if 0 <= self.ng_idx < len(ng_list) and 0 <= self.n_idx < len(ng_list[self.ng_idx].nodes) and 0 <= self.i_idx < len(ng_list[self.ng_idx].nodes[self.n_idx].inputs) and 0 <= self.v_idx < len(ng_list[self.ng_idx].nodes[self.n_idx].inputs[self.i_idx].values):
-                        ng_list[self.ng_idx].nodes[self.n_idx].inputs[self.i_idx].values[self.v_idx].value_string = ""
-                elif 'GROUP' in self.action: self._handle_group_action(ng_list, context, preset)
+                if 'GROUP' in self.action: self._handle_group_action(ng_list, context, preset)
                 elif 'NODE' in self.action: self._handle_node_action(ng_list)
                 elif 'INPUT' in self.action: self._handle_input_action(ng_list)
                 elif 'VALUE' in self.action: self._handle_value_action(ng_list)
@@ -3556,8 +3885,6 @@ def _draw_overrides_table(layout, wm, nodegroups, is_collection, is_open_prop, t
             parent.label(text="", icon=ICONS['BLANK'])
         parent.separator(factor=0.5)
 
-    def merged(res, kind): return bool(res[kind][0] or res[kind][1])
-
     def draw_input(parent, ng_idx, ng, ng_ptr, n_idx, node, n_ctx, i_idx, inp, merges=None, alive=True):
         """Rows of one input (its first value on the input's row, the others below), then record what it creates.
         `merges` is given in the clear view only (see draw_merge_icon); `alive` is False inside a dead block."""
@@ -3571,8 +3898,9 @@ def _draw_overrides_table(layout, wm, nodegroups, is_collection, is_open_prop, t
             # The merge icon slot sits before the columns (blank on the other value rows), so it takes no width from them
             if merges is not None: draw_merge_icon(i_row.row(align=True), merges if i_first else [])
 
-            # Four equal columns: input, value, folder, tag
-            s_main = i_row.split(factor=0.25, align=False)
+            # Two columns: the input, then one field per value with the value, its folder ('@') and its filename
+            # token ('#'), see EXPR_SIGILS
+            s_main = i_row.split(factor=0.35, align=False)
             c_inp = s_main.row(align=True)
 
             if i_first:
@@ -3583,62 +3911,25 @@ def _draw_overrides_table(layout, wm, nodegroups, is_collection, is_open_prop, t
             else:
                 c_inp.alignment = 'RIGHT'
 
-            s_val = s_main.split(factor=1 / 3, align=False)
-            c_val = s_val.row(align=True)
-            c_dir = s_val.row(align=True)
-
+            c_val = s_main.row(align=True)
             # Handing unpopulated values safely
             if val is None:
                 continue
+            if inp.override_type not in SUPPORTED_OVERRIDE_TYPES:
+                c_val.label(text="Unsupported socket type", icon=ICONS['ERROR'])
+                continue
 
-            # Render Value Properties
-            val_valid = is_override_val_valid(inp, val, ng_ptr, node)
-            c_val_prop = c_val.row(align=True)
-            c_val_prop.alert = not val_valid
-            if getattr(val, "use_sweep", False):
-                if inp.override_type in ('FLOAT', 'INT'):
-                    c_val_prop.prop(val, "sweep_start", text="")
-                    c_val_prop.prop(val, "sweep_step", text="")
-                    c_val_prop.prop(val, "sweep_count", text="")
-                elif inp.override_type == 'STRING':
-                    c_val_prop.prop(val, "sweep_range", text="")
-                elif inp.override_type in ['BOOLEAN', 'MENU']:
-                    sub = c_val_prop.row(align=True); sub.active = False
-                    if inp.override_type == 'BOOLEAN':
-                        sub.label(text="True & False")
-                    else:
-                        n_items = len(get_menu_switch_items(ng_ptr, node.name, inp.name)) if ng_ptr else 0
-                        sub.label(text=f"{n_items} values")
-            else:
-                prop_map = {'BOOLEAN': "value_menu", 'INT': "value_string", 'FLOAT': "value_string", 'STRING': "value_string", 'MENU': "value_menu"}
-                prop_name = prop_map.get(inp.override_type)
-                if prop_name:
-                    c_val_prop.prop(val, prop_name, text="")
-                    if prop_name == "value_string":
-                        # Plain text fields have no built-in clear button (only search fields do), so add one
-                        op = c_val_prop.operator("batch_stl.table_action", text="", icon='PANEL_CLOSE', emboss=False)
-                        op.action, op.is_collection, op.is_preset, op.is_global = 'CLEAR_VALUE_STRING', is_collection, is_preset, is_global
-                        op.ng_idx, op.n_idx, op.i_idx, op.v_idx = ng_idx, n_idx, i_idx, v_idx
-                else:
-                    c_val_prop.label(text="Unsupported socket type", icon=ICONS['ERROR'])
-
-            # Directory and filename tag: each toggle drives only its own field. The toggles are property buttons, not
-            # operators, so Blender's drag-toggle sets several of them in one stroke (and one undo step).
-            # A folder / token that merges into an upstream one shows the merge icon on its toggle; red when
-            # it cannot exist in this block's branch (the value never applies).
+            # The button before the field explains the expression (hover it) and shows its merges: blue when its
+            # folder / token merges into an upstream one, red when it cannot exist in this block's branch (the value
+            # never applies). The field is red for that too, and for a value that does not fit the input.
             v_res = scope.resolve_value(value_field_anchors(val), n_ctx)[1]
-            (vd_hits, vd_dead), (vt_hits, vt_dead) = v_res["dir"], v_res["tag"]
-            s_dir_tag = c_dir.split(factor=0.5, align=False)
-            c_d = s_dir_tag.row(align=True)
-            c_d.alert = bool(vd_dead)
-            c_d.prop(val, "use_dir", text="", icon=ICONS['MERGE'] if vd_hits or vd_dead else ICONS['DIR'], toggle=True)
-            c_d_field = c_d.row(align=True); c_d_field.active = val.use_dir
-            c_d_field.prop(val, "dir_tag", text="")
-            c_t = s_dir_tag.row(align=True)
-            c_t.alert = bool(vt_dead)
-            c_t.prop(val, "use_tag", text="", icon=ICONS['MERGE'] if vt_hits or vt_dead else ICONS['TAG'], toggle=True)
-            c_t_field = c_t.row(align=True); c_t_field.active = val.use_tag
-            c_t_field.prop(val, "tag", text="")
+            icon, v_merges, v_dead, info = value_info(ng_ptr, node, inp, val, v_res, scope)
+            c_info = c_val.row(align=True)
+            c_info.alert = v_dead
+            c_info.operator("batch_stl.merge_info", text="", icon=icon, depress=v_merges, emboss=v_merges or v_dead).info = info
+            c_field = c_val.row(align=True)
+            c_field.alert = v_dead or not is_override_val_valid(inp, val, ng_ptr, node)
+            c_field.prop(val, "expr", text="")
 
         scope.add_input(ng, ng_ptr, node, inp, n_ctx, alive)
 
@@ -3663,8 +3954,7 @@ def _draw_overrides_table(layout, wm, nodegroups, is_collection, is_open_prop, t
             ng_sub = ng_row.row(align=True)
             ng_sub.alert = not is_override_group_valid(ng)
             ng_sub.prop(ng, "group_name", text="")
-            ng_row.prop(ng, "sub_path", text="", icon=ICONS['MERGE'] if merged(ng_res, "dir") else ICONS['DIR'])
-            ng_row.prop(ng, "tag", text="", icon=ICONS['MERGE'] if merged(ng_res, "tag") else ICONS['TAG'])
+            ng_row.prop(ng, "naming", text="", icon=naming_icon(ng, ng_res))
             draw_op(ng_row, 'MOVE_GROUP_UP', ICONS['UP'], ng_idx=ng_idx)
             draw_op(ng_row, 'MOVE_GROUP_DOWN', ICONS['DOWN'], ng_idx=ng_idx)
             draw_op(ng_row, 'COPY_GROUP', ICONS['COPY'], ng_idx=ng_idx)
@@ -3695,8 +3985,7 @@ def _draw_overrides_table(layout, wm, nodegroups, is_collection, is_open_prop, t
                 n_sub = n_row.row(align=True)
                 n_sub.alert = not is_override_node_valid(ng_ptr, node)
                 n_sub.prop(node, "name", text="", icon=ICONS['NODE'])
-                n_row.prop(node, "sub_path", text="", icon=ICONS['MERGE'] if merged(n_res, "dir") else ICONS['DIR'])
-                n_row.prop(node, "tag", text="", icon=ICONS['MERGE'] if merged(n_res, "tag") else ICONS['TAG'])
+                n_row.prop(node, "naming", text="", icon=naming_icon(node, n_res))
 
                 if len(ng.nodes) > 1:
                     draw_op(n_row, 'MOVE_NODE_UP', ICONS['UP'], ng_idx=ng_idx, n_idx=n_idx)
@@ -3846,16 +4135,19 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
             child_col.label(text="  • Shift + Sweep (+): Populates all menu/bool values automatically", icon=ICONS['SWEEP'])
             box_col.separator()
 
-            box_col.label(text="Directory & Naming Tags:", icon=ICONS['FILE'])
+            box_col.label(text="Value Field (value @folder #tag):", icon=ICONS['FILE'])
             split = box_col.split(factor=0.05)
             split.column()
             child_col = split.column()
-            child_col.label(text="  • Directory (Folder): Routes variant to a sub-folder named by its field", icon=ICONS['DIR'])
-            child_col.label(text="  • Tag (Bookmark): Adds the value to the filename, named by its field", icon=ICONS['TAG'])
+            child_col.label(text="  • 15 = value only · 15 @ = folder 15 · 15 # = filename token 15", icon=ICONS['BLANK'])
+            child_col.label(text="  • @big / #big: the name instead of the value", icon=ICONS['DIR'])
+            child_col.label(text="  • @B\\ / #B_: B, then the value (B/15, Box_B_15)", icon=ICONS['TAG'])
+            child_col.label(text="  • Sweeps: 0:0.5:5 = start:step:count · {a, b} = strings · * = all items", icon=ICONS['SWEEP'])
+            child_col.label(text="  • Quote text holding @ or #: \"a#b\" · Clear the field to delete the value", icon=ICONS['BLANK'])
+            child_col.label(text="  • Group / Node naming: @C/2 #B = folders C/2 and token B", icon=ICONS['NODE'])
+            child_col.label(text="  • Hover the icon before a value to see its folder, token and merges", icon=ICONS['INFO'])
             child_col.label(text="  • Filename: Object, then tags in stack order (Global > ... > Object)", icon=ICONS['BLANK'])
-            child_col.label(text="  • Collection/Object/Group/Node tags: plain tokens, '/' between tokens", icon=ICONS['BLANK'])
-            child_col.label(text="  • Each toggle enables only its own field", icon=ICONS['BLANK'])
-            child_col.label(text="  • Value rules (both fields): [ tag ] = Replace, [ _tag ] = Append, [ tag_ ] = Prepend", icon=ICONS['BLANK'])
+            child_col.label(text="  • Collection/Object tags: plain tokens, '/' between tokens", icon=ICONS['BLANK'])
             box_col.separator()
 
             box_col.label(text="Branch Merging:", icon=ICONS['MERGE'])
@@ -3863,10 +4155,10 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
             split.column()
             child_col = split.column()
             child_col.label(text="  • Name an upstream folder or filename token to merge into that branch only", icon=ICONS['BLANK'])
-            child_col.label(text="  • Values merge only by a plain name; a name derived from the value is new", icon=ICONS['BLANK'])
+            child_col.label(text="  • Values merge only by a typed name; a name derived from the value is new", icon=ICONS['BLANK'])
             child_col.label(text="  • Tag merges append new tokens at the end of the filename", icon=ICONS['TAG'])
-            child_col.label(text="  • B = only B permutations, C/2 = only C2, 2 = every 2 branch", icon=ICONS['BLANK'])
-            child_col.label(text="  • Folder/tag fields list upstream names that fit the current branch", icon=ICONS['DIR'])
+            child_col.label(text="  • @B = only B permutations, @C/2 = only C2, @2 = every 2 branch", icon=ICONS['BLANK'])
+            child_col.label(text="  • After @ or #, the field lists upstream names that fit the current branch", icon=ICONS['DIR'])
             child_col.label(text="  • Blue bar: block and children merge (hover for sources)", icon=ICONS['MERGE'])
             child_col.label(text="  • Red bar: names never exist together, block never applies", icon=ICONS['ERROR'])
             child_col.label(text="  • Collapsed table: inputs only, a merging group / node shows at the row start", icon=ICONS['RIGHT'])

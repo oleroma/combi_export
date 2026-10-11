@@ -65,9 +65,9 @@ blocks anchor to.
   differing only in block sub-folders were batched together in the headless worker and got the wrong folders).
 
 ## 2. Data model changes (this session)
-- `BatchSTLValue`: `dir_tag` (+`prev_dir_tag`) folder name, separate from `tag` (filename). UI per value:
-  `[DIR toggle][dir_tag][TAG toggle][tag]`, field greyed when its toggle is off. Both are search fields.
-- `BatchSTLNodeGroup` / `BatchSTLNode`: new `tag` (+`prev_tag`) next to `sub_path`; both search fields.
+- `BatchSTLValue`: `dir_tag` folder name, separate from `tag` (filename). Stored data only: the UI edits a value
+  through one computed field, `expr` (section 7).
+- `BatchSTLNodeGroup` / `BatchSTLNode`: `tag` next to `sub_path`, edited through the computed `naming` field.
 - `MockOverride` carries `ng_sub_path`, `node_sub_path`, `ng_tag`, `node_tag` (set in `get_flat_overrides`,
   kept by `resolve_overrides`). A block with only a sub-folder/tag and no inputs still becomes an override.
 - JSON: values `dir_tag`; blocks `tag`. Old JSON without `dir_tag` gets `dir_tag = tag`. .blend data: scenes without
@@ -86,12 +86,13 @@ blocks anchor to.
   values contain `_`, from the walker's per-branch spelling of `a_b`).
 - `upstream_scope(item)` → `(scope, ctx)` at any field via `item.path_from_id()` (`_PATH_STEP`). Export order:
   Global, Preset, Collection, Object lists; groups/nodes top to bottom; block sub-folder, then tag, then inputs.
-- `make_scope_search_cb(kind, prop, multi_part)` on: block `sub_path`/`tag` (multi-part, `C/` completes `C/1…`),
-  value `dir_tag`/`tag` (single). Completes only after a prefix that fully merges, in chain order, and only names the
-  other half of the block / value (sub-folder vs tag) still fits with.
+- `naming_completions(scope, ctx, kind, text, current, other_parts, multi_part)` (the former `make_scope_search_cb`
+  core): blocks multi-part (`@C/` completes `@C/1…`), value sections single. Completes only after a prefix that fully
+  merges, in chain order, and only names the other section (folder vs tag) still fits with.
 - `draw_overrides_table` builds the scope incrementally (cheap). Merging block → blue `batch_stl.merge_info` bar on
   top of its box ("Merges into C / 2 · name B"), field icon `AUTOMERGE_ON` (`ICONS['MERGE']`). Impossible merge →
-  red "Never applies" bar. Value merge → merge icon on the DIR/TAG toggle; dead → red toggle. Tooltip lists sources.
+  red "Never applies" bar. Value merge → merge icon on the info button before its field; dead → red. Tooltip lists
+  sources.
 - Collapsed table with inputs = clear view: only input/value rows (same walk, block rows skipped); the hidden
   blocks' merge bars become one merge_info icon at the input row start (red if dead, tooltips joined).
 - `BATCH_STL_OT_merge_info`: INTERNAL no-op operator, `description()` returns the tooltip.
@@ -101,8 +102,7 @@ blocks anchor to.
   `on_no_spaces_update(prop, label)` / `edit_callback` that pushes one step ("Edit Override Directory",
   "Edit Override Tag", "Edit Override Group/Node Sub-folder", "Edit Override Group/Node Tag"). Plain text fields get
   undo from Blender and must NOT push. Operators (`'UNDO'` + `@inside_operator`) suppress nested pushes.
-- `value_string` (float/int/string) is a plain text field (no search). Its clear button is an inline `PANEL_CLOSE`
-  button → `table_action` `CLEAR_VALUE_STRING` (sets `""` → callback deletes value / emptied input). Not on sweeps.
+- Values are edited through the `expr` search field (Blender's own clear button); `CLEAR_VALUE_STRING` is gone.
 - **Group Output** is a valid node target, sorted after regular nodes (never the default). Group Input excluded.
 - Removed the dummy `search_empty_cb`.
 
@@ -134,7 +134,7 @@ blocks anchor to.
   modifier access, menu index mapping).
 
 ## 6. Open points / ideas
-- Verify in Blender: search dropdowns (dir + tag), merge bars (blue/red), toggle icons, X clear button look
+- Verify in Blender: `expr` / `naming` search dropdowns, merge bars (blue/red), value info icons, clear button look
   (`PANEL_CLOSE` vs `X`), undo entries, Group Output overrides, row width with the extra tag fields.
 - Performance: counts cached per override signature in a rebuild; without branch anchors the count is a product of
   pool sizes (no enumeration). `cached_menu_items()` around cache rebuild, panel draw and the export's clash check.
@@ -144,3 +144,22 @@ blocks anchor to.
 - Optional: case-insensitive matching on Windows (`clash_key` already casefolds for path clashes).
 - Collection/object tags are not part of the merge scope (constant per object, merging into them would be a no-op).
 - UI preference: merges must be visually obvious; blue = merge, red (`alert`) = invalid / never applies.
+
+## 7. One field per value (2026-10-10)
+- Request: replace the value / directory / tag fields of the overrides table with ONE field using symbols, keeping
+  every variation and the merge predictions. Decision: `value @folder #tag` (`EXPR_SIGILS`), section text = the old
+  field text (same `value_name_parts` rules), missing section = naming off. Sweeps in the value part: `start:step:count`,
+  `{a, b}`, `*`. Quotes protect `@` / `#` (`""` = quote). Block rows got the same: `naming` = `@C/2 #B` (bare text is
+  a folder).
+- `expr` / `naming` are computed `StringProperty(get, set, search, update)`: the stored fields are untouched, so no
+  migration, JSON, signature or walker change. `set` validates and writes inside `raw_edits()`; `update` pushes the undo
+  step / deletes (never delete inside `set`: Blender then calls `update` on freed memory). `value_owner` resolves the
+  input from `path_from_id()`.
+- Dropped with it: the DIR / TAG toggles (and their drag-toggle), the `CLEAR_VALUE_STRING` action, `search_menu_items_cb`,
+  `make_scope_search_cb` (now `naming_completions` + `search_value_expr` / `search_block_naming`), the `prev_tag`,
+  `prev_dir_tag`, `prev_sub_path` properties of values and blocks (old files keep them as unused IDProperties).
+- Verified in Blender 5.2 (background): suggestion parity with `HEAD`'s per-field search on ~400k random cases (0
+  mismatches), 900 setter round trips without naming changes, edits / rejections / delete cascade, panels drawn against
+  a strict fake layout, and a headless worker export whose files match the tree preview. Probe gotcha: Python references
+  to collection items go stale after `add()` on the same collection (Blender reallocates), so probes must look items up
+  again. Not verified interactively: the search popup itself, tooltips with line breaks, undo entries.
