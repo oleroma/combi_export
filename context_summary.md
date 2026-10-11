@@ -264,3 +264,29 @@ decisions below are mine (README section 9 documents them for users):
   `t_mig_new.py`); the headless worker writes exactly the predicted files for both files. Draw time of a 200-value
   table equals `HEAD` once warm (~45 ms; first draw +15 ms). Scripts in the session scratchpad
   (`%TEMP%\claude\D--extensions-combi-export\b816ebe1-32a8-4f2d-b246-05d2b13ff4ed\scratchpad`).
+
+## 9. Custom strings and Tab completion (2026-10-11, later)
+User requests: (a) a field whose names replace the value must not show the value in front (`\big`, not `15\big`), and
+typed names ("custom strings") must merge into upstream names; (b) typing `\A` / `_x` and pressing Tab must complete
+the upstream name with its separator (`\A\`), so the next name can be typed and completed the same way.
+- **Reading rules** (`_infer_value`): 1. stored value written in the names; 2. a value written where the stored one was
+  (`_slot_shape`; a missing section counts as `*`), unless that name exists upstream (`_upstream_check` →
+  `upstream_scope`), then it is a typed name and merges; 3. sweeps / values with spaces (`_can_be_typed`), or any value
+  for a blank value; 4. else the value stays and names are typed. Before this, the last name that could be a value was
+  the value, so a custom string on a string input (or `\2` on a number) became a value name and never merged.
+- **Display** (`compose_value_field(..., current, upstream)`): naming alone first; typed names that could be read as the
+  value get quotes (last one, every one, all). Display needs no upstream info (a custom-only template skips rule 2).
+- **Search:** offers the other reading of ambiguous text (*Value 2*, *Typed names, the value stays 15*). Each chain
+  completion is offered with the value and ending in its separator; blocks offer `\C\` (+ `\C\_` / `_B_\` for a single
+  name). `search_results(typed, offers, tab)` drops results that would stop Tab short, the keep-as-typed item included.
+- **Blender Tab facts** (read from Blender's source on 2026-10-11, `interface_region_search.cc`,
+  `interface_handlers.cc`, `interface.cc`): Tab calls the search callback with the typed text and fills the common
+  prefix of the results that start with it (exact, case-sensitive); exactly one such result = FULL_MATCH, which ends the
+  edit; the cursor goes to the end without selection; the list refreshes after a partial match. A single result, or one
+  equal to the text, is highlighted and applied by Enter.
+- **Verified** (scratchpad `%TEMP%\claude\D--extensions-combi-export\8a7ddc96-2291-4a6f-a653-91843e748fbe\scratchpad`):
+  `t2_parse.py` (rules, display, 8,000 round trips), `t2_blender.py` (Tab sequences replayed with Blender's algorithm on
+  the real result lists, value and block fields; custom-string merges checked against the exported paths; panel draw).
+  The earlier `t_legacy.py` / `t_mig_new.py` still pass (0 of 400 generation mismatches vs `HEAD`; old files load with
+  identical paths). Draw time unchanged (~45 ms warm for 200 values).
+

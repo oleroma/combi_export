@@ -690,16 +690,19 @@ def split_tag_parts(text):
 # section and '_' the filename section, and the value is written where it goes in the names (see VALUE_SLOT):
 #   15            the value only
 #   \15           a folder per value: 15/                  _15          a filename token per value: Box_15
-#   15\big        folder big (the name replaces the value)  15_big       token big
+#   \big          folder big (the name replaces the value)  _big         token big (the value is not shown)
 #   \15_mm        one folder joining value and text         _15_mm       token 15_mm
 #   \size_15      size_15/
 #   \B\15         folder B, then a folder per value         _B_15        token B, then the value: Box_B_15
 #   \15\_15       folder and token ('\' closes the folder)  \big\_15     folder big, token 15
 #   \0:1:5  _{a, b}  \*   sweeps: numbers start:step:count, strings {a, b}, menus and booleans *
-# - Any other name is typed text: it merges into an upstream folder / token of that name (B in \B\15).
-# - Without a value written before the sections, the value is read from them: the stored value where it appears, else
-#   the last name that can be a value of the input; else the value stays and every name is typed (\big on 15 = 15\big).
+# - Any other name is typed text: it merges into an upstream folder / token of that name (B in \B\15, big in \big).
+# - Without a value written before the sections (15\big also works), the value is read from them (_infer_value): the
+#   value the field holds where it is written; a value written in its place instead ('\15' -> '\16' is the value 16),
+#   unless that name exists upstream ('\A' merges into A); a sweep or a value with a space; else the value stays and
+#   every name is typed.
 # - A section that ends in its separator goes on with the value: \B\ = \B\15, _B_ = _B_15, 15\ = \15, 15_ = _15.
+#   The search offers each upstream name ending in its separator, so Tab completes it and the next one can be typed.
 # - In a folder section '_' belongs to the name (\15_mm), except right after '\' or a space: there the filename
 #   section starts. In the value part '_' starts it after the longest text that is a value: '15_big' is 15 with the
 #   token big, while the string 'a_b' or the menu item 'Mode_A' stay whole. A space before '_' ends the value: 'a _b'.
@@ -1024,21 +1027,22 @@ def _quote(text):
     return '"' + text.replace('"', '""') + '"'
 
 def _render_typed(text, seps, lead=False, always=False):
-    """Typed names (separated by bare `seps`) as written in a section: a name is quoted when asked, when it would not
-    read back as typed (a space, a quote or a backslash), or as the first of a folder name when it would start the
-    filename section ('_') or a sweep ('{')."""
+    """Typed names (separated by bare `seps`) as written in a section: a name is quoted when `always` says so (True, or
+    a test of the name), when it would not read back as typed (a space, a quote or a backslash), or as the first of a
+    folder name when it would start the filename section ('_') or a sweep ('{')."""
     out, first = [], lead
     for piece in re.split("([" + re.escape(seps) + "])", text) if seps else [text]:
         if piece and piece in seps: out.append(piece)
         elif piece:
-            needs = always or any(c.isspace() or c in '"\\' for c in piece) or (first and piece[0] in "_{")
+            needs = (always(piece) if callable(always) else always) or any(c.isspace() or c in '"\\' for c in piece) or (first and piece[0] in "_{")
             out.append(_quote(piece) if needs else piece)
         first = False
     return "".join(out)
 
 def _render_section(kind, template, vtext, always=False, short=False):
-    """Section text (after its mark) of a template with the value written in its place. `short`: a value alone or at the
-    end is left out (an empty or open section, see the comment above), for a value that cannot be written in a name."""
+    """Section text (after its mark) of a template with the value written in its place; `always` as in _render_typed.
+    `short`: a value alone or at the end is left out (an empty or open section, see the comment above lex_expr), for a
+    value that cannot be written in a name."""
     template = template or VALUE_SLOT
     if kind == "dir":
         names = template.split("/")
@@ -1099,7 +1103,17 @@ def compose_value_field(fields, templates, override_type, items=None, current=No
     candidates = []
     if fields is not None:
         if any(t is not None for t in templates.values()):
-            candidates += [sections(), sections(always=True)]
+            # Typed names that could be read as the value go in quotes: the last one ('\\A\\1\\"3"'), every one, then all
+            # names. The test is asked once per name, left to right.
+            readable = _value_readers(override_type, items)[1]
+            seen = []
+            candidates.append(sections(always=lambda name: seen.append(readable(lex_expr(name))) or False))
+            def nth(wanted):
+                calls = iter(range(len(seen)))
+                return lambda name: next(calls, -1) in wanted
+            last = max((k for k, ok in enumerate(seen) if ok), default=None)
+            if last is not None: candidates.append(sections(always=nth({last})))
+            candidates += [sections(always=nth({k for k, ok in enumerate(seen) if ok})), sections(always=True)]
         for always in (False, True):
             head = _quote_value_part(vtext, fields, override_type, always)
             for short in (False, True):
@@ -1159,7 +1173,7 @@ def has_naming(val): return val.use_dir or val.use_tag
 
 def names_each_value(val):
     """True when the value's naming gives each value its own folder or token ('\\15', '\\B\\15', '_x_15'); a typed
-    name alone ('15\\big') or no naming gives every value the same path."""
+    name alone ('\\big') or no naming gives every value the same path."""
     return any(names for _anchors, names in value_parts(val, "x").values())
 
 def add_value(values):
@@ -3156,12 +3170,23 @@ def naming_completions(scope, ctx, kind, text, current, other_parts, multi_part,
     if typed_mark and text: items += complete(text + typed_mark)  # the next link of the chain
     return items
 
-def search_results(typed, offers):
+def search_results(typed, offers, tab=()):
     """Search list from [(text, description)]: duplicates dropped, and the text as typed first. Blender highlights the
     only result (or one equal to the text) and Enter applies the highlighted one, so deleting a mark and pressing Enter
-    would bring the mark back: Enter keeps the text as typed, arrow down picks a suggestion."""
+    would bring the mark back: Enter keeps the text as typed, arrow down picks a suggestion.
+
+    Tab fills the longest start that every result beginning with the typed text shares (exact, case-sensitive), and
+    ends the edit when only one result begins with it. `tab` are the texts Tab should reach: a name completed with the
+    separator after it ('\\A\\'), so the next name can be typed right away. When they share more than the typed text,
+    the results that would stop Tab short (the text as typed among them) are left out; the callers offer two results
+    per completion (one would end the edit)."""
     unique = {}
     for text, desc in offers: unique.setdefault(text, desc)
+    reach = [t for t in tab if t.startswith(typed) and t != typed]
+    if typed and reach:
+        prefix = os.path.commonprefix(reach)
+        if len(prefix) > len(typed):
+            return [(t, d) for t, d in unique.items() if not t.startswith(typed) or t.startswith(prefix)]
     if typed and typed not in unique: unique = {typed: "Keep as typed", **unique}
     return list(unique.items())
 
@@ -3213,6 +3238,15 @@ def _taken_check(inp, val):
     others = [f for f in (value_fields(o, inp.override_type) for o in inp.values if o != val and not o.use_sweep) if f]
     return lambda fields: not fields["use_sweep"] and any(same_fields(inp.override_type, o, fields) for o in others)
 
+def _upstream_check(item):
+    """upstream(kind, name) for a field: whether a folder / token of that name exists above it (see _infer_value). The
+    scope is only built when it is asked."""
+    scope = []
+    def upstream(kind, name):
+        if not scope: scope.append(upstream_scope(item)[0])
+        return (kind, name) in scope[0]
+    return upstream
+
 def set_value_expr(self, text):
     """Parse a value field (see the comment above lex_expr) into the value's fields. Text that does not fit the input
     type, a single value another value of the input already has, or a name that cannot be a file name is rejected: the
@@ -3226,7 +3260,7 @@ def set_value_expr(self, text):
         return
     override_type = inp.override_type
     stored, taken = value_fields(self, override_type), _taken_check(inp, self)
-    try: fields, templates = parse_value_field(text, override_type, input_items(ng, node, inp), stored, taken)
+    try: fields, templates = parse_value_field(text, override_type, input_items(ng, node, inp), stored, taken, value_specs(self), _upstream_check(self))
     except ValueError: return
     if taken(fields): return
     # Typing over a blank value (a string just added as a permutation shows '\') fills in the value, and '*' makes the
@@ -3282,8 +3316,11 @@ def search_value_expr(self, context, edit_text):
     """Search list of a value field (see the comment above lex_expr). Free text is still allowed.
     - Menus and booleans list their items (and '*', every item) when the field opens and while the value written before
       the sections is not one of them, keeping the naming.
+    - The text can be read another way (see _infer_value): the other reading is offered too ('16\\' when '\\16' merges
+      into an upstream 16, '\\"big"' when '\\big' changes a string value).
     - The section typed last completes its chain of typed names (naming_completions) with upstream names that can
-      exist in this branch and still fit the other section; the value follows ('\\B\\15', '_B_15').
+      exist in this branch and still fit the other section, each twice: with the value after it ('\\A\\15') and ending
+      in the separator ('\\A\\', the value follows too), which Tab fills (see search_results).
     - A section not typed yet is offered: one per value ('\\15'), and while no section is typed also merged into each
       upstream name ('\\B\\15', '_B_15')."""
     owner = value_owner(self)
@@ -3292,14 +3329,24 @@ def search_value_expr(self, context, edit_text):
     override_type = inp.override_type
     items = input_items(ng, node, inp)
     read, readable = _value_readers(override_type, items)
-    def compose(fields, templates): return compose_value_field(fields, templates, override_type, items)
+    stored, stored_templates, taken = value_fields(self, override_type), value_specs(self), _taken_check(inp, self)
+    upstream = _upstream_check(self)
+    # Suggestions are read back as the field reads them when picked
+    def compose(fields, templates): return compose_value_field(fields, templates, override_type, items, (stored, stored_templates), upstream)
+    def parse(text, **kw):
+        args = dict(stored=stored, taken=taken, stored_templates=stored_templates, upstream=upstream)
+        args.update(kw)
+        try: return parse_value_field(text, override_type, items, **args)
+        except ValueError: return None, None
+    def same(a, b):
+        return a[0] is not None and b[0] is not None and same_fields(override_type, a[0], b[0]) and a[1] == b[1]
     opened = edit_text == value_expr(self, override_type, items)
-    try: fields, templates = parse_value_field(edit_text, override_type, items, value_fields(self, override_type), _taken_check(inp, self))
-    except ValueError: fields, templates = None, value_specs(self)
+    fields, templates = parse(edit_text)
+    if fields is None: templates = stored_templates
     chars = lex_expr(edit_text)
     try: value_chars, sections = split_field(chars, readable)
     except ValueError: value_chars, sections = [], []
-    offers = []
+    offers, tab = [], []
 
     if items is not None and (opened or (value_chars and not readable(value_chars))):
         query = "" if opened else expr_text(value_chars).lower()
@@ -3307,6 +3354,15 @@ def search_value_expr(self, context, edit_text):
         if not query:
             offers.append((compose({"use_sweep": True}, templates), "True and False" if override_type == 'BOOLEAN' else f"Every item ({len(items)} values)"))
     if fields is None: return search_results(edit_text, offers)
+
+    if not opened:
+        main = (fields, templates)
+        as_value = parse(edit_text, stored=None)  # names read as the value wherever they can be
+        if as_value[0] is not None and not same(as_value, main):
+            offers.append((compose(*as_value), f"Value {fields_text(as_value[0], override_type)}"))
+        as_names = parse(edit_text, stored_templates=None, upstream=None)  # names kept as typed, the value stays
+        if as_names[0] is not None and stored is not None and not same(as_names, main):
+            offers.append((compose(*as_names), f"Typed names, the value stays {fields_text(stored, override_type)}"))
 
     scope, ctx = upstream_scope(self)
     vtext = fields_text(fields, override_type)
@@ -3316,26 +3372,31 @@ def search_value_expr(self, context, edit_text):
     def other_parts(kind):
         template = templates[OTHER_KIND[kind]]
         return value_name_parts("", template, OTHER_KIND[kind])[0] if template is not None else []
-    stored = value_specs(self)
     if sections:
         kind, body, start, closed = sections[-1]
         at = _chain_end(kind, body, closed, is_value)
         chain, tail = (body, vtext) if at is None else (body[:at], edit_text[body[at][2]:].rstrip())
         head = edit_text[:chars[start][2] + 1]
         # A section holding only typed names lists their alternatives when the field opens
-        current = stored[kind] if stored[kind] is not None and VALUE_SLOT not in stored[kind] else ""
+        current = stored_templates[kind] if stored_templates[kind] is not None and VALUE_SLOT not in stored_templates[kind] else ""
         if kind == "dir": current = current.replace("/", "\\")
-        if not chain: offers.append((head + tail, "Folder per value" if kind == "dir" else "Filename token per value"))
-        elif at is None and _is_open(kind, body, closed): offers.append((edit_text.rstrip() + tail, "Then the value"))
         completions = naming_completions(scope, ctx, kind, expr_text(chain), current, other_parts(kind), False, _quote_suggested(kind))
-        offers += [(head + spec + tail, desc) for spec, desc in completions]
+        for spec, desc in completions:
+            offers.append((head + spec + tail, desc))
+            # The chain alone, while it is typed at the end of the section: the value follows its separator
+            if at is None:
+                tab.append(head + spec)
+                offers.append((head + spec, desc))
+        if not completions:
+            if not chain: offers.append((head + tail, "Folder per value" if kind == "dir" else "Filename token per value"))
+            elif at is None and _is_open(kind, body, closed): offers.append((edit_text.rstrip() + tail, "Then the value"))
     for kind in SCOPE_KINDS:
         if templates[kind] is not None: continue
         offers.append((compose(fields, {**templates, kind: VALUE_SLOT}), "Folder per value" if kind == "dir" else "Filename token per value"))
         if not sections:
             offers += [(compose(fields, {**templates, kind: legacy_naming_template(spec, kind)}), desc)
                        for spec, desc in naming_completions(scope, ctx, kind, "", "", [], False)]
-    return search_results(edit_text, offers)
+    return search_results(edit_text, offers, tab)
 
 def get_block_naming(self):
     return compose_block_naming(self.sub_path, self.tag)
@@ -3371,34 +3432,45 @@ def search_block_naming(self, context, edit_text):
     def other_parts(kind):
         text = typed.get(OTHER_KIND[kind])
         return split_path_parts(text) if kind == "tag" else split_tag_parts(text)
-    offers = []
+    offers, tab = [], []
     if sections:
         kind, body, start, _closed = sections[-1]
         head = edit_text[:chars[start][2] + 1] if start is not None else "\\"  # a bare folder gets its '\'
         completions = naming_completions(scope, ctx, kind, expr_text(body), stored[kind], other_parts(kind), True, _quote_suggested(kind))
-        offers += [(head + spec, desc) for spec, desc in completions]
+        # Each name ends in its separator, which Tab fills so the next name can be typed ('\\C\\' means folder C)
+        sep, other_mark = ("\\", "_") if kind == "dir" else ("_", "\\")
+        for spec, desc in completions:
+            tab.append(head + spec + sep)
+            offers.append((head + spec + sep, desc))
+        # Tab ends the edit when one result begins with the text: the other section's mark goes on after the only name
+        reach = [t for t in tab if t.startswith(edit_text) and t != edit_text]
+        if len(reach) == 1 and OTHER_KIND[kind] not in typed:
+            offers.append((reach[0] + other_mark, "Then a filename token" if kind == "dir" else "Then a folder"))
     try: sub_path, tag = parse_block_naming(edit_text)
     except ValueError: sub_path = tag = None
     for kind in SCOPE_KINDS:
         if kind in typed or sub_path is None: continue
         for spec, desc in naming_completions(scope, ctx, kind, "", "", other_parts(kind), True):
             offers.append((compose_block_naming(spec, tag) if kind == "dir" else compose_block_naming(sub_path, spec), desc))
-    return search_results(edit_text, offers)
+    return search_results(edit_text, offers, tab)
 
 class BatchSTLLogLine(bpy.types.PropertyGroup): text: bpy.props.StringProperty()
 
 EXPR_DESCRIPTION = (
     "The value and its naming: '\\' starts the folder, '_' the filename token, and the value goes where it is written.\n"
     "15: value only · \\15: folder 15 · _15: token 15 · \\15\\_15: both\n"
-    "15\\big, 15_big: the name instead of the value · \\15_mm, \\size_15, _15_mm: the value joined with text\n"
+    "\\big, _big: your name instead of the value (the value stays, hover the icon to see it) · \\15_mm, \\size_15, _15_mm: the value joined with text\n"
     "\\B\\15, _B_15: B, then the value. Names that exist upstream merge into that branch (\\C\\2\\15)\n"
+    "\\15 → \\16 changes the value, unless 16 exists upstream (then it merges). 16\\big: value and names at once\n"
+    "Tab completes an upstream name with its separator (\\A → \\A\\), so the next name can be typed\n"
     "Sweeps: \\0:0.5:5 (start:step:count), _{a, b} (strings), \\* (every menu item, True and False; replaces the other values)\n"
     "Quoted text is literal: \"a_b\". Clear the field to delete the value")
 
 BLOCK_NAMING_DESCRIPTION = (
     "Sub-folder and filename tokens of everything in this block: '\\' for folders, '_' for tokens.\n"
     "\\X: folder X · _X: token X · \\C\\2\\_B: folders C/2 and token B\n"
-    "Names that exist upstream merge into that branch: \\B applies only to the B branches")
+    "Names that exist upstream merge into that branch: \\B applies only to the B branches\n"
+    "Tab completes an upstream name with its separator (\\B → \\B\\), so the next name can be typed")
 
 class BatchSTLValue(bpy.types.PropertyGroup):
     # The table edits the value and its naming through `expr` (see lex_expr); the fields below are the stored data.
@@ -4708,7 +4780,9 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
             child_col = split.column()
             child_col.label(text="  • 15 = value only · \\15 = folder 15 · _15 = filename token 15 · \\15\\_15 = both", icon=ICONS['BLANK'])
             child_col.label(text="  • New inputs start as value only; + or a sweep adds \\ so permutations don't collide", icon=ICONS['ADD'])
-            child_col.label(text="  • 15\\big / 15_big (or \\big, _big): the name instead of the value", icon=ICONS['DIR'])
+            child_col.label(text="  • \\big / _big: your name instead of the value (not shown; it merges into an upstream big)", icon=ICONS['DIR'])
+            child_col.label(text="  • \\15 → \\16 changes the value, unless 16 exists upstream · 16\\big sets both", icon=ICONS['BLANK'])
+            child_col.label(text="  • Tab completes an upstream name with its separator: \\A → \\A\\, then type the next", icon=ICONS['MERGE'])
             child_col.label(text="  • \\15_mm, \\size_15, _15_mm: the value joined with text", icon=ICONS['DIR'])
             child_col.label(text="  • \\B\\15 / _B_15: B, then the value (B/15, Box_B_15)", icon=ICONS['TAG'])
             child_col.label(text="  • Sweeps: \\0:0.5:5 = start:step:count · _{a, b} = strings · \\* = all items (replaces other values)", icon=ICONS['SWEEP'])
