@@ -201,7 +201,7 @@ class BATCH_STL_OT_collection_actions(bpy.types.Operator):
 
 class BATCH_STL_OT_table_action(bpy.types.Operator):
     bl_idname = "batch_stl.table_action"
-    bl_label = "Table Action"
+    bl_label = "Override Action"
     bl_options = {'UNDO', 'INTERNAL'}
 
     action: bpy.props.StringProperty()
