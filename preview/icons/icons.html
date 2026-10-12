@@ -1,0 +1,145 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Combi Export icons</title>
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  svg { display: block; }
+</style>
+</head>
+<body>
+<!-- icons.html?n=1|2|3&p=cyan|graphite draws one 256x256 icon:
+     n: 1 variants, 2 folder, 3 matrix; p: the palette (gold by default) -->
+<svg id="art" width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="1" y2="1">
+      <stop id="plateA" offset="0"/>
+      <stop id="plateB" offset="1"/>
+    </linearGradient>
+    <linearGradient id="folderFront" x1="0" y1="0" x2="0" y2="1">
+      <stop id="folderTop" offset="0"/>
+      <stop id="folderBottom" offset="1"/>
+    </linearGradient>
+    <filter id="blur" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="5"/>
+    </filter>
+  </defs>
+  <rect x="0" y="0" width="256" height="256" rx="56" fill="url(#plate)"/>
+  <rect id="border" x="2" y="2" width="252" height="252" rx="54" fill="none" stroke-width="2"/>
+  <g id="art-body"></g>
+</svg>
+
+<script>
+const NS = 'http://www.w3.org/2000/svg';
+function el(name, attrs, parent) {
+  const e = document.createElementNS(NS, name);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+const pts = a => a.map(p => p.join(',')).join(' ');
+const EDGE = 'rgba(255,255,255,0.18)';
+
+// main: the geometry, accent: the highlighted variant. plate / folder / rule colour the rest.
+const THEMES = {
+  cyan: {
+    main:   {left: '#1f93b2', right: '#16708a', top: '#6fdcf2'},
+    accent: {left: '#9bc21f', right: '#6f8c12', top: '#d6f75c'},
+    plateA: '#1c2633', plateB: '#0b0f14', border: '#2c3b4e', rule: '#2c3b4e',
+    folderBack: '#1a7790', folderTop: '#63d8f0', folderBottom: '#2299b8'
+  },
+  graphite: {
+    main:   {left: '#8e97a6', right: '#5f6672', top: '#cdd3dc'},
+    accent: {left: '#e0457f', right: '#a82f5c', top: '#ff8fb5'},
+    plateA: '#2a2c33', plateB: '#0e0f12', border: '#3a3e48', rule: '#3a3e48',
+    folderBack: '#5a616d', folderTop: '#dfe3e9', folderBottom: '#98a1af'
+  },
+  gold: {
+    main:   {left: '#6f86a6', right: '#4c6180', top: '#aebfd8'},
+    accent: {left: '#dba932', right: '#a67c1c', top: '#ffd873'},
+    plateA: '#232833', plateB: '#0e1117', border: '#3a4356', rule: '#3a4356',
+    folderBack: '#4c6180', folderTop: '#c3d0e3', folderBottom: '#7f95b5'
+  }
+};
+const params = new URLSearchParams(location.search);
+const T = THEMES[params.get('p')] || THEMES.gold;
+document.getElementById('plateA').setAttribute('stop-color', T.plateA);
+document.getElementById('plateB').setAttribute('stop-color', T.plateB);
+document.getElementById('folderTop').setAttribute('stop-color', T.folderTop);
+document.getElementById('folderBottom').setAttribute('stop-color', T.folderBottom);
+document.getElementById('border').setAttribute('stroke', T.border);
+
+function shadow(g, cx, cy, rx, ry) {
+  el('ellipse', {cx, cy, rx, ry, fill: '#000', opacity: 0.6, filter: 'url(#blur)'}, g);
+}
+
+// Isometric box: footprint side sw, height hh, nearest bottom corner at (cx, cy).
+function box(g, cx, cy, sw, hh, c) {
+  const k = 0.866 * sw, h = 0.5 * sw;
+  shadow(g, cx, cy - h + 3, k * 1.2, h * 1.25);
+  const left  = [[cx - k, cy - h], [cx, cy], [cx, cy - hh], [cx - k, cy - hh - h]];
+  const right = [[cx, cy], [cx + k, cy - h], [cx + k, cy - hh - h], [cx, cy - hh]];
+  const top   = [[cx, cy - hh], [cx + k, cy - hh - h], [cx, cy - hh - sw], [cx - k, cy - hh - h]];
+  const common = {stroke: EDGE, 'stroke-width': 1.5, 'stroke-linejoin': 'round'};
+  el('polygon', {points: pts(left),  fill: c.left,  ...common}, g);
+  el('polygon', {points: pts(right), fill: c.right, ...common}, g);
+  el('polygon', {points: pts(top),   fill: c.top,   ...common}, g);
+}
+
+// Flat bar with a lighter cap: x centre, bottom y, width, height.
+function bar(g, cx, bottom, w, h, c) {
+  el('rect', {x: cx - w / 2, y: bottom - h, width: w, height: h, rx: 4, fill: c.left}, g);
+  el('rect', {x: cx - w / 2, y: bottom - h, width: w, height: Math.min(9, h), rx: 4, fill: c.top}, g);
+}
+
+// 1: three boxes of different width and height standing on one ground line.
+function iconVariants(g) {
+  const ground = 178;                       // y of each footprint's centre
+  const boxes = [
+    {cx: 49,  sw: 28, hh: 104, c: T.main},
+    {cx: 111, sw: 28, hh: 70,  c: T.accent},
+    {cx: 190, sw: 50, hh: 38,  c: T.main}
+  ];
+  for (const b of boxes) box(g, b.cx, ground + 0.5 * b.sw, b.sw, b.hh, b.c);
+}
+
+// 2: a folder with variant bars standing in it.
+function iconFolder(g) {
+  const bars = [
+    {cx: 88,  w: 24, h: 98},
+    {cx: 128, w: 46, h: 72},
+    {cx: 168, w: 24, h: 44}
+  ];
+  // back panel with the tab
+  el('path', {
+    d: 'M34 104 a12 12 0 0 1 12 -12 h42 l14 14 h96 a12 12 0 0 1 12 12 v78 H34 z',
+    fill: T.folderBack
+  }, g);
+  for (const b of bars) bar(g, b.cx, 150, b.w, b.h + 22, T.accent);
+  // front panel
+  el('path', {
+    d: 'M34 128 a12 12 0 0 1 12 -12 h164 a12 12 0 0 1 12 12 v62 a12 12 0 0 1 -12 12 h-164 a12 12 0 0 1 -12 -12 z',
+    fill: 'url(#folderFront)', stroke: EDGE, 'stroke-width': 1.5
+  }, g);
+}
+
+// 3: the width x height matrix, 2 rows (thin, thick) by 3 columns (tall, medium, short).
+function iconMatrix(g) {
+  const cols = [64, 128, 192];
+  const heights = [76, 50, 24];
+  const rows = [
+    {bottom: 118, w: 16, c: T.main},
+    {bottom: 214, w: 38, c: T.accent}
+  ];
+  for (const r of rows) {
+    el('path', {d: `M36 ${r.bottom + 7} H220`, stroke: T.rule, 'stroke-width': 3, 'stroke-linecap': 'round'}, g);
+    cols.forEach((cx, i) => bar(g, cx, r.bottom, r.w, heights[i], r.c));
+  }
+}
+
+const body = document.getElementById('art-body');
+({1: iconVariants, 2: iconFolder, 3: iconMatrix}[params.get('n')] || iconVariants)(body);
+</script>
+</body>
+</html>

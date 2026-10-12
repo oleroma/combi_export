@@ -1,0 +1,255 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Combi Export featured image (palette-driven)</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; }
+  svg { display: block; }
+  .ui   { font-family: "Segoe UI", system-ui, sans-serif; }
+  .mono { font-family: "Cascadia Mono", Consolas, "Courier New", monospace; }
+</style>
+</head>
+<body>
+<!-- thumbnail_palettes.html?p=paper|blue|mono|gold -->
+<svg id="art" width="1920" height="1080" viewBox="0 0 1920 1080" xmlns="http://www.w3.org/2000/svg"></svg>
+
+<script>
+// Every colour of the image. Roles: accent = title word / numbers / arrows / button, w* = width and folders,
+// t* = height and file name tokens, box = the isometric shapes and the file icons.
+const PALETTES = {
+  paper: {
+    bg: '#eef1f6', dot: '#1c2a44', dotOpacity: 0.10,
+    glowA: ['#3d6bff', 0.10], glowB: ['#3d6bff', 0.06],
+    ink: '#0f172a', accent: '#2b59ff', titleAccent: '#2b59ff', onAccent: '#ffffff',
+    subStrong: '#26324a', muted: '#5b6678', label: '#5b6678', hint: '#8591a5',
+    card: '#ffffff', cardStroke: '#d6dde9', shadow: ['#1c2a44', 0.12],
+    field: '#f3f6fb', pillBg: '#ffffff', pillStroke: '#d6dde9', pillText: '#26324a',
+    wText: '#2b59ff', wBorder: '#2b59ff', tText: '#0a8a5f', tBorder: '#0a8a5f', value: '#0f172a',
+    box: {left: '#5b86f2', right: '#3a60cf', top: '#a8c1ff'}, edge: 'rgba(10,20,60,0.18)', boxShadow: ['#1c2a44', 0.30],
+    folder: '#8da0c4', line: '#c5cedd', sep: '#c9d2e0'
+  },
+  blue: {
+    bg: '#0b1220', dot: '#ffffff', dotOpacity: 0.06,
+    glowA: ['#4c7dff', 0.20], glowB: ['#4c7dff', 0.10],
+    ink: '#f1f5fc', accent: '#6f9bff', titleAccent: '#6f9bff', onAccent: '#0b1220',
+    subStrong: '#dbe5f8', muted: '#8d9bb8', label: '#9aa8c3', hint: '#6c7a96',
+    card: '#121a2c', cardStroke: '#223250', shadow: ['#000000', 0.5],
+    field: '#0a1020', pillBg: '#121a2c', pillStroke: '#2a3a5c', pillText: '#dbe5f8',
+    wText: '#8fb2ff', wBorder: '#4d78e0', tText: '#e4edff', tBorder: '#b9cdf7', value: '#ffffff',
+    box: {left: '#4772b3', right: '#2f4f85', top: '#86aadd'}, edge: 'rgba(255,255,255,0.18)', boxShadow: ['#000000', 0.55],
+    folder: '#6f86b0', line: '#2c3d60', sep: '#2a3a5c'
+  },
+  mono: {
+    bg: '#111214', dot: '#ffffff', dotOpacity: 0.06,
+    glowA: ['#ffffff', 0.05], glowB: ['#ffffff', 0.04],
+    ink: '#f4f4f5', accent: '#f4f4f5', titleAccent: '#8f9298', onAccent: '#111214',
+    subStrong: '#e0e0e3', muted: '#9a9a9f', label: '#a2a2a8', hint: '#6f6f76',
+    card: '#1a1b1d', cardStroke: '#2b2c30', shadow: ['#000000', 0.5],
+    field: '#0f1012', pillBg: '#1a1b1d', pillStroke: '#2e2f34', pillText: '#e0e0e3',
+    wText: '#c8c8cf', wBorder: '#7b7b83', tText: '#ffffff', tBorder: '#d4d4d9', value: '#ffffff',
+    box: {left: '#8d9096', right: '#5c5f65', top: '#cfd1d6'}, edge: 'rgba(255,255,255,0.2)', boxShadow: ['#000000', 0.55],
+    folder: '#85888f', line: '#3a3b40', sep: '#34353a'
+  },
+  gold: {
+    bg: '#14171d', dot: '#ffffff', dotOpacity: 0.06,
+    glowA: ['#e9b949', 0.09], glowB: ['#6f86a6', 0.10],
+    ink: '#f3f4f6', accent: '#e9b949', titleAccent: '#e9b949', onAccent: '#14171d',
+    subStrong: '#e1e4ea', muted: '#9aa3b2', label: '#a5adbb', hint: '#707a8a',
+    card: '#1c2029', cardStroke: '#2b3240', shadow: ['#000000', 0.5],
+    field: '#10131a', pillBg: '#1c2029', pillStroke: '#2f3748', pillText: '#e1e4ea',
+    wText: '#a9bdd6', wBorder: '#6f86a6', tText: '#f2cc6b', tBorder: '#c99a2e', value: '#ffffff',
+    box: {left: '#6f86a6', right: '#4c6180', top: '#aebfd8'}, edge: 'rgba(255,255,255,0.2)', boxShadow: ['#000000', 0.55],
+    folder: '#7d90ad', line: '#343c4d', sep: '#303849'
+  }
+};
+const T = PALETTES[new URLSearchParams(location.search).get('p')] || PALETTES.blue;
+document.body.style.background = T.bg;
+
+const svg = document.getElementById('art');
+svg.innerHTML = `
+  <defs>
+    <radialGradient id="glowA" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(220 80) scale(900 560)">
+      <stop offset="0" stop-color="${T.glowA[0]}" stop-opacity="${T.glowA[1]}"/>
+      <stop offset="1" stop-color="${T.glowA[0]}" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowB" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1760 1040) scale(1000 620)">
+      <stop offset="0" stop-color="${T.glowB[0]}" stop-opacity="${T.glowB[1]}"/>
+      <stop offset="1" stop-color="${T.glowB[0]}" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="dots" width="40" height="40" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.4" fill="${T.dot}" opacity="${T.dotOpacity}"/>
+    </pattern>
+    <filter id="blur" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="8"/>
+    </filter>
+    <filter id="cardShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="${T.shadow[0]}" flood-opacity="${T.shadow[1]}"/>
+    </filter>
+  </defs>
+
+  <rect width="1920" height="1080" fill="${T.bg}"/>
+  <rect width="1920" height="1080" fill="url(#dots)"/>
+  <rect width="1920" height="1080" fill="url(#glowA)"/>
+  <rect width="1920" height="1080" fill="url(#glowB)"/>
+
+  <text class="ui" x="116" y="200" font-size="152" font-weight="700" letter-spacing="-3" fill="${T.ink}">Combi <tspan fill="${T.titleAccent}">Export</tspan></text>
+  <text class="ui" x="122" y="294" font-size="46" font-weight="600" fill="${T.subStrong}">Batch STL export with parametric variants</text>
+  <text class="ui" x="122" y="344" font-size="30" fill="${T.muted}">Geometry Nodes sweeps  ·  folder &amp; tag mapping  ·  background worker</text>
+
+  <rect x="1546" y="86" width="254" height="60" rx="30" fill="${T.pillBg}" stroke="${T.pillStroke}" stroke-width="2"/>
+  <text class="ui" x="1673" y="126" font-size="30" font-weight="600" text-anchor="middle" fill="${T.pillText}">Blender 5.2+</text>
+
+  <g class="ui" font-size="26" font-weight="700" letter-spacing="3" fill="${T.muted}">
+    <text x="124" y="414"><tspan fill="${T.accent}">1</tspan>  SET OVERRIDES</text>
+    <text x="694" y="414"><tspan fill="${T.accent}">2</tspan>  EVERY COMBINATION</text>
+    <text x="1264" y="414"><tspan fill="${T.accent}">3</tspan>  MAPPED STL FILES</text>
+  </g>
+
+  <!-- stage 1: overrides card -->
+  <rect x="120" y="440" width="480" height="560" rx="18" fill="${T.card}" stroke="${T.cardStroke}" stroke-width="2" filter="url(#cardShadow)"/>
+  <g class="ui">
+    <rect x="156" y="474" width="26" height="26" rx="6" fill="none" stroke="${T.wText}" stroke-width="3"/>
+    <circle cx="169" cy="487" r="4.5" fill="${T.wText}"/>
+    <text x="196" y="496" font-size="26" fill="${T.label}">Part  ·  Geometry Nodes</text>
+  </g>
+
+  <g class="mono">
+    <text x="156" y="559" font-size="26" fill="${T.label}">Width</text>
+    <rect x="270" y="524" width="298" height="50" rx="10" fill="${T.field}" stroke="${T.wBorder}" stroke-width="2.5"/>
+    <text x="290" y="558" font-size="28" fill="${T.value}">1<tspan fill="${T.wText}">\\thin</tspan></text>
+    <rect x="270" y="582" width="298" height="50" rx="10" fill="${T.field}" stroke="${T.wBorder}" stroke-width="2.5"/>
+    <text x="290" y="616" font-size="28" fill="${T.value}">2<tspan fill="${T.wText}">\\thick</tspan></text>
+  </g>
+  <text class="ui" x="156" y="660" font-size="22" fill="${T.hint}">a <tspan fill="${T.wText}">folder</tspan> per value</text>
+
+  <g class="mono">
+    <text x="156" y="717" font-size="26" fill="${T.label}">Height</text>
+    <rect x="270" y="682" width="298" height="50" rx="10" fill="${T.field}" stroke="${T.tBorder}" stroke-width="2.5"/>
+    <text x="290" y="716" font-size="28" fill="${T.value}">6<tspan fill="${T.tText}">_tall</tspan></text>
+    <rect x="270" y="740" width="298" height="50" rx="10" fill="${T.field}" stroke="${T.tBorder}" stroke-width="2.5"/>
+    <text x="290" y="774" font-size="28" fill="${T.value}">4<tspan fill="${T.tText}">_medium</tspan></text>
+    <rect x="270" y="798" width="298" height="50" rx="10" fill="${T.field}" stroke="${T.tBorder}" stroke-width="2.5"/>
+    <text x="290" y="832" font-size="28" fill="${T.value}">2<tspan fill="${T.tText}">_short</tspan></text>
+  </g>
+  <text class="ui" x="156" y="876" font-size="22" fill="${T.hint}">a <tspan fill="${T.tText}">file name token</tspan> per value</text>
+
+  <rect x="156" y="900" width="408" height="56" rx="14" fill="${T.accent}"/>
+  <g transform="translate(0 32)" stroke="${T.onAccent}" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M236 902 v-26 M224 887 l12 -12 l12 12"/>
+    <path d="M222 898 v8 a3 3 0 0 0 3 3 h22 a3 3 0 0 0 3 -3 v-8"/>
+  </g>
+  <text class="ui" x="276" y="936" font-size="30" font-weight="700" fill="${T.onAccent}">Export preset</text>
+
+  <g stroke="${T.accent}" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M616 720 H664 M650 703 L667 720 L650 737"/>
+    <path d="M1186 720 H1234 M1220 703 L1237 720 L1220 737"/>
+  </g>
+
+  <!-- stage 2: variants card -->
+  <rect x="690" y="440" width="480" height="560" rx="18" fill="${T.card}" stroke="${T.cardStroke}" stroke-width="2" filter="url(#cardShadow)"/>
+  <rect x="785" y="458" width="290" height="44" rx="22" fill="${T.field}" stroke="${T.pillStroke}" stroke-width="2"/>
+  <text class="ui" x="930" y="488" font-size="25" font-weight="600" text-anchor="middle" fill="${T.pillText}">2 × 3 = 6 variants</text>
+  <path d="M722 714 H1138" stroke="${T.sep}" stroke-width="2" stroke-dasharray="2 8" stroke-linecap="round"/>
+  <g id="shapes"></g>
+
+  <!-- stage 3: file tree card -->
+  <rect x="1260" y="440" width="540" height="560" rx="18" fill="${T.card}" stroke="${T.cardStroke}" stroke-width="2" filter="url(#cardShadow)"/>
+  <g id="tree"></g>
+`;
+
+const NS = 'http://www.w3.org/2000/svg';
+function el(name, attrs, parent) {
+  const e = document.createElementNS(NS, name);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+const pts = a => a.map(p => p.join(',')).join(' ');
+
+// The two inputs. A width unit is 36 px of footprint, a height unit 18.3 px.
+const WIDTHS  = [{name: 'thin', v: 1}, {name: 'thick', v: 2}];
+const HEIGHTS = [{name: 'tall', v: 6}, {name: 'medium', v: 4}, {name: 'short', v: 2}];
+const W_UNIT = 36, H_UNIT = 18.3;
+
+function shadow(g, cx, cy, rx, ry) {
+  el('ellipse', {cx, cy, rx, ry, fill: T.boxShadow[0], opacity: T.boxShadow[1], filter: 'url(#blur)'}, g);
+}
+
+// Isometric box: footprint side sw, height hh, nearest bottom corner at (cx, cy).
+function box(g, cx, cy, sw, hh) {
+  const k = 0.866 * sw, h = 0.5 * sw;
+  shadow(g, cx, cy - h + 4, k * 1.25, h * 1.3);
+  const left  = [[cx - k, cy - h], [cx, cy], [cx, cy - hh], [cx - k, cy - hh - h]];
+  const right = [[cx, cy], [cx + k, cy - h], [cx + k, cy - hh - h], [cx, cy - hh]];
+  const top   = [[cx, cy - hh], [cx + k, cy - hh - h], [cx, cy - hh - sw], [cx - k, cy - hh - h]];
+  const common = {stroke: T.edge, 'stroke-width': 1.5, 'stroke-linejoin': 'round'};
+  el('polygon', {points: pts(left),  fill: T.box.left,  ...common}, g);
+  el('polygon', {points: pts(right), fill: T.box.right, ...common}, g);
+  el('polygon', {points: pts(top),   fill: T.box.top,   ...common}, g);
+}
+
+// Label under a shape: "thin · tall", each word in the colour of the field that made it.
+function shapeLabel(g, cx, y, wName, hName) {
+  const t = el('text', {x: cx, y, 'font-size': 22, 'text-anchor': 'middle', 'class': 'ui', fill: T.hint}, g);
+  for (const [str, fill] of [[wName, T.wText], [' · ', T.hint], [hName, T.tText]]) {
+    el('tspan', {fill}, t).textContent = str;
+  }
+}
+
+(function drawShapes() {
+  const g = document.getElementById('shapes');
+  const cols = [780, 930, 1080];
+  const baselines = [668, 912];            // thin row, thick row
+  WIDTHS.forEach((w, r) => {
+    HEIGHTS.forEach((h, c) => {
+      box(g, cols[c], baselines[r], w.v * W_UNIT, h.v * H_UNIT);
+      shapeLabel(g, cols[c], baselines[r] + 32, w.name, h.name);
+    });
+  });
+})();
+
+(function drawTree() {
+  const g = document.getElementById('tree');
+  const y0 = 495, step = 56;
+  const rowY = i => y0 + step * i;
+  const line = {stroke: T.line, 'stroke-width': 2, 'stroke-linecap': 'round'};
+
+  function folder(x, cy) {
+    el('path', {
+      d: `M${x} ${cy - 7} a3 3 0 0 1 3 -3 h7 l3 3 h9 a3 3 0 0 1 3 3 v12 a3 3 0 0 1 -3 3 h-19 a3 3 0 0 1 -3 -3 z`,
+      fill: T.folder
+    }, g);
+  }
+  function text(x, cy, parts) {
+    const t = el('text', {x, y: cy + 10, 'font-size': 30, 'class': 'mono'}, g);
+    for (const [str, fill] of parts) el('tspan', {fill}, t).textContent = str;
+  }
+  // File icon: a small bar with the width and height of the box it came from.
+  function fileIcon(cx, cy, w, h) {
+    const bw = w.v * 11, bh = h.v * 5, top = cy + 15 - bh;
+    el('rect', {x: cx - bw / 2, y: top, width: bw, height: bh, rx: 2, fill: T.box.left}, g);
+    el('rect', {x: cx - bw / 2, y: top, width: bw, height: 4, rx: 2, fill: T.box.top}, g);
+  }
+
+  folder(1296, rowY(0));
+  text(1336, rowY(0), [['root', T.value]]);
+  el('path', {d: `M1308 ${rowY(0) + 16} V${rowY(1 + 4)}`, ...line}, g);
+
+  WIDTHS.forEach((w, n) => {
+    const r = 1 + 4 * n;                    // folder row; its 3 files follow
+    el('path', {d: `M1308 ${rowY(r)} H1330`, ...line}, g);
+    folder(1336, rowY(r));
+    text(1376, rowY(r), [[w.name, T.wText]]);
+    el('path', {d: `M1348 ${rowY(r) + 16} V${rowY(r + 3)}`, ...line}, g);
+    HEIGHTS.forEach((h, i) => {
+      const fy = rowY(r + 1 + i);
+      el('path', {d: `M1348 ${fy} H1368`, ...line}, g);
+      fileIcon(1384, fy, w, h);
+      text(1412, fy, [['Part', T.value], ['_' + h.name, T.tText], ['.stl', T.hint]]);
+    });
+  });
+})();
+</script>
+</body>
+</html>
