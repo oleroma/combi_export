@@ -154,3 +154,7 @@ Values with a folder or filename tag create branches, e.g. letters `A B C` × nu
 * **Blender:** 5.2.0 or newer.
 * **Dependencies:** Standard Blender Python environment (`numpy` is included with Blender).
 * **Installation:** Install as an extension from the Blender Preferences extensions menu or place the `combi_export` folder into your Blender extensions directory.
+
+## Tests
+
+`python tests/run.py` runs the test suite in headless Blender (set `BLENDER` to the executable if it is not in the default install location; `-k NAME` runs matching tests, `-v` lists them). It covers naming, the value field syntax, variant generation and branch merging, the STL writer, presets and migrations, the override table callbacks, and the export operator with a real background worker. The UI is not covered. Tests marked `expectedFailure` reproduce known bugs.
