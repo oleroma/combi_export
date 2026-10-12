@@ -167,10 +167,20 @@ def table_predictions(nodegroups):
     return _predictions[key]
 
 
+# Gap between a preset row's export button and the item's fields, in UI units (a unit is a button's width)
+PRESET_BUTTON_GAP = 1.0
+
 class BATCH_STL_UL_presets(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         job = get_job(item)
+        is_exporting = bool(job and job.is_exporting)
         row = layout.row(align=True)
+        # The export / cancel button leads the row, set apart from the item's fields by a gap
+        if is_exporting:
+            row.operator("batch_stl.cancel_export", text="", icon=ICONS['CANCEL']).preset_uid = item.uid
+        else:
+            row.operator("export_scene.batch_stl_multi", text="", icon=ICONS['EXPORT']).preset_index = index
+        row.separator(factor=PRESET_BUTTON_GAP)
         prop_row = row.row(align=True)
         prop_row.enabled = not is_any_exporting()
         prop_row.prop(item, "name", text="", emboss=False)
@@ -182,11 +192,8 @@ class BATCH_STL_UL_presets(bpy.types.UIList):
         icon_row.label(text="", icon=ICONS['NODE'] if metrics["has_ovr"] else ICONS['BLANK'])
         prop_row.prop(item, "preset_prefix", text="", emboss=False, icon=ICONS['DIR'])
 
-        if job and job.is_exporting:
+        if is_exporting:
             row.prop(job, "export_progress", text=job.export_status, slider=True)
-            row.operator("batch_stl.cancel_export", text="", icon=ICONS['CANCEL']).preset_uid = item.uid
-        else:
-            row.operator("export_scene.batch_stl_multi", text="", icon=ICONS['EXPORT']).preset_index = index
 
 class BATCH_STL_UL_collections(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
@@ -245,13 +252,15 @@ def format_count(stats, key="exp"):
     """A stats count; '5000+' when counting stopped at COUNT_LIMIT for some object."""
     return f"{stats[key]}+" if stats.get("capped") else stats[key]
 
-def draw_stats_table(parent_layout, stats_list):
-    box = parent_layout.box()
-    row = box.row(align=True)
-    row.alignment = 'CENTER'
+def draw_stats_table(parent_layout, stats_list, lead=None):
+    """A box with the counts of a level, centered in what the row has left. `lead(row)` draws buttons at its start."""
+    row = parent_layout.box().row()
+    if lead: lead(row)
+    stats = row.row(align=True)
+    stats.alignment = 'CENTER'
     for i, (val, icon) in enumerate(stats_list):
-        if i > 0: row.separator(factor=2.0)
-        row.label(text=str(val), icon=icon)
+        if i > 0: stats.separator(factor=2.0)
+        stats.label(text=str(val), icon=icon)
 
 def draw_table_op(parent, action, icon, level, depress=False, ng_idx=-1, n_idx=-1, i_idx=-1, v_idx=-1):
     """A batch_stl.table_action button for the override table of `level`: (is_collection, is_preset, is_global)."""
@@ -262,27 +271,26 @@ def draw_table_op(parent, action, icon, level, depress=False, ng_idx=-1, n_idx=-
     op.ng_idx, op.n_idx, op.i_idx, op.v_idx = ng_idx, n_idx, i_idx, v_idx
     return op
 
-def draw_header_overrides(layout, nodegroups, is_collection=False, is_preset=False, is_global=False):
-    """Panel header buttons of an override table (nothing for a level that does not exist). An empty table draws
-    nothing (see draw_overrides_table), so the header holds the way to add its first group, and a paste button while
-    the clipboard holds a group. Once the table has groups it draws its own add / paste buttons, and the header's
-    button clears the table instead."""
+def draw_override_buttons(layout, nodegroups, is_collection=False, is_preset=False, is_global=False):
+    """The buttons of a level's override table, at the start of the panel's first row (nothing for a level that does
+    not exist). An empty table draws nothing (see draw_overrides_table), so these hold the way to add its first group,
+    and a paste button while the clipboard holds a group. Once the table has groups it draws its own add / paste
+    buttons, and this button clears the table instead."""
     if nodegroups is None: return
     level = (is_collection, is_preset, is_global)
+    if len(nodegroups): buttons = [('CLEAR_GROUPS', ICONS['CLEAR'])]
+    else: buttons = [('ADD_GROUP', ICONS['OVR'])] + ([('PASTE_GROUP', ICONS['PASTE'])] if _clipboard.get("nodegroup") else [])
     row = layout.row(align=True)
     row.enabled = not is_any_exporting()
-    if len(nodegroups):
-        draw_table_op(row, 'CLEAR_GROUPS', ICONS['CLEAR'], level)
-    else:
-        draw_table_op(row, 'ADD_GROUP', ICONS['OVR'], level)
-        if _clipboard.get("nodegroup"): draw_table_op(row, 'PASTE_GROUP', ICONS['PASTE'], level)
-    layout.separator()  # keeps the buttons off the header's edge
+    row.ui_units_x = len(buttons)  # a button is one unit wide: the row stays as wide as its buttons
+    for action, icon in buttons: draw_table_op(row, action, icon, level)
 
 def draw_overrides_table(*args, **kwargs):
     with cached_menu_items(): _draw_overrides_table(*args, **kwargs)
 
 def _draw_overrides_table(layout, wm, nodegroups, is_collection, title_text, is_preset=False, is_global=False, is_locked=False):
-    # An empty table is not drawn: the panel header has the button that adds its first group (draw_header_overrides)
+    # An empty table is not drawn: the button that adds its first group is at the start of the panel's first row
+    # (draw_override_buttons)
     if len(nodegroups) == 0: return
 
     level = (is_collection, is_preset, is_global)
@@ -406,6 +414,8 @@ def _draw_overrides_table(layout, wm, nodegroups, is_collection, title_text, is_
             ng_sub = ng_row.row(align=True)
             ng_sub.alert = not is_override_group_valid(ng)
             ng_sub.prop(ng, "group_name", text="")
+            # An empty field has no clear button of its own, and emptying it is how a group is deleted
+            if not ng.group_name: draw_op(ng_sub, 'REMOVE_GROUP', ICONS['CLEAR'], ng_idx=ng_idx)
             ng_row.prop(ng, "naming", text="", icon=ng_icon)
             draw_op(ng_row, 'MOVE_GROUP_UP', ICONS['UP'], ng_idx=ng_idx)
             draw_op(ng_row, 'MOVE_GROUP_DOWN', ICONS['DOWN'], ng_idx=ng_idx)
@@ -459,19 +469,18 @@ class VIEW3D_PT_batch_export_stl_main(bpy.types.Panel):
     def draw_header(self, context):
         self.layout.label(text="", icon=ICONS['EXPORT'])
 
-    def draw_header_preset(self, context):
-        draw_header_overrides(self.layout, context.scene.batch_stl_global_nodegroups, is_global=True)
-
     def draw(self, context):
         layout = self.layout
         scene = context.scene
 
         any_exporting = is_any_exporting()
 
-        # The root folder with the JSON import / export buttons next to it. The label is a row of fixed width whose text
-        # sits at its right end, against the field (a field's own label is drawn inside it, from the left).
+        # The root folder, with the global overrides' buttons before it and the JSON import / export buttons next to it.
+        # The label is a row of fixed width whose text sits at its right end, against the field (a field's own label is
+        # drawn inside it, from the left).
         dir_row = layout.row()
         dir_row.enabled = not any_exporting
+        draw_override_buttons(dir_row, scene.batch_stl_global_nodegroups, is_global=True)
         label_row = dir_row.row()
         label_row.ui_units_x = ROOT_LABEL_UNITS
         label_row.alignment = 'RIGHT'
@@ -562,7 +571,7 @@ class VIEW3D_PT_batch_export_stl_info(bpy.types.Panel):
             split.column()
             child_col = split.column()
             child_col.label(text="  • Global > Preset > Collection > Object", icon=ICONS['BLANK'])
-            child_col.label(text="  • Panel header: the override button adds the first group, then X clears the level's overrides", icon=ICONS['OVR'])
+            child_col.label(text="  • Override button (start of the counts row, or the Root row): adds the first group, then X clears them", icon=ICONS['OVR'])
             child_col.label(text="  • Modifiers: Leave Node empty or set to <Modifier Interface>", icon=ICONS['BLANK'])
             child_col.label(text="  • Group Output: Can be targeted to override what the group outputs", icon=ICONS['NODE'])
             box_col.separator()
@@ -644,16 +653,12 @@ class VIEW3D_PT_batch_export_stl_presets(bpy.types.Panel):
         self.layout.label(text="", icon=ICONS['PRESET'])
 
     def draw_header_preset(self, context):
-        layout = self.layout
         active_preset = get_active_preset(context.scene)
-        if not active_preset: return
-
-        if active_preset.last_export_time > 0:
-            row = layout.row(align=True)
+        if active_preset and active_preset.last_export_time > 0:
+            row = self.layout.row(align=True)
             row.enabled = not is_any_exporting()
             row.label(text=f"{active_preset.last_export_time:.2f}s", icon=ICONS['TIME'])
             row.separator()
-        draw_header_overrides(layout, active_preset.nodegroups, is_preset=True)
 
     def draw(self, context):
         layout = self.layout
@@ -676,7 +681,7 @@ class VIEW3D_PT_batch_export_stl_presets(bpy.types.Panel):
             (g_stats['cols'], ICONS['COLLECTION']),
             (g_stats['objs'], ICONS['OBJECT']),
             (format_count(g_stats), ICONS['SWEEP'])
-        ])
+        ], lead=lambda row: draw_override_buttons(row, active_preset and active_preset.nodegroups, is_preset=True))
 
         if active_preset:
             draw_overrides_table(locked_col, context.window_manager, active_preset.nodegroups, False, f"Overrides for [ {active_preset.name} ]", is_preset=True, is_locked=any_exporting)
@@ -694,10 +699,6 @@ class VIEW3D_PT_batch_export_stl_collections(bpy.types.Panel):
 
     def draw_header(self, context):
         self.layout.label(text="", icon=ICONS['COLLECTION'])
-
-    def draw_header_preset(self, context):
-        active_col = get_active_collection(get_active_preset(context.scene))
-        if active_col: draw_header_overrides(self.layout, active_col.nodegroups, is_collection=True)
 
     def draw(self, context):
         layout = self.layout
@@ -719,7 +720,7 @@ class VIEW3D_PT_batch_export_stl_collections(bpy.types.Panel):
             (p_stats['cols'], ICONS['COLLECTION']),
             (p_stats['objs'], ICONS['OBJECT']),
             (format_count(p_stats), ICONS['SWEEP'])
-        ])
+        ], lead=lambda row: draw_override_buttons(row, active_col and active_col.nodegroups, is_collection=True))
 
         if active_col:
             draw_overrides_table(content_col, context.window_manager, active_col.nodegroups, True, f"Overrides [ {active_col.collection_name or 'Shared'} ]", is_locked=any_exporting)
@@ -739,10 +740,6 @@ class VIEW3D_PT_batch_export_stl_objects(bpy.types.Panel):
 
     def draw_header(self, context):
         self.layout.label(text="", icon=ICONS['OBJECT'])
-
-    def draw_header_preset(self, context):
-        active_obj = get_active_object(get_active_collection(get_active_preset(context.scene)))
-        if active_obj: draw_header_overrides(self.layout, active_obj.nodegroups)
 
     def draw(self, context):
         layout = self.layout
@@ -765,7 +762,7 @@ class VIEW3D_PT_batch_export_stl_objects(bpy.types.Panel):
         draw_stats_table(content_col, [
             (c_stats['objs'], ICONS['OBJECT']),
             (format_count(c_stats), ICONS['SWEEP'])
-        ])
+        ], lead=lambda row: draw_override_buttons(row, active_obj and active_obj.nodegroups))
 
         if active_obj:
             draw_overrides_table(content_col, context.window_manager, active_obj.nodegroups, False, f"Overrides [ {active_obj.name} ]", is_locked=any_exporting)

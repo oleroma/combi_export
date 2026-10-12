@@ -220,6 +220,7 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
     def description(cls, context, properties):
         act = properties.action
         if act == 'ADD_GROUP': return "Add an Override Group to this level"
+        if act == 'REMOVE_GROUP': return "Remove this empty Override Group (a group with a name is deleted by clearing its name field)"
         if act == 'CLEAR_GROUPS': return "Clear the overrides: remove every Override Group of this level"
         if act == 'COPY_GROUP': return "Copy this Override Group to clipboard"
         if act == 'PASTE_GROUP': return "Paste an Override Group from clipboard"
@@ -257,6 +258,8 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
         if self.action == 'ADD_GROUP':
             ng_list.add()
             self._show_table(context)
+        elif self.action == 'REMOVE_GROUP' and 0 <= self.ng_idx < len(ng_list):
+            ng_list.remove(self.ng_idx)
         elif self.action == 'CLEAR_GROUPS':
             ng_list.clear()
         elif self.action == 'COPY_GROUP' and 0 <= self.ng_idx < len(ng_list):

@@ -66,12 +66,13 @@ class FakeLayout:
     def __setattr__(self, key, value): self.attrs[key] = value  # alert, enabled, alignment, ...
     def _child(self, *_args, **_kwargs): return FakeLayout(self.log, self.path + (next(self.ids),), self.ids)
     row = column = box = split = _child
-    def separator(self, **_kwargs): pass
 
     def _record(self, **item):
         item = types.SimpleNamespace(layout=self, **item)
         self.log.append(item)
         return item
+
+    def separator(self, factor=1.0, **_kwargs): self._record(kind="separator", factor=factor)
 
     def label(self, text="", icon='NONE'): self._record(kind="label", text=text, icon=icon)
 
@@ -127,9 +128,9 @@ class PredictionCacheTests(BlenderTestCase):
         self.assertEqual(kept, ce.ui.predict_table(self.entry.nodegroups))
 
 
-class OverridesHeaderButtonTests(BlenderTestCase):
-    """An empty override table is not drawn: the panel header has the button that adds its first group, and clears the
-    table once it has groups."""
+class OverrideButtonTests(BlenderTestCase):
+    """An empty override table is not drawn: the button at the start of the panel's first row adds its first group,
+    and clears the table once it has groups."""
     PANELS = (  # panel, (is_collection, is_preset, is_global), the table's node groups
         (ce.ui.VIEW3D_PT_batch_export_stl_main, (False, False, True), lambda p: bpy.context.scene.batch_stl_global_nodegroups),
         (ce.ui.VIEW3D_PT_batch_export_stl_presets, (False, True, False), lambda p: p.nodegroups),
@@ -142,10 +143,11 @@ class OverridesHeaderButtonTests(BlenderTestCase):
         make_object("Box", group=make_gn_group())
         self.preset = make_preset()
 
-    def header(self, panel):
-        """The table_action buttons the panel's header draws."""
+    def buttons(self, panel):
+        """The override buttons the panel draws (its table is left out: it has buttons of its own)."""
         layout = FakeLayout()
-        panel.draw_header_preset(types.SimpleNamespace(layout=layout), bpy.context)
+        with mock.patch.object(ce.ui, "draw_overrides_table", lambda *args, **kwargs: None):
+            panel.draw(types.SimpleNamespace(layout=layout), bpy.context)
         return [item for item in layout.log if item.kind == "operator" and item.idname == "batch_stl.table_action"]
 
     @staticmethod
@@ -162,23 +164,24 @@ class OverridesHeaderButtonTests(BlenderTestCase):
 
     @staticmethod
     def press(op):
-        bpy.ops.batch_stl.table_action(action=op.action, is_collection=op.is_collection, is_preset=op.is_preset, is_global=op.is_global)
+        bpy.ops.batch_stl.table_action(action=op.action, is_collection=op.is_collection, is_preset=op.is_preset, is_global=op.is_global,
+                                       ng_idx=op.ng_idx, n_idx=op.n_idx, i_idx=op.i_idx, v_idx=op.v_idx)
 
-    def test_empty_table_has_a_header_button_and_no_table(self):
+    def test_empty_table_has_an_override_button_and_no_table(self):
         for panel, level, nodegroups in self.PANELS:
             with self.subTest(panel=panel.bl_label):
-                ops = self.header(panel)
+                ops = self.buttons(panel)
                 self.assertEqual([(op.action, op.icon, self.level(op)) for op in ops], [('ADD_GROUP', 'DECORATE_OVERRIDE', level)])
                 self.assertEqual(self.table(nodegroups(self.preset), level), [])
 
-    def test_header_buttons_add_a_group_to_their_own_table(self):
+    def test_override_buttons_add_a_group_to_their_own_table(self):
         for panel, level, nodegroups in self.PANELS:
             with self.subTest(panel=panel.bl_label):
-                op, = self.header(panel)
+                op, = self.buttons(panel)
                 self.press(op)
                 self.assertEqual(len(nodegroups(self.preset)), 1)
-                self.assertEqual([(op.action, op.icon, self.level(op)) for op in self.header(panel)], [('CLEAR_GROUPS', 'X', level)],
-                                 "the table has its own add button; the header's turns into clear")
+                self.assertEqual([(op.action, op.icon, self.level(op)) for op in self.buttons(panel)], [('CLEAR_GROUPS', 'X', level)],
+                                 "the table has its own add button; the lead button turns into clear")
                 self.assertIn('ADD_GROUP', [getattr(item, "action", None) for item in self.table(nodegroups(self.preset), level)])
 
     def test_clear_button_removes_every_group_of_its_level_only(self):
@@ -189,29 +192,52 @@ class OverridesHeaderButtonTests(BlenderTestCase):
         self.assertEqual(counts(), [2, 2, 2, 2])
         for done, (panel, level, nodegroups) in enumerate(self.PANELS, 1):
             with self.subTest(panel=panel.bl_label):
-                clear, = self.header(panel)
+                clear, = self.buttons(panel)
                 self.assertEqual(clear.action, 'CLEAR_GROUPS')
                 self.press(clear)
                 self.assertEqual(counts(), [0] * done + [2] * (len(self.PANELS) - done), "only this level is cleared")
-                self.assertEqual([op.action for op in self.header(panel)], ['ADD_GROUP'], "back to adding the first group")
+                self.assertEqual([op.action for op in self.buttons(panel)], ['ADD_GROUP'], "back to adding the first group")
                 self.assertEqual(self.table(nodegroups(self.preset), level), [])
 
     def test_the_add_button_returns_when_the_last_group_goes(self):
         ng = add_group(self.preset.nodegroups)
-        self.assertEqual([op.action for op in self.header(ce.ui.VIEW3D_PT_batch_export_stl_presets)], ['CLEAR_GROUPS'])
+        self.assertEqual([op.action for op in self.buttons(ce.ui.VIEW3D_PT_batch_export_stl_presets)], ['CLEAR_GROUPS'])
         ng.group_name = ""  # an emptied field deletes the group
         self.assertEqual(len(self.preset.nodegroups), 0)
-        self.assertEqual([op.action for op in self.header(ce.ui.VIEW3D_PT_batch_export_stl_presets)], ['ADD_GROUP'])
+        self.assertEqual([op.action for op in self.buttons(ce.ui.VIEW3D_PT_batch_export_stl_presets)], ['ADD_GROUP'])
 
     def test_paste_button_only_with_a_group_on_the_clipboard_and_an_empty_table(self):
         panel = ce.ui.VIEW3D_PT_batch_export_stl_objects
-        self.assertEqual([op.action for op in self.header(panel)], ['ADD_GROUP'])
+        self.assertEqual([op.action for op in self.buttons(panel)], ['ADD_GROUP'])
         ce.operators._clipboard["nodegroup"] = ce.data.copy_ng_to_dict(add_group(self.preset.nodegroups))
-        self.assertEqual([(op.action, op.icon) for op in self.header(panel)], [('ADD_GROUP', 'DECORATE_OVERRIDE'), ('PASTE_GROUP', 'PASTEDOWN')])
-        paste, = (op for op in self.header(panel) if op.action == 'PASTE_GROUP')
+        self.assertEqual([(op.action, op.icon) for op in self.buttons(panel)], [('ADD_GROUP', 'DECORATE_OVERRIDE'), ('PASTE_GROUP', 'PASTEDOWN')])
+        paste, = (op for op in self.buttons(panel) if op.action == 'PASTE_GROUP')
         self.press(paste)
         self.assertEqual(len(self.preset.collections[0].objects[0].nodegroups), 1)
-        self.assertEqual([op.action for op in self.header(panel)], ['CLEAR_GROUPS'], "a table with groups pastes from its own header")
+        self.assertEqual([op.action for op in self.buttons(panel)], ['CLEAR_GROUPS'], "a table with groups pastes from its own header row")
+
+    def test_a_group_without_a_name_has_a_remove_button(self):
+        """Its empty name field has no clear button, and clearing the field is how a group is deleted."""
+        for panel, level, nodegroups in self.PANELS:
+            with self.subTest(panel=panel.bl_label):
+                self.press(self.buttons(panel)[0])  # adds an empty group
+                self.assertEqual([ng.group_name for ng in nodegroups(self.preset)], [""])
+                remove, = (item for item in self.table(nodegroups(self.preset), level) if getattr(item, "action", None) == 'REMOVE_GROUP')
+                self.assertEqual((remove.icon, remove.ng_idx, self.level(remove)), ('X', 0, level))
+                self.press(remove)
+                self.assertEqual(len(nodegroups(self.preset)), 0)
+                self.assertEqual([op.action for op in self.buttons(panel)], ['ADD_GROUP'], "the table is gone, its first group can be added again")
+
+    def test_only_the_empty_group_gets_the_remove_button_and_goes(self):
+        nodegroups = self.preset.nodegroups
+        add_group(nodegroups, group="GN")
+        add_group(nodegroups, group="")
+        add_group(nodegroups, group="Other")
+        level = (False, True, False)
+        removes = [item for item in self.table(nodegroups, level) if getattr(item, "action", None) == 'REMOVE_GROUP']
+        self.assertEqual([op.ng_idx for op in removes], [1], "groups with a name have the field's own clear button")
+        self.press(removes[0])
+        self.assertEqual([ng.group_name for ng in nodegroups], ["GN", "Other"])
 
     OPEN_PROPS = ("batch_stl_ui_global_ovr", "batch_stl_ui_preset_ovr", "batch_stl_ui_collection_ovr", "batch_stl_ui_object_ovr")
 
@@ -225,8 +251,8 @@ class OverridesHeaderButtonTests(BlenderTestCase):
         for (panel, level, nodegroups), prop in zip(self.PANELS, self.OPEN_PROPS):
             with self.subTest(panel=panel.bl_label):
                 self.collapse_tables()
-                header_add, = self.header(panel)
-                self.press(header_add)
+                lead_add, = self.buttons(panel)
+                self.press(lead_add)
                 self.assertEqual(self.open_tables(), [p == prop for p in self.OPEN_PROPS], "only the table of this level opens")
                 self.collapse_tables()
                 table_add = next(item for item in self.table(nodegroups(self.preset), level) if getattr(item, "action", None) == 'ADD_GROUP')
@@ -238,7 +264,7 @@ class OverridesHeaderButtonTests(BlenderTestCase):
         ce.operators._clipboard["nodegroup"] = ce.data.copy_ng_to_dict(add_group(self.preset.nodegroups))
         object_panel = ce.ui.VIEW3D_PT_batch_export_stl_objects
         self.collapse_tables()
-        paste, = (op for op in self.header(object_panel) if op.action == 'PASTE_GROUP')
+        paste, = (op for op in self.buttons(object_panel) if op.action == 'PASTE_GROUP')
         self.press(paste)
         self.assertEqual(self.open_tables(), [False, False, False, True])
 
@@ -250,17 +276,18 @@ class OverridesHeaderButtonTests(BlenderTestCase):
         self.assertEqual((len(nodegroups()), self.open_tables()), (0, [False] * 4))
         add_group(nodegroups())
         self.collapse_tables()
-        clear, = self.header(object_panel)
+        clear, = self.buttons(object_panel)
         self.press(clear)
         self.assertEqual((len(nodegroups()), self.open_tables()), (0, [False] * 4))
 
     def test_no_button_without_an_active_target(self):
-        """No active collection or object: nothing to add a table to."""
+        """No active collection or object: nothing to add a table to (and the panels that need one are not drawn)."""
         self.preset.collections.clear()
-        self.assertEqual(self.header(ce.ui.VIEW3D_PT_batch_export_stl_collections), [])
-        self.assertEqual(self.header(ce.ui.VIEW3D_PT_batch_export_stl_objects), [])
+        self.assertEqual(self.buttons(ce.ui.VIEW3D_PT_batch_export_stl_collections), [])
+        self.assertFalse(ce.ui.VIEW3D_PT_batch_export_stl_objects.poll(bpy.context))
         bpy.context.scene.batch_stl_presets.clear()
-        self.assertEqual(self.header(ce.ui.VIEW3D_PT_batch_export_stl_presets), [])
+        self.assertEqual(self.buttons(ce.ui.VIEW3D_PT_batch_export_stl_presets), [])
+        self.assertFalse(ce.ui.VIEW3D_PT_batch_export_stl_collections.poll(bpy.context))
 
 
 class PanelLayoutTests(BlenderTestCase):
@@ -296,12 +323,39 @@ class PanelLayoutTests(BlenderTestCase):
                 self.assertEqual({op.layout.path for op in ops}, {column.path}, "one column")
                 self.assertEqual(column.path[:-1], lst.layout.path, "in the row that holds the list")
 
-    def test_headers_hold_the_override_button_only(self):
+    def test_headers_hold_no_buttons(self):
+        bpy.context.scene.batch_stl_presets[0].last_export_time = 1.5
         for panel in (ce.ui.VIEW3D_PT_batch_export_stl_main, ce.ui.VIEW3D_PT_batch_export_stl_presets,
                       ce.ui.VIEW3D_PT_batch_export_stl_collections, ce.ui.VIEW3D_PT_batch_export_stl_objects):
             with self.subTest(panel=panel.bl_label):
-                log = self.drawn(panel, "draw_header_preset")
-                self.assertEqual({item.idname for item in log if item.kind == "operator"}, {"batch_stl.table_action"})
+                header = getattr(panel, "draw_header_preset", None)
+                log = self.drawn(panel, "draw_header_preset") if header else []
+                self.assertEqual([item for item in log if item.kind in ("operator", "prop")], [])
+        times = [item.text for item in self.drawn(ce.ui.VIEW3D_PT_batch_export_stl_presets, "draw_header_preset") if item.kind == "label"]
+        self.assertEqual(times, ["1.50s"], "the last export time is a label, it stays")
+
+    def test_override_buttons_lead_the_stats_row(self):
+        for panel in (ce.ui.VIEW3D_PT_batch_export_stl_presets, ce.ui.VIEW3D_PT_batch_export_stl_collections,
+                      ce.ui.VIEW3D_PT_batch_export_stl_objects):
+            with self.subTest(panel=panel.bl_label):
+                log = self.drawn(panel)
+                stats = [item for item in log if item.kind == "label" and item.layout.attrs.get("alignment") == 'CENTER']
+                self.assertTrue(stats)
+                button, = self.operators(log, "batch_stl.table_action")
+                self.assertEqual((button.action, button.icon), ('ADD_GROUP', 'DECORATE_OVERRIDE'))
+                self.assertEqual(button.layout.attrs["ui_units_x"], 1, "as wide as its button")
+                self.assertEqual(button.layout.path[:-1], stats[0].layout.path[:-1], "in the stats row")
+                self.assertLess(log.index(button), log.index(stats[0]), "before the counts")
+
+    def test_global_override_button_leads_the_root_folder_row(self):
+        """The Combi Export panel has no stats row: its first row is the root folder."""
+        log = self.drawn(ce.ui.VIEW3D_PT_batch_export_stl_main)
+        button, = self.operators(log, "batch_stl.table_action")
+        self.assertEqual((button.action, button.is_global), ('ADD_GROUP', True))
+        root, = (item for item in log if item.kind == "prop" and item.prop == "batch_stl_root_dir")
+        label, = (item for item in log if item.kind == "label" and item.text == "Root:")
+        self.assertEqual(button.layout.path[:-1], root.layout.path, "in the root folder's row")
+        self.assertLess(log.index(button), log.index(label))
 
     def test_json_buttons_share_the_root_folder_row(self):
         log = self.drawn(ce.ui.VIEW3D_PT_batch_export_stl_main)
@@ -317,3 +371,25 @@ class PanelLayoutTests(BlenderTestCase):
         # The label comes first, then the field, then the buttons
         order = [log.index(label), log.index(root), log.index(json_ops[0])]
         self.assertEqual(order, sorted(order))
+
+    def draw_preset_item(self):
+        layout = FakeLayout()
+        preset = bpy.context.scene.batch_stl_presets[0]
+        ce.ui.BATCH_STL_UL_presets.draw_item(None, bpy.context, layout, bpy.context.scene, preset, 0, None, "", 0)
+        return layout.log
+
+    def test_preset_export_button_leads_its_row_set_apart_by_a_gap(self):
+        """Export, and Cancel while it runs, come before the name field, with a gap after them."""
+        job = ce.data.get_job(bpy.context.scene.batch_stl_presets[0], create=True)
+        for exporting, idname, icon in ((False, "export_scene.batch_stl_multi", 'EXPORT'), (True, "batch_stl.cancel_export", 'CANCEL')):
+            with self.subTest(exporting=exporting):
+                job.is_exporting = exporting
+                log = self.draw_preset_item()
+                button, = (item for item in log if item.kind == "operator")
+                self.assertEqual((button.idname, button.icon), (idname, icon))
+                gap, = (item for item in log if item.kind == "separator" and item.layout.path == button.layout.path)
+                name, = (item for item in log if item.kind == "prop" and item.prop == "name")
+                self.assertLess(log.index(button), log.index(gap))
+                self.assertLess(log.index(gap), log.index(name))
+                self.assertGreaterEqual(gap.factor, 1.0)
+                self.assertEqual(any(item.kind == "prop" and item.prop == "export_progress" for item in log), exporting)
