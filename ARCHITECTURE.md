@@ -113,7 +113,7 @@ When generating variations for an object, overrides are gathered in hierarchical
 - **Condition**: Decided per object: no override applies to it (none is defined, or none targets a node group its modifiers use).
 - **Mechanism**:
   - Resolves the objects Blender evaluates in the mapped collections (`iter_export_objects`).
-  - Computes evaluated geometry using `obj.evaluated_get(depsgraph).to_mesh()`, plus unrealized instances found through `depsgraph.object_instances` (`collect_instance_arrays`).
+  - Computes evaluated geometry using `obj.evaluated_get(depsgraph).to_mesh()`, plus unrealized instances found through `depsgraph.object_instances` (`collect_instance_arrays`). That iterator leaves out objects hidden with the eye icon (`hide_set`), instances included; a collection's eye does not matter. `eye_unhidden` therefore unhides such targets for the pass and hides them again in a `finally`. Toggling the eye re-evaluates no geometry, pushes no undo step from the operator (it has no `UNDO` flag) and leaves the selection as it was (a hidden object is never selected).
   - Streams geometry to disk using `write_object_stl`.
   - Cleans up evaluated mesh data via `to_mesh_clear()`.
 
@@ -137,6 +137,7 @@ When generating variations for an object, overrides are gathered in hierarchical
        - Restores the baseline of every socket the variant leaves out (`revert_overrides(..., skip=override_targets(combo))`), so a parameter without a value in this branch is back at its default instead of keeping the previous variant's value.
        - Applies overrides via `apply_overrides`.
        - Calls `bpy.context.view_layer.update()` and fetches updated depsgraph.
+       - Collects the batch's unrealized instances (`collect_instance_arrays`, eye-hidden objects included as on the direct path).
        - Writes STL files via `export_object_stl` (a wrapper around `write_object_stl` that logs an unwritable file as `FAILED` and continues).
      - **Restoration (`revert_overrides`)**: Re-applies baseline values and links, restores layer collection exclusion states.
   5. **Teardown**:

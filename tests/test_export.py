@@ -12,8 +12,9 @@ import warnings
 
 import bpy
 import combi_export as ce
-from helpers import (BlenderTestCase, ContextProxy, ExportRun, cube_mesh, get_collection, make_gn_group, make_object,
-                     make_preset, override, planned_paths, read_stl, run_export, stl_bounds, write_job, written_files)
+from helpers import (BlenderTestCase, ContextProxy, ExportRun, cube_mesh, get_collection, make_gn_group,
+                     make_instancing_group, make_object, make_preset, override, planned_paths, read_stl, run_export,
+                     stl_bounds, write_job, written_files)
 
 TIMER = types.SimpleNamespace(type='TIMER')
 
@@ -47,6 +48,35 @@ class DirectExportTests(BlenderTestCase):
         result, _run = run_export()
         self.assertEqual(result, {'FINISHED'})
         self.assertEqual(written_files(self.tmp), ["EyeHidden.stl", "Visible.stl"])
+
+    def test_eye_hidden_objects_keep_their_instances_and_visibility(self):
+        """Objects hidden with the eye icon (their own or their collection's) are written with their instances, and the
+        open file's visibility, selection and active object are as before."""
+        group = make_instancing_group(count=10)
+        make_object("Shown", group=group).select_set(True)
+        hidden = make_object("Hidden", group=group)
+        get_collection("EyeCol", parent=get_collection("Parts"))
+        make_object("InEyeCol", collection="EyeCol", group=group)
+        both = make_object("BothHidden", collection="EyeCol", group=group)
+        view_layer = bpy.context.view_layer
+        eye_col = lambda: view_layer.layer_collection.children["Parts"].children["EyeCol"]
+        eye_col().hide_viewport = True
+        hidden.hide_set(True)
+        both.hide_set(True)
+        view_layer.objects.active = hidden
+        make_preset()
+
+        def state():
+            objects = {ob.name: (ob.hide_get(), ob.visible_get(), ob.select_get()) for ob in bpy.data.objects}
+            return objects, eye_col().hide_viewport, view_layer.objects.active.name
+        before = state()
+        result, run = run_export()
+        self.assertEqual(result, {'FINISHED'}, run.log())
+        names = ["BothHidden", "Hidden", "InEyeCol", "Shown"]
+        self.assertEqual(written_files(self.tmp), [f"{n}.stl" for n in names])
+        for name in names:
+            self.assertEqual(len(read_stl(os.path.join(self.tmp, f"{name}.stl"))[1]), 10 * 12, name)
+        self.assertEqual(state(), before)
 
 
 class RefusalTests(BlenderTestCase):
@@ -134,6 +164,18 @@ class WorkerExportTests(BlenderTestCase):
         ce.write_object_stl(direct, box, bpy.context.evaluated_depsgraph_get())
         with open(direct, "rb") as a, open(os.path.join(self.tmp, "B/Box.stl"), "rb") as b:
             self.assertEqual(a.read(), b.read())
+
+    def test_worker_writes_instances_of_eye_hidden_objects(self):
+        make_object("Inst", group=make_instancing_group(count=10)).hide_set(True)
+        preset = make_preset()
+        override(preset.nodegroups, "Vertices X", "INT", "\\2", "\\3", group="Inst", node="Cube [MESH_PRIMITIVE_CUBE]")
+        self.assertEqual(sorted(planned_paths()), ["2/Inst.stl", "3/Inst.stl"])
+        result, run = run_export()
+        self.assertEqual(result, {'FINISHED'}, "\n".join(run.log()))
+        # 10 cubes of 12 triangles; with 3 vertices along X each cube has 2 more quads on 4 sides
+        for path, tris in (("2/Inst.stl", 10 * 12), ("3/Inst.stl", 10 * 20)):
+            self.assertEqual(len(read_stl(os.path.join(self.tmp, path))[1]), tris, path)
+        self.assertTrue(bpy.data.objects["Inst"].hide_get())
 
     # BUG: the worker exports from bpy.context.scene, the scene of the saved file's first window, and falls back to the
     # preset *index* when the uid is not there. Started from a second window showing another scene, it exports a

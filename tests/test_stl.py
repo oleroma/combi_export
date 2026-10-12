@@ -1,13 +1,12 @@
 """The vectorized binary STL writer: file layout, world transforms, normals and winding, instances, skips."""
 import math
 import os
-import unittest
 
 import numpy as np
 
 import bpy
 import combi_export as ce
-from helpers import BlenderTestCase, cube_mesh, make_instancing_group, make_object, read_stl
+from helpers import BlenderTestCase, cube_mesh, get_collection, make_instancing_group, make_object, read_stl
 
 
 class STLWriterTests(BlenderTestCase):
@@ -83,16 +82,41 @@ class STLWriterTests(BlenderTestCase):
         path, _ = self.write(ob)
         self.assertEqual(len(read_stl(path)[1]), 10 * 12)
 
-    # BUG: depsgraph.object_instances skips objects hidden with the eye icon, so an eye-hidden object loses its
-    # unrealized instances (README: hiding with the eye icon does not skip an object). An object whose output is
-    # only instances is then not written at all ("SKIPPED (no geometry)").
-    @unittest.expectedFailure
     def test_instances_of_an_eye_hidden_object_are_included(self):
         ob = make_object("Inst", group=make_instancing_group(count=10))
         ob.hide_set(True)
         path, result = self.write(ob)
         self.assertEqual(result, path)
         self.assertEqual(len(read_stl(path)[1]), 10 * 12)
+        self.assertTrue(ob.hide_get(), "the object is hidden again")
+
+    def test_instances_in_an_eye_hidden_collection_are_included(self):
+        group = make_instancing_group(count=10)
+        inner = get_collection("Inner", parent=get_collection("Outer"))
+        alone = make_object("Alone", collection="Outer", group=group)
+        nested = make_object("Nested", collection=inner.name, group=group)
+        also_eye_hidden = make_object("AlsoEyeHidden", collection=inner.name, group=group)
+        also_eye_hidden.hide_set(True)
+        bpy.context.view_layer.layer_collection.children["Outer"].hide_viewport = True
+        for ob in (alone, nested, also_eye_hidden):
+            with self.subTest(ob.name):
+                path, result = self.write(ob, f"{ob.name}.stl")
+                self.assertEqual(result, path)
+                self.assertEqual(len(read_stl(path)[1]), 10 * 12)
+        self.assertTrue(bpy.context.view_layer.layer_collection.children["Outer"].hide_viewport)
+        self.assertEqual([ob.hide_get() for ob in (alone, nested, also_eye_hidden)], [False, False, True])
+
+    def test_eye_is_restored_when_collecting_fails(self):
+        ob = make_object("Inst", group=make_instancing_group(count=2))
+        ob.hide_set(True)
+        def broken(*_args): raise ValueError("broken")
+        original, ce.mesh_to_stl_array = ce.mesh_to_stl_array, broken
+        try:
+            with self.assertRaises(ValueError):
+                ce.collect_instance_arrays(bpy.context.evaluated_depsgraph_get(), [ob])
+        finally:
+            ce.mesh_to_stl_array = original
+        self.assertTrue(ob.hide_get())
 
     def test_text_object(self):
         txt = bpy.data.objects.new("Text", bpy.data.curves.new("Text", 'FONT'))
