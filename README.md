@@ -1,5 +1,7 @@
 # Combi Export
 
+<img src="preview/thumbnail_gold.png" alt="Combi Export: overrides for Width (thin, thick) and Height (tall, medium, short) give 2 x 3 = 6 variants, written as mapped STL files in a folder tree" width="100%">
+
 A high-performance batch export pipeline and parametric permutation engine for Blender 5.2+. Built around a custom vectorized NumPy binary STL generator and an adaptive dual-path execution engine, it enables one-click exporting of scene collections, multi-dimensional parameter sweeping via Geometry Nodes and modifiers, and automated variant generation.
 
 ---
