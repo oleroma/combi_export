@@ -4,14 +4,15 @@ import os
 import re
 import sys
 
-_INVALID_NAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-# Device names Windows reserves (COM¹ etc. with superscript digits too), also with any extension: 'CON.stl', 'nul .txt'
+# Spaces are not allowed in names: they become '_' like the characters a file name cannot hold
+_INVALID_NAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f ]')
+# Device names Windows reserves (COM¹ etc. with superscript digits too), also with any extension: 'CON.stl', 'nul.txt'
 _WINDOWS_RESERVED = {"con", "prn", "aux", "nul"} | {port + n for port in ("com", "lpt") for n in "0123456789¹²³"}
 
 def sanitize_name(text):
     """Make text safe to use inside a single file or folder name on every OS."""
     s = _INVALID_NAME_CHARS.sub("_", str(text))
-    if s.split('.')[0].rstrip(' ').lower() in _WINDOWS_RESERVED:
+    if s.split('.')[0].lower() in _WINDOWS_RESERVED:
         s = f"_{s}"
     return s
 
@@ -19,6 +20,11 @@ def sanitize_whole_name(text):
     """A whole file-safe folder name or file name stem: edge spaces and dots dropped (Windows drops them itself), then
     sanitized, so the reserved-name check sees the final name ('CON ' is the device CON)."""
     return sanitize_name(str(text).strip(" ."))
+
+def underscore_spaces(text):
+    """A name field's text without spaces, as the names will be written: a space inside a name becomes '_'. Spaces at
+    the edges and around a '/' or '\\' only separated names, so they are dropped (sanitize_whole_name does the same)."""
+    return re.sub(r" *([\\/]) *", r"\1", str(text).strip(" ")).replace(" ", "_")
 
 def split_path_parts(path_text):
     """Split a user-typed sub-path into safe folder names; empty, '.' and '..' parts are dropped."""
@@ -87,7 +93,7 @@ def split_value_tag_parts(text):
     """Split a value tag field into filename tokens: '/' separates tokens. Unlike split_tag_parts, '_' at the edges is
     kept, so a token like 'x_' (made by the value 'x_') can be named."""
     if not text: return []
-    parts = (sanitize_name(p).strip(" ") for p in re.split(r"[\\/]", text))
+    parts = (sanitize_name(p.strip(" ")) for p in re.split(r"[\\/]", text))
     return [p for p in parts if p]
 
 def segment_tag(name, is_known):

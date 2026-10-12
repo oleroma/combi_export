@@ -6,7 +6,7 @@ import types
 
 import bpy
 import combi_export as ce
-from helpers import MODIFIER, BlenderTestCase, add_group, add_node, make_gn_group, make_object, make_preset
+from helpers import MODIFIER, BlenderTestCase, add_group, add_node, make_gn_group, make_object, make_preset, planned_paths
 
 
 class TableTestCase(BlenderTestCase):
@@ -96,6 +96,24 @@ class ValueFieldTests(TableTestCase):
         self.assertEqual(self.exprs(inp), ["\\A", "\\B"])
         inp.values[0].expr = "*"
         self.assertEqual(self.exprs(inp), ["\\*"])
+
+
+class BlockNamingFieldTests(TableTestCase):
+    def test_spaces_in_names_become_underscores(self):
+        for block in (self.ng, self.node):
+            with self.subTest(block=type(block).__name__):
+                block.naming = "\\my dir\\sub dir _my tag"
+                self.assertEqual((block.sub_path, block.tag, block.naming), ("my_dir/sub_dir", "my_tag", "\\my_dir\\sub_dir\\_my_tag"))
+                block.naming = "\\a:b"  # a character a name cannot hold is still rejected
+                self.assertEqual(block.sub_path, "my_dir/sub_dir")
+
+    def test_value_with_a_space_is_named_with_an_underscore(self):
+        inp = self.new_input("Word")
+        inp.values[0].expr = "my text"
+        self.table_action('VALUE_ACTION', i_idx=0, v_idx=0)
+        inp.values[1].expr = "other text"
+        self.assertEqual(self.exprs(inp), ["\\my text", "\\other text"])
+        self.assertEqual(planned_paths(), ["my_text/Box.stl", "other_text/Box.stl"])
 
 
 class ValueActionTests(TableTestCase):

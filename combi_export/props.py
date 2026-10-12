@@ -9,7 +9,8 @@ from .common import (DELETED, MAX_SWEEP_STEPS, edit_callback, in_raw_edits, mark
     raw_edits)
 from .nodes import (clean_node_name, default_value_text, get_menu_switch_items, get_socket_default_value,
     get_supported_inputs, get_target_node_names, infer_input_type)
-from .naming import SCOPE_KINDS, VALUE_SLOT, legacy_naming_template, split_path_parts, split_tag_parts, value_name_parts
+from .naming import (SCOPE_KINDS, VALUE_SLOT, legacy_naming_template, split_path_parts, split_tag_parts, underscore_spaces,
+    value_name_parts)
 from .fields import (add_value, compose_block_naming, compose_value_field, expr_text, fields_text, _is_open, lex_expr,
     name_permutations, parse_block_naming, parse_number, parse_value_field, _render_typed, same_fields, _slot_run,
     _split_bare, split_field, value_expr, value_fields, _value_readers, _value_runs, value_specs)
@@ -229,14 +230,14 @@ def on_value_update(prop_name, label=""):
             setattr(self, "prev_" + prop_name, getattr(self, prop_name))
     return update
 
-def on_no_spaces_update(prop_name, label=""):
-    @edit_callback(label, prop_name, "prev_" + prop_name)
+def on_name_field_update(prop_name):
+    """Update callback of a plain name field (tag, sub-folder, preset root): spaces are not allowed in names, so they
+    are written as '_' (underscore_spaces)."""
     def update(self, context):
         val = getattr(self, prop_name)
-        if " " in val:
-            with raw_edits(): setattr(self, prop_name, getattr(self, "prev_" + prop_name))
-        else:
-            setattr(self, "prev_" + prop_name, val)
+        fixed = underscore_spaces(val)
+        if fixed != val: setattr(self, prop_name, fixed)
+        mark_dirty()
     return update
 
 _PATH_STEP = re.compile(r"(\w+)\[(\d+)\]")
@@ -710,12 +711,12 @@ class BatchSTLNodeGroup(bpy.types.PropertyGroup):
     nodes: bpy.props.CollectionProperty(type=BatchSTLNode)
 
 def get_export_name(self):
-    return self.name_override or self.name
+    return underscore_spaces(self.name_override or self.name)
 
 def set_export_name(self, value):
-    # Empty, or the object's own name, means "follow the object" (renames included)
-    value = value.strip()
-    self.name_override = "" if value == self.name else value
+    # Empty, or the object's own name (as the file name has it, without spaces), means "follow the object" (renames included)
+    value = underscore_spaces(value.strip())
+    self.name_override = "" if value == underscore_spaces(self.name) else value
     mark_dirty()
 
 class BatchSTLObject(bpy.types.PropertyGroup):
@@ -726,10 +727,8 @@ class BatchSTLObject(bpy.types.PropertyGroup):
     # session_uid of the object, to follow renames (see sync_collection_objects); not an ID pointer, which adds a user
     obj_uid: bpy.props.IntProperty(default=0, options={'HIDDEN'})
     export: bpy.props.BoolProperty(default=True, update=mark_dirty)
-    prev_tag: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    tag: bpy.props.StringProperty(name="Tag", default="", description="Filename token(s), '/' between tokens. Placed in hierarchy order: Global, Preset, Collection, Object", update=on_no_spaces_update("tag"))
-    prev_sub_path: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    sub_path: bpy.props.StringProperty(name="Sub-folder", default="", update=on_no_spaces_update("sub_path"))
+    tag: bpy.props.StringProperty(name="Tag", default="", description="Filename token(s), '/' between tokens. Placed in hierarchy order: Global, Preset, Collection, Object", update=on_name_field_update("tag"))
+    sub_path: bpy.props.StringProperty(name="Sub-folder", default="", update=on_name_field_update("sub_path"))
     nodegroups: bpy.props.CollectionProperty(type=BatchSTLNodeGroup)
 
 @edit_callback("Edit Collection", "collection_name", "prev_collection_name")
@@ -740,10 +739,8 @@ class BatchSTLCollection(bpy.types.PropertyGroup):
     collection_name: bpy.props.StringProperty(name="Collection", default="", update=on_collection_name_update)
     prev_collection_name: bpy.props.StringProperty(default="", options={'HIDDEN'})
     use_tag: bpy.props.BoolProperty(name="Use Tag", default=True, update=mark_dirty)
-    prev_tag: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    tag: bpy.props.StringProperty(name="Tag", default="", description="Filename token(s), '/' between tokens. Placed in hierarchy order: Global, Preset, Collection, Object", update=on_no_spaces_update("tag"))
-    prev_sub_path: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    sub_path: bpy.props.StringProperty(name="Sub-folder", default="", update=on_no_spaces_update("sub_path"))
+    tag: bpy.props.StringProperty(name="Tag", default="", description="Filename token(s), '/' between tokens. Placed in hierarchy order: Global, Preset, Collection, Object", update=on_name_field_update("tag"))
+    sub_path: bpy.props.StringProperty(name="Sub-folder", default="", update=on_name_field_update("sub_path"))
     objects: bpy.props.CollectionProperty(type=BatchSTLObject)
     object_index: bpy.props.IntProperty(default=0, update=mark_dirty)
     nodegroups: bpy.props.CollectionProperty(type=BatchSTLNodeGroup)
@@ -763,8 +760,7 @@ class BatchSTLJob(bpy.types.PropertyGroup):
 class BatchSTLExportPreset(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty(name="Preset Name", default="New Preset", update=mark_dirty)
     uid: bpy.props.StringProperty(default="", options={'HIDDEN'})  # stable identity of a running export's preset
-    prev_preset_prefix: bpy.props.StringProperty(default="", options={'HIDDEN'})
-    preset_prefix: bpy.props.StringProperty(name="Preset Root Directory", default="", update=on_no_spaces_update("preset_prefix"))
+    preset_prefix: bpy.props.StringProperty(name="Preset Root Directory", default="", update=on_name_field_update("preset_prefix"))
     collections: bpy.props.CollectionProperty(type=BatchSTLCollection)
     collection_index: bpy.props.IntProperty(name="Collection Index", default=0, update=mark_dirty)
     nodegroups: bpy.props.CollectionProperty(type=BatchSTLNodeGroup)

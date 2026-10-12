@@ -306,6 +306,31 @@ class ObjectEntryTests(BlenderTestCase):
         self.sync()
         self.assertEqual(self.col.objects[0].export_name, "Base")
 
+    def test_export_name_has_no_spaces(self):
+        entry = self.col.objects[0]
+        entry.export_name = " Big Lid "
+        self.assertEqual((entry.name_override, entry.export_name, planned_paths()), ("Big_Lid", "Big_Lid", ["Big_Lid.stl"]))
+        # An object name with spaces shows (and exports) with underscores, and typing it either way follows the object
+        self.box.name = "My Box"
+        self.sync()
+        entry = self.col.objects[0]
+        self.assertEqual(entry.name_override, "Big_Lid")
+        entry.export_name = "My Box"
+        self.assertEqual((entry.name_override, entry.export_name, planned_paths()), ("", "My_Box", ["My_Box.stl"]))
+        entry.export_name = "Big Lid"
+        entry.export_name = "My_Box"
+        self.assertEqual(entry.name_override, "")
+
+    def test_name_fields_replace_spaces(self):
+        entry = self.col.objects[0]
+        fields = [(self.preset, "preset_prefix"), (self.col, "tag"), (self.col, "sub_path"), (entry, "tag"), (entry, "sub_path")]
+        for i, (owner, prop) in enumerate(fields):
+            with self.subTest(prop=prop):
+                setattr(owner, prop, f" my {prop} {i} / x y ")
+                self.assertEqual(getattr(owner, prop), f"my_{prop}_{i}/x_y")
+        self.assertEqual(planned_paths(), ["my_preset_prefix_0/x_y/my_sub_path_2/x_y/my_sub_path_4/x_y/"
+                                           "Box_my_tag_1_x_y_my_tag_3_x_y.stl"])
+
     def test_preset_uids_are_unique(self):
         copy = bpy.context.scene.batch_stl_presets.add()
         copy.uid = self.preset.uid

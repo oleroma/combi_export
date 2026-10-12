@@ -155,7 +155,16 @@ class BlockNamingTests(unittest.TestCase):
         self.assertEqual(ce.fields.parse_block_naming("_B"), ("", "B"))
         self.assertEqual(ce.fields.parse_block_naming(""), ("", ""))
         with self.assertRaises(ValueError):
-            ce.fields.parse_block_naming("\\a b")
+            ce.fields.parse_block_naming("\\a:b")
+
+    def test_parse_replaces_spaces(self):
+        parse = ce.fields.parse_block_naming
+        self.assertEqual(parse("\\my dir\\sub dir"), ("my_dir/sub_dir", ""))
+        self.assertEqual(parse("_my tag"), ("", "my_tag"))
+        self.assertEqual(parse('\\"my dir"'), ("my_dir", ""))
+        self.assertEqual(parse("my dir/b"), ("my_dir/b", ""))
+        # A space before '_' still ends the folder section, and edge spaces are no part of a name
+        self.assertEqual(parse("  \\a b _c d  "), ("a_b", "c_d"))
 
     def test_compose_round_trip(self):
         for sub_path, tag in (("C/2", "B"), ("X", ""), ("", "B_2"), ("_odd", "")):

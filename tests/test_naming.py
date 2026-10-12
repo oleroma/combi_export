@@ -10,12 +10,29 @@ class SanitizeTests(unittest.TestCase):
         self.assertEqual(ce.naming.sanitize_name('a<b>c:d"e|f?g*h'), "a_b_c_d_e_f_g_h")
 
     def test_windows_reserved_names_are_prefixed(self):
-        for name in ("con", "CON.txt", "com1", "Lpt9", "nul.stl", "nul .txt", "COM0", "lpt0", "COM¹", "lpt³"):
+        for name in ("con", "CON.txt", "com1", "Lpt9", "nul.stl", "COM0", "lpt0", "COM¹", "lpt³"):
             with self.subTest(name=name):
                 self.assertTrue(ce.naming.sanitize_name(name).startswith("_"))
-        for name in ("console", "CON_", "a.con", "COM10", "com 1"):
+        for name in ("console", "CON_", "a.con", "COM10", "com_1", "nul_.txt"):
             with self.subTest(name=name):
                 self.assertEqual(ce.naming.sanitize_name(name), name)
+
+    def test_spaces_become_underscores(self):
+        self.assertEqual(ce.naming.sanitize_name("my tag  x"), "my_tag__x")
+        self.assertEqual(ce.naming.sanitize_whole_name(" My Box. "), "My_Box")
+        self.assertEqual(ce.naming.split_path_parts("my dir/ sub dir /x"), ["my_dir", "sub_dir", "x"])
+        self.assertEqual(ce.naming.split_tag_parts("my tag/ b "), ["my_tag", "b"])
+        self.assertEqual(ce.naming.split_value_tag_parts(" my tag /x_"), ["my_tag", "x_"])
+        self.assertEqual(ce.naming.format_export_filename("My Box", "a b", True, "v 2", {"GLOBAL": ["g"]}), "My_Box_g_v_2_a_b.stl")
+
+    def test_underscore_spaces(self):
+        under = ce.naming.underscore_spaces
+        self.assertEqual(under("my tag"), "my_tag")
+        self.assertEqual(under("a  b"), "a__b")
+        self.assertEqual(under("  a b  "), "a_b")
+        self.assertEqual(under("a / b\\ c d"), "a/b\\c_d")
+        self.assertEqual(under(""), "")
+        self.assertEqual(under("already_fine"), "already_fine")
 
     def test_reserved_name_is_caught_after_stripping(self):
         self.assertNotEqual(ce.naming.split_path_parts("CON "), ["CON"])

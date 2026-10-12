@@ -496,13 +496,18 @@ def value_expr(val, override_type, items=None):
 # A node group / node row has one naming field with the sections of a value field and no value: '\C\2' folders C/2,
 # '_B' token B, '\C\2\_B' both. Text without a mark is a folder ('C/2').
 
+def _block_name_text(chars, seps=""):
+    """Text of the names typed in a block field, which has no value a space could belong to: a space inside a name is
+    not allowed and becomes '_' (quoted or not). A space before '_' or '\\' is no part of a name, see split_field."""
+    return _typed_text([("_", True, ch[2]) if ch[0] == " " else ch for ch in chars], seps)
+
 def parse_block_naming(text):
     """(sub_path, tag) of a block naming field. Raises ValueError for a name that cannot be a file name or a section
     given twice."""
     sub_path, tag = "", ""
     for kind, chars, _start, _closed in split_field(lex_expr(text))[1]:
-        if kind == "dir": sub_path = "/".join(_typed_text(nm) for nm in _dir_names(chars))
-        else: tag = _typed_text(chars, "_/").strip("_")
+        if kind == "dir": sub_path = "/".join(_block_name_text(nm) for nm in _dir_names(chars))
+        else: tag = _block_name_text(chars, "_/").strip("_")
     return sub_path, tag
 
 def compose_block_naming(sub_path, tag):
