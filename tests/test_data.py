@@ -1,7 +1,6 @@
 """Stored data: JSON presets, clipboard and tier moves, migrations of older data, .blend round trips, object entries."""
 import json
 import os
-import unittest
 
 import bpy
 import combi_export as ce
@@ -165,11 +164,9 @@ class MigrationTests(BlenderTestCase):
         for entry in bpy.context.scene.batch_stl_presets[0].collections[0].objects:
             self.assertEqual(entry.obj_uid, bpy.data.objects[entry.name].session_uid)
 
-    # BUG: a scene created after the add-on registered (or after the file loaded) is only stamped with DATA_VERSION by
-    # the UI timer, for the scene in view. One filled by a script (or never viewed) is saved without the stamp, and the
-    # next load migrates its current templates again: 'B/*' becomes 'B/_*', 'x_*' becomes 'x__*'.
-    @unittest.expectedFailure
     def test_scene_filled_by_a_script_survives_reload(self):
+        """A scene created in this session is stamped when saved (the UI timer only stamps the scene in view, and never
+        runs in background Blender): the next load must not migrate its current templates again."""
         make_gn_group()
         scripted = bpy.data.scenes.new("Scripted")
         preset = scripted.batch_stl_presets.add()
@@ -179,6 +176,46 @@ class MigrationTests(BlenderTestCase):
         bpy.ops.wm.open_mainfile(filepath=path)
         val = bpy.data.scenes["Scripted"].batch_stl_presets[0].nodegroups[0].nodes[0].inputs[0].values[0]
         self.assertEqual((val.dir_tag, val.tag), ("B/*", "x_*"))
+
+    def save_unversioned_scene(self):
+        """A file whose scene 'Old' holds an unversioned (v1.0.0) value (see test_unversioned_scene), saved without the
+        stamp like an older version of the add-on did. Opens a fresh file and returns the old file's scene folder."""
+        scene = bpy.context.scene
+        scene.name = "Old"
+        make_object("Box", group=make_gn_group())
+        val = override(make_preset().nodegroups, "Count", "INT", "\\1").values[0]
+        with ce.raw_edits():
+            val.value_string, val.dir_tag, val.tag, val.use_tag = "", "", "B_", True
+        val["value_int"] = 7
+        scene.property_unset("batch_stl_data_version")
+        old_path = os.path.join(self.tmp, "old.blend")
+        save_pre = bpy.app.handlers.save_pre
+        save_pre.remove(ce.batch_stl_save_handler)
+        try: bpy.ops.wm.save_as_mainfile(filepath=old_path)
+        finally: save_pre.append(ce.batch_stl_save_handler)
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+        return old_path + "/Scene/"
+
+    def assertMigratedOnce(self):
+        """The imported scene 'Old' is migrated now, so stamping it when saved does not leave it unmigrated, and the
+        next load does not migrate it again."""
+        def value():
+            v = bpy.data.scenes["Old"].batch_stl_presets[0].nodegroups[0].nodes[0].inputs[0].values[0]
+            return v.value_string, v.dir_tag, v.tag
+        self.assertEqual(value(), ("7", "B_*", "B_*"))
+        path = os.path.join(self.tmp, "new.blend")
+        bpy.ops.wm.save_as_mainfile(filepath=path)
+        bpy.ops.wm.open_mainfile(filepath=path)
+        self.assertEqual(value(), ("7", "B_*", "B_*"))
+
+    def test_appended_old_scene_is_migrated_once(self):
+        bpy.ops.wm.append(directory=self.save_unversioned_scene(), filename="Old")
+        self.assertMigratedOnce()
+
+    def test_linked_old_scene_made_local_is_migrated_once(self):
+        bpy.ops.wm.link(directory=self.save_unversioned_scene(), filename="Old")
+        bpy.data.scenes["Old"].make_local()
+        self.assertMigratedOnce()
 
 
 class ObjectEntryTests(BlenderTestCase):

@@ -148,19 +148,25 @@ def edit_callback(label, prop, prev_prop):
     return decorate
 
 _INVALID_NAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-_WINDOWS_RESERVED = {"con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9"}
+# Device names Windows reserves (COM¹ etc. with superscript digits too), also with any extension: 'CON.stl', 'nul .txt'
+_WINDOWS_RESERVED = {"con", "prn", "aux", "nul"} | {port + n for port in ("com", "lpt") for n in "0123456789¹²³"}
 
 def sanitize_name(text):
     """Make text safe to use inside a single file or folder name on every OS."""
     s = _INVALID_NAME_CHARS.sub("_", str(text))
-    if s.split('.')[0].lower() in _WINDOWS_RESERVED:
+    if s.split('.')[0].rstrip(' ').lower() in _WINDOWS_RESERVED:
         s = f"_{s}"
     return s
+
+def sanitize_whole_name(text):
+    """A whole file-safe folder name or file name stem: edge spaces and dots dropped (Windows drops them itself), then
+    sanitized, so the reserved-name check sees the final name ('CON ' is the device CON)."""
+    return sanitize_name(str(text).strip(" ."))
 
 def split_path_parts(path_text):
     """Split a user-typed sub-path into safe folder names; empty, '.' and '..' parts are dropped."""
     if not path_text: return []
-    parts = (sanitize_name(p).strip(" .") for p in re.split(r"[\\/]", path_text))
+    parts = (sanitize_whole_name(p) for p in re.split(r"[\\/]", path_text))
     return [p for p in parts if p]
 
 def clash_key(path):
@@ -620,8 +626,8 @@ def value_name_parts(val, template, kind):
 
 def value_name(val, kind, prefix="", suffix=""):
     """File-safe folder name (kind "dir") or filename token of a value, between `prefix` and `suffix`."""
-    name = sanitize_name(prefix + (f"{val:.10g}" if isinstance(val, float) else str(val).replace(" ", "_")) + suffix)
-    return name.strip(" .") if kind == "dir" else name
+    name = prefix + (f"{val:.10g}" if isinstance(val, float) else str(val).replace(" ", "_")) + suffix
+    return sanitize_whole_name(name) if kind == "dir" else sanitize_name(name)
 
 def legacy_naming_template(spec, kind):
     """Template (see VALUE_SLOT) of a value's folder / tag field as stored before DATA_VERSION 3: blank = the value,
@@ -1570,7 +1576,7 @@ def format_export_filename(bl_obj_name, obj_tag, col_use_tag, col_tag, tags_by_l
         (tags_by_level.get("OBJECT", []), False),
         (tags_by_level.get("NONE", []), False),
     ])
-    safe_name = sanitize_name(bl_obj_name).strip(" .")
+    safe_name = sanitize_whole_name(bl_obj_name)
     return safe_name + "".join(f"_{t}" for t in tokens) + ".stl"
 
 def build_export_dir_parts(preset_prefix, col_sub_path, obj_sub_path, paths_by_level=None):
@@ -5080,15 +5086,35 @@ def stamp_data_version(scene):
     """Scenes created in this session hold current data: record that, so a later load does not migrate them."""
     if not scene.is_property_set("batch_stl_data_version"): scene.batch_stl_data_version = DATA_VERSION
 
+def prepare_scene(scene):
+    """Bring the data of one scene up to date (after it was loaded or appended, or when the add-on is enabled)."""
+    try:
+        migrate_scene_data(scene)
+        sync_prev_values(scene)
+        restamp_object_uids(scene)
+        ensure_preset_uids(scene)
+    except Exception: traceback.print_exc()
+
 def prepare_scenes():
     """Bring the data of every scene in the file up to date (after a load, or when the add-on is enabled)."""
+    for scene in bpy.data.scenes: prepare_scene(scene)
+
+@persistent
+def batch_stl_import_handler(import_context, *args):
+    """Scenes appended or linked from another file (Append, Link, `bpy.data.libraries.load`, dependencies included)
+    hold that file's data, maybe of an older version: prepare them right away, so that an unstamped scene is always one
+    created in this session (see batch_stl_save_handler). Linked scenes are migrated in memory like on load, which also
+    keeps one made local later from being stamped unmigrated."""
+    for item in getattr(import_context, "import_items", ()):
+        if item.id_type == 'SCENE' and item.id: prepare_scene(item.id)
+
+@persistent
+def batch_stl_save_handler(*args):
+    """Stamp the scenes created in this session before they are written, so the next load does not migrate their
+    current data again. The UI timer only stamps the scene in view, and timers never run in background Blender: a
+    scene filled by a script, or never viewed, would lose its naming on reload. Linked scenes are not written."""
     for scene in bpy.data.scenes:
-        try:
-            migrate_scene_data(scene)
-            sync_prev_values(scene)
-            restamp_object_uids(scene)
-            ensure_preset_uids(scene)
-        except Exception: traceback.print_exc()
+        if not scene.library: stamp_data_version(scene)
 
 @persistent
 def reset_batch_stl_state(*args):
@@ -5144,7 +5170,7 @@ def register():
     WM.batch_stl_info_global = bpy.props.BoolProperty(name="Global Mode", default=False, update=lambda s, c: mark_dirty())
 
     Scene = bpy.types.Scene
-    Scene.batch_stl_root_dir = bpy.props.StringProperty(name="Root", default="//", subtype="DIR_PATH", update=mark_dirty)
+    Scene.batch_stl_root_dir = bpy.props.StringProperty(name="Root", default="//", subtype="DIR_PATH", options={'PATH_SUPPORTS_BLEND_RELATIVE'}, update=mark_dirty)
     Scene.batch_stl_presets = bpy.props.CollectionProperty(type=BatchSTLExportPreset)
     Scene.batch_stl_global_nodegroups = bpy.props.CollectionProperty(type=BatchSTLNodeGroup)
     Scene.batch_stl_preset_index = bpy.props.IntProperty(name="Active Preset", default=0, update=mark_dirty)
@@ -5152,6 +5178,8 @@ def register():
 
     reset_batch_stl_state(None)
     if reset_batch_stl_state not in bpy.app.handlers.load_post: bpy.app.handlers.load_post.append(reset_batch_stl_state)
+    if batch_stl_import_handler not in bpy.app.handlers.blend_import_post: bpy.app.handlers.blend_import_post.append(batch_stl_import_handler)
+    if batch_stl_save_handler not in bpy.app.handlers.save_pre: bpy.app.handlers.save_pre.append(batch_stl_save_handler)
 
     if "--batch-stl-headless" not in sys.argv:
         if batch_stl_depsgraph_handler not in bpy.app.handlers.depsgraph_update_post: bpy.app.handlers.depsgraph_update_post.append(batch_stl_depsgraph_handler)
@@ -5161,6 +5189,8 @@ def register():
 
 def unregister():
     if reset_batch_stl_state in bpy.app.handlers.load_post: bpy.app.handlers.load_post.remove(reset_batch_stl_state)
+    if batch_stl_import_handler in bpy.app.handlers.blend_import_post: bpy.app.handlers.blend_import_post.remove(batch_stl_import_handler)
+    if batch_stl_save_handler in bpy.app.handlers.save_pre: bpy.app.handlers.save_pre.remove(batch_stl_save_handler)
     if batch_stl_depsgraph_handler in bpy.app.handlers.depsgraph_update_post: bpy.app.handlers.depsgraph_update_post.remove(batch_stl_depsgraph_handler)
     if batch_stl_undo_handler in bpy.app.handlers.undo_post: bpy.app.handlers.undo_post.remove(batch_stl_undo_handler)
     if batch_stl_undo_handler in bpy.app.handlers.redo_post: bpy.app.handlers.redo_post.remove(batch_stl_undo_handler)

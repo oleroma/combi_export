@@ -10,17 +10,21 @@ class SanitizeTests(unittest.TestCase):
         self.assertEqual(ce.sanitize_name('a<b>c:d"e|f?g*h'), "a_b_c_d_e_f_g_h")
 
     def test_windows_reserved_names_are_prefixed(self):
-        for name in ("con", "CON.txt", "com1", "Lpt9", "nul.stl"):
+        for name in ("con", "CON.txt", "com1", "Lpt9", "nul.stl", "nul .txt", "COM0", "lpt0", "COM¹", "lpt³"):
             with self.subTest(name=name):
                 self.assertTrue(ce.sanitize_name(name).startswith("_"))
-        self.assertEqual(ce.sanitize_name("console"), "console")
+        for name in ("console", "CON_", "a.con", "COM10", "com 1"):
+            with self.subTest(name=name):
+                self.assertEqual(ce.sanitize_name(name), name)
 
-    # BUG: sanitize_name runs before the edge spaces / dots are stripped, so 'CON ' passes as a normal name and becomes
-    # the reserved 'CON' (a folder, or the file 'CON.stl'), which Windows cannot create.
-    @unittest.expectedFailure
     def test_reserved_name_is_caught_after_stripping(self):
         self.assertNotEqual(ce.split_path_parts("CON "), ["CON"])
         self.assertNotEqual(ce.format_export_filename("CON ", "", False, ""), "CON.stl")
+        self.assertEqual(ce.split_path_parts(" nul./x"), ["_nul", "x"])
+        self.assertEqual(ce.format_export_filename(".Box. ", "", False, ""), "Box.stl")
+        # A value's own spaces become '_', but the text a folder template puts around the value is stripped
+        self.assertEqual(ce.value_name("CON ", "dir"), "CON_")
+        self.assertEqual(ce.value_name_parts("nul", "* ", "dir"), ([], ["_nul"]))
 
     def test_split_path_parts(self):
         self.assertEqual(ce.split_path_parts("a\\b/c"), ["a", "b", "c"])

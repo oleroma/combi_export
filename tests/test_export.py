@@ -105,14 +105,9 @@ class RefusalTests(BlenderTestCase):
         self.assertRefused("Missing Root Directory")
 
     def test_relative_root_of_an_unsaved_file(self):
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)  # see test_root_accepts_blend_relative_paths
-            bpy.context.scene.batch_stl_root_dir = "//out"
+        bpy.context.scene.batch_stl_root_dir = "//out"
         self.assertRefused("save the .blend file")
 
-    # BUG: Scene.batch_stl_root_dir defaults to '//' but is not declared with options={'PATH_SUPPORTS_BLEND_RELATIVE'},
-    # so Blender 5.2 warns 'does not support blend relative "//" prefix' whenever such a path is written to it.
-    @unittest.expectedFailure
     def test_root_accepts_blend_relative_paths(self):
         with warnings.catch_warnings():
             warnings.simplefilter("error", RuntimeWarning)
