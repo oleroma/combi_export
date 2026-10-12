@@ -53,6 +53,67 @@ class DepsgraphHandlerTests(BlenderTestCase):
         self.assertGreater(_ui_cache["revision"], revision)
 
 
+class WindowTargetTests(BlenderTestCase):
+    """The UI cache is built for the window's scene and view layer. Blender fires no depsgraph update when either
+    switches (checked in a live Blender), so the cache timer has to notice the switch itself."""
+
+    def setUp(self):
+        super().setUp()
+        wm = bpy.context.window_manager
+        wm.batch_stl_info_tab, wm.batch_stl_info_global = 'TREE', False
+        self.scene_a = bpy.context.scene
+        make_object("BoxA")
+        make_preset("PA")
+        self.scene_b = bpy.data.scenes.new("B")
+        bpy.context.window.scene = self.scene_b
+        make_object("BoxB", collection="PartsB")
+        make_preset("PB", collections=("PartsB",))
+        bpy.context.window.scene = self.scene_a
+        self.rebuild()
+
+    def rebuild(self):
+        """One tick of the UI cache timer."""
+        ce.ui_cache.rebuild_ui_cache_if_dirty()
+        self.assertFalse(_ui_cache["is_dirty"], "the rebuild failed")
+
+    def tree_files(self):
+        def walk(node):
+            yield from node.get("_files", [])
+            for key, child in node.items():
+                if key != "_files": yield from walk(child)
+        return sorted(walk(_ui_cache["tree"][0]))
+
+    def test_the_tree_follows_the_windows_scene(self):
+        self.assertEqual(self.tree_files(), ["BoxA.stl"])
+        bpy.context.window.scene = self.scene_b
+        self.rebuild()
+        self.assertEqual(self.tree_files(), ["BoxB.stl"])
+        self.assertEqual(_ui_cache["stats"]["global"]["objs"], 1)
+        bpy.context.window.scene = self.scene_a
+        self.rebuild()
+        self.assertEqual(self.tree_files(), ["BoxA.stl"])
+
+    def test_the_tree_follows_the_windows_view_layer(self):
+        """A view layer with the mapped collection excluded evaluates none of its objects."""
+        bare = self.scene_a.view_layers.new("Bare")
+        bare.layer_collection.children["Parts"].exclude = True
+        bpy.context.window.view_layer = bare
+        self.rebuild()
+        self.assertEqual(self.tree_files(), [])
+        bpy.context.window.view_layer = self.scene_a.view_layers[0]
+        self.rebuild()
+        self.assertEqual(self.tree_files(), ["BoxA.stl"])
+
+    def test_an_unchanged_window_costs_no_rebuild(self):
+        builds, build = [], ce.ui_cache._rebuild_ui_cache
+        with mock.patch.object(ce.ui_cache, "_rebuild_ui_cache", lambda: builds.append(1) or build()):
+            for _tick in range(3): ce.ui_cache.rebuild_ui_cache_if_dirty()
+            self.assertEqual(builds, [])
+            bpy.context.window.scene = self.scene_b
+            for _tick in range(3): ce.ui_cache.rebuild_ui_cache_if_dirty()
+            self.assertEqual(len(builds), 1)
+
+
 class FakeLayout:
     """Records what is drawn into it. Every item remembers its layout: `path` is the chain of sub-layouts down from the
     root, `attrs` what was set on it (alignment, ui_units_x, ...). prop() reads the property, as Blender does (computed

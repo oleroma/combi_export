@@ -24,6 +24,8 @@ _ui_cache = {
     "stats": {"global": {"presets": 0, "cols": 0, "objs": 0, "exp": 0}, "presets": {}, "cols": {}},
     "tree": ({}, set()),
     "preset_metrics": {},
+    # (scene session uid, view layer name) of the window the cache was built for, see ui_cache.window_target
+    "target": None,
     # Bumped whenever data the panels show may have changed: every edit (mark_dirty), node tree updates and menu items
     # found changed. Draw-time caches (the override tables' merge predictions) hold for one revision.
     "revision": 0,

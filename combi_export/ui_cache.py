@@ -39,7 +39,14 @@ def _get_preset_status(scene, preset, g_has_ovr=False, g_has_perm=False):
             return True, True
     return has_ovr, has_perm
 
+def window_target(context):
+    """What the cache is built for: the window's scene and view layer (None while there is none)."""
+    scene, view_layer = getattr(context, "scene", None), getattr(context, "view_layer", None)
+    return (scene.session_uid, view_layer.name) if scene and view_layer else None
+
 def rebuild_ui_cache_if_dirty():
+    # Switching the window's scene or view layer fires no depsgraph update, so the timer looks for it
+    if window_target(bpy.context) != _ui_cache.get("target"): mark_dirty()
     if not _ui_cache.get("is_dirty", False): return 0.1
     _ui_cache["is_dirty"] = False
 
@@ -61,6 +68,7 @@ def _rebuild_ui_cache():
         return 0.1
 
     scene, wm = context.scene, context.window_manager
+    _ui_cache["target"] = window_target(context)
     stamp_data_version(scene)
     ensure_preset_uids(scene)
     refresh_menu_items(scene)
