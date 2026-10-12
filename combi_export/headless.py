@@ -9,9 +9,12 @@ import bpy
 
 from .nodes import (cached_menu_items, clean_node_name, get_modifier_input, get_modifier_socket_identifier,
     set_modifier_input)
-from .engine import MockOverride, count_override_combinations, generate_named_combinations, get_input_value
+from .engine import MockOverride, count_and_keep_combinations, generate_named_combinations, get_input_value
 from .targets import export_file_parts, group_by_signature, iter_export_objects, live_collection_names
 from .stl import collect_instance_arrays, export_object_stl
+
+# Variants the worker keeps from counting for the export (about 2 KB each); past this many they are generated again
+KEEP_VARIANTS = 20000
 
 def reconstruct_overrides_for_combo(combo):
     grouped = {}
@@ -203,15 +206,21 @@ def run_headless_export(job_file_path):
         print("  └─ No active objects to export.\nBATCH_STL_DONE", flush=True)
         sys.exit(0)
 
+    # The progress total needs every batch's count first. Variants that only enumerating counts are kept from that pass
+    # (up to KEEP_VARIANTS in all) for the export below.
+    batch_variants, keep = {}, KEEP_VARIANTS
     with cached_menu_items():
-        batch_counts = {sig: count_override_combinations(ovrs, limit=None) for sig, (ovrs, _items) in batches.items()}
-    total_ops = sum(len(items) * batch_counts[sig] for sig, (_ovrs, items) in batches.items())
+        for sig, (ovrs, _items) in batches.items():
+            batch_variants[sig] = count_and_keep_combinations(ovrs, keep)
+            keep -= len(batch_variants[sig][1] or ())
+    total_ops = sum(len(items) * batch_variants[sig][0] for sig, (_ovrs, items) in batches.items())
     print(f"BATCH_STL_TOTAL:{total_ops}", flush=True)
 
     current_op_step, batch_counter, first_export_started = 0, 1, False
 
     for signature, (all_overrides, batch_items) in batches.items():
-        num_combinations = batch_counts[signature]
+        num_combinations, variants = batch_variants.pop(signature)
+        if variants is None: variants = generate_named_combinations(all_overrides)
         batch_objects = {item[2] for item in batch_items}
 
         isolated_collections = []
@@ -232,7 +241,7 @@ def run_headless_export(job_file_path):
         baseline_global_states, baseline_mod_states = capture_baseline_states(all_overrides, batch_objects)
 
         try:
-            for combo_idx, (combo, tags_by_level, paths_by_level) in enumerate(generate_named_combinations(all_overrides)):
+            for combo_idx, (combo, tags_by_level, paths_by_level) in enumerate(variants):
                 t_perm_start = time.perf_counter()
                 if not first_export_started:
                     print(f"=== Headless init took {time.time() - start_time_unix:.2f} s to start first export ===", flush=True)

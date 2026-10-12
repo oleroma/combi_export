@@ -11,8 +11,8 @@ from .nodes import (clean_node_name, default_value_text, get_menu_switch_items, 
     get_supported_inputs, get_target_node_names, infer_input_type)
 from .naming import SCOPE_KINDS, VALUE_SLOT, legacy_naming_template, split_path_parts, split_tag_parts, value_name_parts
 from .fields import (add_value, compose_block_naming, compose_value_field, expr_text, fields_text, _is_open, lex_expr,
-    name_permutations, parse_block_naming, parse_value_field, _render_typed, same_fields, _slot_run, _split_bare,
-    split_field, value_expr, value_fields, _value_readers, _value_runs, value_specs)
+    name_permutations, parse_block_naming, parse_number, parse_value_field, _render_typed, same_fields, _slot_run,
+    _split_bare, split_field, value_expr, value_fields, _value_readers, _value_runs, value_specs)
 from .scope import OTHER_KIND, BranchScope, naming_completions, scope_dead
 from .data import get_active_collection, get_active_object, get_active_preset
 
@@ -194,8 +194,7 @@ def on_value_update(prop_name, label=""):
                         if prop_name in ("value_string", "sweep_start", "sweep_step"):
                             if my_val != "":
                                 try:
-                                    if i.override_type == 'FLOAT': float(my_val)
-                                    elif i.override_type == 'INT': int(my_val)
+                                    if i.override_type in ('FLOAT', 'INT'): parse_number(my_val, i.override_type)
                                 except ValueError:
                                     is_invalid = True
                             elif prop_name != "value_string":

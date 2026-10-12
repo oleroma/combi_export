@@ -41,16 +41,56 @@ class JsonTests(BlenderTestCase):
         self.assertEqual(planned_paths(), paths)
         self.assertTrue(bpy.context.scene.batch_stl_presets[0].uid)
 
+    def test_file_holds_the_global_overrides_and_the_root_folder(self):
+        """They apply to every preset: without them the imported presets would write other files."""
+        build_rich_preset()
+        scene = bpy.context.scene
+        override(scene.batch_stl_global_nodegroups, "Count", "INT", "\\1", "\\2", group_naming="\\G")
+        scene.batch_stl_root_dir = "//out/"
+        paths, global_ngs = planned_paths(), [ce.data.copy_ng_to_dict(ng) for ng in scene.batch_stl_global_nodegroups]
+        path = os.path.join(self.tmp, "setup.json")
+        bpy.ops.batch_stl.export_presets_json(filepath=path)
+
+        def reset():
+            scene.batch_stl_presets.clear()
+            scene.batch_stl_global_nodegroups.clear()
+            override(scene.batch_stl_global_nodegroups, "Size", "FLOAT", "\\9")
+            scene.batch_stl_root_dir = self.tmp
+        reset()
+        self.assertEqual(bpy.ops.batch_stl.import_presets_json(filepath=path), {'FINISHED'})
+        self.assertEqual([ce.data.copy_ng_to_dict(ng) for ng in scene.batch_stl_global_nodegroups], global_ngs)
+        self.assertEqual(scene.batch_stl_root_dir, "//out/")
+        self.assertEqual(planned_paths(), paths)
+
+        # Unticked, the scene keeps its own
+        reset()
+        bpy.ops.batch_stl.import_presets_json(filepath=path, use_global_overrides=False, use_root_dir=False)
+        self.assertEqual([ng.nodes[0].inputs[0].name for ng in scene.batch_stl_global_nodegroups], ["Size"])
+        self.assertEqual(scene.batch_stl_root_dir, self.tmp)
+
+        # A file of an earlier version (the list of presets only) leaves them alone
+        with open(path, encoding="utf-8") as f: presets = json.load(f)["presets"]
+        with open(path, "w", encoding="utf-8") as f: json.dump(presets, f)
+        reset()
+        self.assertEqual(bpy.ops.batch_stl.import_presets_json(filepath=path), {'FINISHED'})
+        self.assertEqual(len(scene.batch_stl_presets), 1)
+        self.assertEqual([ng.nodes[0].inputs[0].name for ng in scene.batch_stl_global_nodegroups], ["Size"])
+        self.assertEqual(scene.batch_stl_root_dir, self.tmp)
+
     def test_invalid_files_change_nothing(self):
         build_rich_preset()
-        before = preset_dicts()
-        for content in ({"name": "not a list"}, [{"name": "fine"}, 5]):
+        scene = bpy.context.scene
+        override(scene.batch_stl_global_nodegroups, "Count", "INT", "\\1", "\\2")
+        def state(): return preset_dicts(), [ce.data.copy_ng_to_dict(ng) for ng in scene.batch_stl_global_nodegroups], scene.batch_stl_root_dir
+        before = state()
+        for content in ({"name": "not a list"}, [{"name": "fine"}, 5],
+                        {"presets": [{"name": "fine"}], "root_dir": "//x", "global_nodegroups": [{"group": "GN"}, 5]}):
             with self.subTest(content=content):
                 path = os.path.join(self.tmp, "bad.json")
                 with open(path, "w", encoding="utf-8") as f: json.dump(content, f)
                 with self.assertRaises(RuntimeError):  # the operator reports an error
                     bpy.ops.batch_stl.import_presets_json(filepath=path)
-                self.assertEqual(preset_dicts(), before)
+                self.assertEqual(state(), before)
 
     def test_version_1_0_0_preset(self):
         """Typed number / bool fields, typed sweeps and one tag for folder and file name, as v1.0.0 saved them."""

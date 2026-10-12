@@ -2,8 +2,8 @@
 table and blocks the export."""
 import bpy
 
-from .common import MAX_SWEEP_STEPS
 from .nodes import SUPPORTED_OVERRIDE_TYPES, clean_node_name, find_interface_input, get_menu_switch_items
+from .fields import number_sweep_values, parse_number, steps_differ, string_sweep_values
 
 def is_override_group_valid(ng):
     if not ng.group_name or not bpy.data.node_groups.get(ng.group_name):
@@ -31,20 +31,19 @@ def is_override_input_valid(ng_ptr, node, inp):
 def is_override_val_valid(inp, val, ng_ptr=None, node=None):
     if val is None or inp.override_type not in SUPPORTED_OVERRIDE_TYPES:
         return False
-    parse = float if inp.override_type == 'FLOAT' else int
     if getattr(val, "use_sweep", False):
         if inp.override_type in ('FLOAT', 'INT'):
-            try:
-                parse(val.sweep_start)
-                parse(val.sweep_step)
-                return 1 <= int(getattr(val, "sweep_count", "2")) <= MAX_SWEEP_STEPS
+            # Numbers, 1 to MAX_SWEEP_STEPS steps, and no value twice (a step of 0)
+            try: number_sweep_values(val.sweep_start, val.sweep_step, val.sweep_count, inp.override_type)
             except ValueError: return False
+            return True
         elif inp.override_type == 'STRING':
-            return bool(val.sweep_range and val.sweep_range.strip())
+            strings = string_sweep_values(val.sweep_range)
+            return bool(strings) and steps_differ(strings)
         return True
     if inp.override_type in ('FLOAT', 'INT'):
         # get_input_value() would silently export an empty or malformed number as 0
-        try: parse(val.value_string)
+        try: parse_number(val.value_string, inp.override_type)
         except ValueError: return False
         return True
     if inp.override_type == 'STRING':

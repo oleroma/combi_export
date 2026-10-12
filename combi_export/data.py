@@ -102,23 +102,34 @@ def copy_collection_to_dict(c):
 def copy_preset_to_dict(src):
     return {"name": src.name, "data_version": DATA_VERSION, "preset_prefix": src.preset_prefix, "collections": [copy_collection_to_dict(c) for c in src.collections], "nodegroups": [copy_ng_to_dict(ng) for ng in src.nodegroups]}
 
-def upgrade_preset_dict(data):
-    """Bring a preset from a JSON file (copy_preset_to_dict) saved by an older version up to DATA_VERSION, in place:
+def copy_setup_to_dict(scene):
+    """What a JSON file holds: every preset, plus what applies to all of them, the root folder and the global
+    overrides. Files written before these were added hold only the list of presets."""
+    return {"data_version": DATA_VERSION, "root_dir": scene.batch_stl_root_dir,
+            "global_nodegroups": [copy_ng_to_dict(ng) for ng in scene.batch_stl_global_nodegroups],
+            "presets": [copy_preset_to_dict(p) for p in scene.batch_stl_presets]}
+
+def upgrade_nodegroup_dicts(nodegroups, data_version):
+    """Bring node groups from a JSON file (copy_ng_to_dict) saved with an older DATA_VERSION up to date, in place:
     value naming fields before version 3 hold the old folder / tag syntax (legacy_naming_template)."""
-    if data.get("data_version", 0) >= 3: return data
-    def nodegroups(lst):
-        for ng in lst or []:
-            for n in ng.get("nodes", []):
-                for i in n.get("inputs", []):
-                    for v in i.get("values", []):
-                        # Presets saved before the split used one tag for both the filename and the folder
-                        if "dir_tag" not in v: v["dir_tag"] = v.get("tag", "")
-                        v["dir_tag"] = legacy_naming_template(v["dir_tag"] or "", "dir")
-                        v["tag"] = legacy_naming_template(v.get("tag", "") or "", "tag")
-    nodegroups(data.get("nodegroups"))
+    if data_version >= 3: return
+    for ng in nodegroups or []:
+        for n in ng.get("nodes", []):
+            for i in n.get("inputs", []):
+                for v in i.get("values", []):
+                    # Presets saved before the split used one tag for both the filename and the folder
+                    if "dir_tag" not in v: v["dir_tag"] = v.get("tag", "")
+                    v["dir_tag"] = legacy_naming_template(v["dir_tag"] or "", "dir")
+                    v["tag"] = legacy_naming_template(v.get("tag", "") or "", "tag")
+
+def upgrade_preset_dict(data):
+    """Bring a preset from a JSON file (copy_preset_to_dict) saved by an older version up to DATA_VERSION, in place."""
+    version = data.get("data_version", 0)
+    if version >= DATA_VERSION: return data
+    upgrade_nodegroup_dicts(data.get("nodegroups"), version)
     for c in data.get("collections", []):
-        nodegroups(c.get("nodegroups"))
-        for o in c.get("objects", []): nodegroups(o.get("nodegroups"))
+        upgrade_nodegroup_dicts(c.get("nodegroups"), version)
+        for o in c.get("objects", []): upgrade_nodegroup_dicts(o.get("nodegroups"), version)
     data["data_version"] = DATA_VERSION
     return data
 

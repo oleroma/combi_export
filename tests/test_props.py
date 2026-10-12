@@ -125,11 +125,31 @@ class ValueActionTests(TableTestCase):
         self.table_action('VALUE_ACTION', i_idx=0, v_idx=0, shift_pressed=True)  # back to single values
         self.assertEqual(self.exprs(inp), ["\\0", "\\2", "\\4"])
 
+    def test_expanding_a_sweep_skips_values_the_input_has(self):
+        """Steps that repeat another value, or each other (a step of 0 in stored data), are left out instead of being
+        left blank."""
+        inp = self.new_input("Count")
+        inp.values[0].expr = "\\2"
+        self.table_action('VALUE_ACTION', i_idx=0, v_idx=0)
+        inp.values[1].expr = "\\1:1:3"  # 1, 2, 3
+        self.table_action('VALUE_ACTION', i_idx=0, v_idx=1, shift_pressed=True)
+        self.assertEqual(self.exprs(inp), ["\\2", "\\1", "\\3"])
+
+        inp.values[2].expr = "\\5:1:2"
+        with ce.common.raw_edits(): inp.values[2].sweep_step = "0"  # 5, 5
+        self.table_action('VALUE_ACTION', i_idx=0, v_idx=2, shift_pressed=True)
+        self.assertEqual(self.exprs(inp), ["\\2", "\\1", "\\5"])
+
+        inp.values[2].expr = "\\1:1:2"  # every step is a value already: the sweep goes
+        self.table_action('VALUE_ACTION', i_idx=0, v_idx=2, shift_pressed=True)
+        self.assertEqual(self.exprs(inp), ["\\2", "\\1"])
+
 
 class ValidationTests(TableTestCase):
     def test_invalid_values_block_the_export(self):
         scene = bpy.context.scene
-        cases = (("Count", "abc"), ("Size", "0:1:1001"), ("Word", ""), ("Mode", "Z"))
+        cases = (("Count", "abc"), ("Size", "0:1:1001"), ("Word", ""), ("Mode", "Z"), ("Size", "1:0:3"), ("Size", "nan"),
+                 ("Size", "inf"), ("Size", "0:inf:2"))
         for name, text in cases:
             with self.subTest(name=name, value=text):
                 inp = self.new_input(name)
@@ -142,6 +162,18 @@ class ValidationTests(TableTestCase):
                         setattr(inp.values[0], "value_menu" if inp.override_type == "MENU" else "value_string", text)
                 self.assertFalse(ce.validation.is_preset_setup_valid(scene, self.preset))
                 with ce.common.raw_edits(): self.node.inputs.remove(len(self.node.inputs) - 1)
+
+    def test_string_list_with_a_repeat_blocks_the_export(self):
+        inp = self.new_input("Word")
+        with ce.common.raw_edits():
+            inp.values[0].use_sweep, inp.values[0].sweep_range = True, "a, b, a"
+        self.assertFalse(ce.validation.is_preset_setup_valid(bpy.context.scene, self.preset))
+
+    def test_numbers_typed_into_the_stored_fields_must_be_finite(self):
+        inp = self.new_input("Size")
+        for text in ("nan", "inf", "-1e999"):
+            inp.values[0].value_string = text  # rejected by the field's callback: the value stays
+            self.assertEqual(inp.values[0].value_string, "1.0")
 
     def test_missing_group_blocks_the_export(self):
         with ce.common.raw_edits(): self.preset.collections[0].nodegroups.add().group_name = "Gone"

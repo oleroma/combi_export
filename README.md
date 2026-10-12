@@ -30,20 +30,22 @@ For in-depth architectural details, execution flowcharts, and engine design, see
   - Performs intelligent dependency graph culling (`lc.exclude`) so unneeded collections are ignored during geometry updates.
   - Restores baseline socket connections and values after export.
   - Keeps the main Blender viewport and UI completely responsive and interactive. Undo, switching scenes and reordering presets do not interrupt a running export.
+* **Scripted Export:** `bpy.ops.export_scene.batch_stl_multi(preset_index=0)` runs the same export from a script or the command line (`blender -b file.blend --python-expr "import bpy; bpy.ops.export_scene.batch_stl_multi()"`; without `preset_index` it exports the active preset). The call waits for the background worker, prints the export log, and returns once every file is written. Problems (missing root folder, invalid overrides, colliding paths, a worker crash) raise a `RuntimeError`.
 
 ### 3. Hierarchical Parameter Overrides (8 Tiers)
 Define temporary parameter overrides and sweeps across an 8-tier hierarchy:
 `Global` → `Preset` → `Collection` → `Object` → `NodeGroup` → `Node` → `Input Socket` → `Value / Sweep`
 
-* **Override Semantics:** A more specific level replaces the inherited value of the same socket (an Object value replaces a Collection, Preset or Global value). Several values on the *same* level are variants and are all exported.
+* **Override Semantics:** A more specific level replaces the inherited value of the same socket (an Object value replaces a Collection, Preset or Global value). Several values on the *same* level are variants and are all exported. The inherited node group or node keeps its folder and tag: a Global block `\G` over Size writes `G/3/Box.stl` once an object sets Size 3.
 * **Target Flexibility:** Target either exposed modifier interface sockets (`<Modifier Interface>`) or specific internal nodes within a Geometry Node tree, including the `Group Output` node (its unlinked inputs set what the group outputs).
 * **Type Auto-Detection:** Automatically inspects the node tree interface and infers socket data types (`FLOAT`, `INT`, `BOOLEAN`, `STRING`, `MENU`). Other socket types (vectors, colors, objects, ...) are flagged as unsupported and block the export until removed.
 * **Menu/Enum Auto-Populate:** Lists the items of every menu socket: Menu Switch nodes, menus on the modifier interface (also behind reroutes and nested groups), group node menus and the menus of built-in nodes (e.g. *Merge by Distance* mode).
 
 ### 4. Parametric Sweeping & Combinatorial Engine
 Generate variant permutations across any socket. A sweep is typed in the value field (see *One Field per Value*), or Shift + click the value's `+` button to switch it into sweep mode:
-* **Float / Int Ranges:** `start:step:count`, e.g. `0:0.5:5` gives `0, 0.5, 1, 1.5, 2` (1 to 1000 steps). `\0:0.5:5` puts each value in its own folder, `_0:0.5:5` adds it to the file name.
-* **String Lists:** `{a, b, c}`, a comma-separated list in braces.
+* **Float / Int Ranges:** `start:step:count`, e.g. `0:0.5:5` gives `0, 0.5, 1, 1.5, 2` (1 to 1000 steps). `\0:0.5:5` puts each value in its own folder, `_0:0.5:5` adds it to the file name. Every step must be a different value, so a step of `0` is rejected (it would write the same files again), and numbers must be finite (`nan` and `inf` are rejected).
+* **String Lists:** `{a, b, c}`, a comma-separated list in braces, each string once.
+* **Sweep to Values:** Shift + the sweep button turns a sweep back into one value per step; steps the input already has as values are left out.
 * **Boolean & Menu Combinations:** `*` iterates through `True`/`False` or all enum options (`\*` a folder each, `_*` a filename token each).
 * **Branch-Aware Combinations:** Every parameter combination is generated, except where an override is limited to one branch of the folder tree (see *Branch Merging*). Such an override only multiplies the permutations of that branch.
 
@@ -144,7 +146,7 @@ Values with a folder or filename tag create branches, e.g. letters `A B C` × nu
 * **Dead Merge Warning:** If the chosen folders can never exist together (e.g. `C/X` when `X` only exists under `A`), the bar turns red (*Never applies*) because that block is never exported. A value with such a folder or tag gets a red icon and a red field.
 
 ### 11. JSON Preset Portability & Clipboard Buffer
-* **Import / Export Setup:** Save or restore presets, collections, object lists, exclusion states, and override matrices to external JSON files. Presets saved before directory and tag were split into two fields reuse their old tag as the directory name, so their folders keep their names. Files and `.blend` data from version 1.0.0 keep their number, boolean and sweep values. JSON files and `.blend` data written with the earlier `value @folder #tag` field syntax are converted when they are loaded and export to the same paths (`15 @B\ #x_` shows as `\B\15\_x_15`).
+* **Import / Export Setup:** Save or restore presets, collections, object lists, exclusion states, and override matrices to external JSON files. A file also holds the root folder and the global overrides, which apply to every preset, so imported presets write the same files as where they were exported. Import adds the file's presets and replaces the scene's root folder and global overrides with the file's; untick *Root Folder* or *Global Overrides* in the file browser's options to keep the scene's own. Files from before this change hold only presets and leave both alone. Presets saved before directory and tag were split into two fields reuse their old tag as the directory name, so their folders keep their names. Files and `.blend` data from version 1.0.0 keep their number, boolean and sweep values. JSON files and `.blend` data written with the earlier `value @folder #tag` field syntax are converted when they are loaded and export to the same paths (`15 @B\ #x_` shows as `\B\15\_x_15`).
 * **Internal Clipboard:** Copy and paste presets, collections, and node groups between tiers with one click.
 
 ---
@@ -157,4 +159,4 @@ Values with a folder or filename tag create branches, e.g. letters `A B C` × nu
 
 ## Tests
 
-`python tests/run.py` runs the test suite in headless Blender (set `BLENDER` to the executable if it is not in the default install location; `-k NAME` runs matching tests, `-v` lists them). It covers naming, the value field syntax, variant generation and branch merging, the STL writer, presets and migrations, the override table callbacks, and the export operator with a real background worker. The UI is not covered. Tests marked `expectedFailure` reproduce known bugs.
+`python tests/run.py` runs the test suite in headless Blender (set `BLENDER` to the executable if it is not in the default install location; `-k NAME` runs matching tests, `-v` lists them). It covers naming, the value field syntax, variant generation and branch merging, the STL writer, presets and migrations, the override table callbacks, and the export operator with a real background worker, invoked like the button and called from a script. The panels themselves need a window and are not covered; the override table is drawn into a recording layout to check its kept merge predictions, and the depsgraph handler is driven by real scene changes. Tests marked `expectedFailure` reproduce known bugs.

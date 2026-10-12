@@ -6,13 +6,13 @@ import json
 import bpy
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
-from .common import inside_operator, mark_dirty, _ui_cache
+from .common import inside_operator, mark_dirty, raw_edits, _ui_cache
 from .nodes import clean_node_name, get_menu_switch_items, get_supported_inputs, get_target_node_names
-from .fields import add_value, name_permutations
+from .fields import add_value, name_permutations, same_fields, value_fields
 from .engine import MockInput, MockOverride, parse_sweep_values
-from .data import (copy_collection_to_dict, copy_ng_to_dict, copy_preset_to_dict, ensure_preset_uids,
-    get_active_collection, get_active_object, get_active_preset, get_job, paste_collection_from_dict,
-    paste_ng_from_dict, paste_preset_from_dict, remove_job)
+from .data import (copy_collection_to_dict, copy_ng_to_dict, copy_preset_to_dict, copy_setup_to_dict,
+    ensure_preset_uids, get_active_collection, get_active_object, get_active_preset, get_job,
+    paste_collection_from_dict, paste_ng_from_dict, paste_preset_from_dict, remove_job, upgrade_nodegroup_dicts)
 from .ui_cache import (expand_last_dirs, is_dir_collapsed, iter_tree_dirs, load_toggled_dirs, save_toggled_dirs,
     set_dir_collapsed)
 
@@ -22,13 +22,13 @@ _clipboard = {"preset": None, "collection": None, "nodegroup": None}
 class BATCH_STL_OT_export_presets_json(bpy.types.Operator, ExportHelper):
     bl_idname = "batch_stl.export_presets_json"
     bl_label = "Export JSON"
-    bl_description = "Export all presets to a JSON file"
+    bl_description = "Export all presets, the global overrides and the root folder to a JSON file"
     filename_ext = ".json"
     filter_glob: bpy.props.StringProperty(default="*.json", options={'HIDDEN'})
     def execute(self, context):
         try:
             with open(self.filepath, 'w', encoding="utf-8") as f:
-                json.dump([copy_preset_to_dict(p) for p in context.scene.batch_stl_presets], f, indent=4)
+                json.dump(copy_setup_to_dict(context.scene), f, indent=4)
             self.report({'INFO'}, f"Presets exported to {os.path.basename(self.filepath)}")
             return {'FINISHED'}
         except Exception as e:
@@ -38,26 +38,49 @@ class BATCH_STL_OT_export_presets_json(bpy.types.Operator, ExportHelper):
 class BATCH_STL_OT_import_presets_json(bpy.types.Operator, ImportHelper):
     bl_idname = "batch_stl.import_presets_json"
     bl_label = "Import JSON"
-    bl_description = "Import presets from a JSON file"
+    bl_description = "Add the presets of a JSON file, and take its global overrides and root folder"
     bl_options = {'REGISTER', 'UNDO'}
     filename_ext = ".json"
     filter_glob: bpy.props.StringProperty(default="*.json", options={'HIDDEN'})
+    # The scene has one of each, so taking the file's replaces the scene's. Files from before they were exported have
+    # neither and leave the scene's alone.
+    use_global_overrides: bpy.props.BoolProperty(name="Global Overrides", default=True, description=(
+        "Replace the scene's global overrides with the ones in the file. They apply to every preset, so with them the "
+        "imported presets write the same files as where they were exported"))
+    use_root_dir: bpy.props.BoolProperty(name="Root Folder", default=True, description="Set the scene's root folder to the one in the file")
+
     @inside_operator
     def execute(self, context):
-        before = len(context.scene.batch_stl_presets)
+        scene = context.scene
+        presets, global_ngs = scene.batch_stl_presets, scene.batch_stl_global_nodegroups
+        before, old_root, old_global = len(presets), scene.batch_stl_root_dir, None
         try:
             with open(self.filepath, 'r', encoding="utf-8") as f:
                 data = json.load(f)
-            if not isinstance(data, list):
-                self.report({'ERROR'}, "Invalid JSON: expected a list of preset objects.")
+            if isinstance(data, list): data = {"presets": data}  # a file of an earlier version: the presets only
+            if not isinstance(data, dict) or not isinstance(data.get("presets"), list):
+                self.report({'ERROR'}, "Invalid JSON: expected the presets of a Combi Export file.")
                 return {'CANCELLED'}
-            for p_data in data:
-                paste_preset_from_dict(context.scene.batch_stl_presets.add(), p_data)
-            ensure_preset_uids(context.scene)
-            self.report({'INFO'}, f"Presets imported from {os.path.basename(self.filepath)}")
+            for p_data in data["presets"]:
+                paste_preset_from_dict(presets.add(), p_data)
+            taken = []
+            if self.use_global_overrides and isinstance(data.get("global_nodegroups"), list):
+                old_global = [copy_ng_to_dict(ng) for ng in global_ngs]
+                upgrade_nodegroup_dicts(data["global_nodegroups"], data.get("data_version", 0))
+                global_ngs.clear()
+                for ng_data in data["global_nodegroups"]: paste_ng_from_dict(global_ngs, ng_data)
+                taken.append("global overrides")
+            if self.use_root_dir and isinstance(data.get("root_dir"), str):
+                scene.batch_stl_root_dir = data["root_dir"]
+                taken.append("root folder")
+            ensure_preset_uids(scene)
+            self.report({'INFO'}, f"Presets imported from {os.path.basename(self.filepath)}" + (f", with its {' and '.join(taken)}" if taken else ""))
         except Exception as e:
-            while len(context.scene.batch_stl_presets) > before:
-                context.scene.batch_stl_presets.remove(len(context.scene.batch_stl_presets) - 1)
+            while len(presets) > before: presets.remove(len(presets) - 1)
+            if old_global is not None:
+                global_ngs.clear()
+                for ng_data in old_global: paste_ng_from_dict(global_ngs, ng_data)
+            scene.batch_stl_root_dir = old_root
             self.report({'ERROR'}, f"Failed to import presets: {e}")
             return {'CANCELLED'}
         mark_dirty()
@@ -390,12 +413,25 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
                         # An empty value (unknown menu items, empty string range) would delete the value it is written to
                         parsed_vals = [x for x in parse_sweep_values(MockOverride(target, ng_ptr, node_obj.name, [temp_inp]), temp_inp) if x != ""]
                         if parsed_vals:
-                            for p_idx, p_val in enumerate(parsed_vals):
-                                v = val if p_idx == 0 else vals.add()
-                                v.use_sweep = False
-                                v.use_dir, v.dir_tag, v.use_tag, v.tag = val.use_dir, val.dir_tag, val.use_tag, val.tag  # generated values inherit the sweep's tag settings
-                                if inp_obj.override_type in ('FLOAT', 'INT', 'STRING'): v.value_string = str(p_val)
-                                elif inp_obj.override_type in ('MENU', 'BOOLEAN'): v.value_menu = str(p_val)
+                            # A step that repeats another value of the input, or an earlier step (a step of 0 in
+                            # imported data), is left out: written, it would be rejected as a duplicate and stay blank
+                            override_type = inp_obj.override_type
+                            prop = "value_menu" if override_type in ('MENU', 'BOOLEAN') else "value_string"
+                            taken = [f for f in (value_fields(o, override_type) for o in vals if o != val and not o.use_sweep) if f]
+                            new = []
+                            for p_val in parsed_vals:
+                                fields = {"use_sweep": False, prop: str(p_val)}
+                                if not any(same_fields(override_type, f, fields) for f in taken + new): new.append(fields)
+                            # Generated values inherit the sweep's naming. Read first: add() and remove() can move the
+                            # items in memory, so `val` is looked up again
+                            naming = val.use_dir, val.dir_tag, val.use_tag, val.tag
+                            if not new: vals.remove(self.v_idx)  # every step is a value already
+                            with raw_edits():
+                                for p_idx, fields in enumerate(new):
+                                    v = vals[self.v_idx] if p_idx == 0 else vals.add()
+                                    v.use_sweep = False
+                                    v.use_dir, v.dir_tag, v.use_tag, v.tag = naming
+                                    setattr(v, prop, fields[prop])
 
     @inside_operator
     def execute(self, context):

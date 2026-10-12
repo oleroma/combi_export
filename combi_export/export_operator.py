@@ -38,23 +38,51 @@ class BATCH_STL_OT_cancel_export(bpy.types.Operator):
         return {'FINISHED'}
 
 class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
+    """The export button follows the worker with a modal timer, so Blender stays usable (invoke). Called from a script,
+    bpy.ops.export_scene.batch_stl_multi(preset_index=...) waits for the worker and returns once every file is written,
+    with the worker's output printed as it comes (execute). An error is reported as such: bpy.ops raises it."""
     bl_idname = "export_scene.batch_stl_multi"
     bl_label = "Export"
     bl_description = "Start batch STL export"
     bl_options = {"REGISTER"}
-    preset_index: bpy.props.IntProperty(default=-1)
+    preset_index: bpy.props.IntProperty(name="Preset Index", description="Preset to export; -1 exports the active preset", default=-1, options={'SKIP_SAVE'})
+    echo = False  # print the log lines too (a scripted export, see execute)
 
     @classmethod
     def poll(cls, context): return len(context.scene.batch_stl_presets) > 0
 
     def invoke(self, context, event):
+        result = self._start(context)
+        if result == {'RUNNING_MODAL'}:
+            self._timer = context.window_manager.event_timer_add(0.1, window=context.window)
+            context.window_manager.modal_handler_add(self)
+        return result
+
+    def execute(self, context):
+        self.echo = True
+        result = self._start(context)
+        while result == {'RUNNING_MODAL'}:
+            time.sleep(0.1)
+            result = self._poll(context)
+        return result
+
+    def _log(self, job, text):
+        """A line of the export log; a scripted export prints it too."""
+        log_to_console(job, text)
+        if self.echo: print(text, flush=True)
+
+    def _start(self, context):
+        """Check the preset, write the objects without overrides and start the worker for the others. Returns
+        {'RUNNING_MODAL'} while the worker runs (see _poll)."""
         self._timer = self.process = None
         self.total_operations, self.current_op = 1, 0
         self.export_start_time = time.perf_counter()
         scene = context.scene
 
         preset_idx = self.preset_index if self.preset_index >= 0 else scene.batch_stl_preset_index
-        if preset_idx < 0 or preset_idx >= len(scene.batch_stl_presets): return {"CANCELLED"}
+        if preset_idx < 0 or preset_idx >= len(scene.batch_stl_presets):
+            self.report({'ERROR'}, f"No preset at index {preset_idx}")
+            return {"CANCELLED"}
         scene.batch_stl_preset_index = preset_idx
         ensure_preset_uids(scene)
         preset = scene.batch_stl_presets[preset_idx]
@@ -63,7 +91,9 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
         self.scene_uid, self.preset_uid, self.preset_name = scene.session_uid, preset.uid, preset.name
         job = get_job(preset, create=True)
 
-        if job.is_exporting: return {'CANCELLED'}
+        if job.is_exporting:
+            self.report({'ERROR'}, f"{preset.name} is already exporting")
+            return {'CANCELLED'}
         if not scene.batch_stl_root_dir:
             self.report({'ERROR'}, "Missing Root Directory")
             return {"CANCELLED"}
@@ -90,7 +120,7 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
         for c in preset.collections:
             # e.g. the collection was renamed or deleted: say so instead of reporting a complete export
             if c.collection_name and not bpy.data.collections.get(c.collection_name):
-                log_to_console(job, f"SKIPPED (collection not found): {c.collection_name}")
+                self._log(job, f"SKIPPED (collection not found): {c.collection_name}")
 
         objects_to_export_directly = [(c, obj_prop, bl_obj) for _c_idx, c, obj_prop, bl_obj, ovrs in targets if not ovrs]
         needs_headless = any(t[4] for t in targets)
@@ -98,7 +128,7 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
         if objects_to_export_directly:
             depsgraph = context.evaluated_depsgraph_get()
             instance_arrays = collect_instance_arrays(depsgraph, [item[2] for item in objects_to_export_directly])
-            log_to_console(job, f"=== STARTING NATIVE DIRECT EXPORT ({len(objects_to_export_directly)} Objects) ===")
+            self._log(job, f"=== STARTING NATIVE DIRECT EXPORT ({len(objects_to_export_directly)} Objects) ===")
             for c, obj_prop, bl_obj in objects_to_export_directly:
                 t_dir_start = time.perf_counter()
                 full_dir_parts, filename = export_file_parts(preset, c, obj_prop, bl_obj)
@@ -107,11 +137,11 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
 
                 result_text = export_object_stl(filepath, bl_obj, depsgraph, instance_arrays.get(bl_obj.name_full, ()))
 
-                log_to_console(job, f"{preset.name} | {c.collection_name} | {bl_obj.name} | Permutation 1/1 | Batch 1/1\n  └─ {result_text} | {time.perf_counter() - t_dir_start:.2f} s")
+                self._log(job, f"{preset.name} | {c.collection_name} | {bl_obj.name} | Permutation 1/1 | Batch 1/1\n  └─ {result_text} | {time.perf_counter() - t_dir_start:.2f} s")
 
         if not needs_headless:
             preset.last_export_time = time.perf_counter() - self.export_start_time
-            log_to_console(job, f"=== BATCH EXPORT COMPLETE ({preset.last_export_time:.4f}s) ===")
+            self._log(job, f"=== BATCH EXPORT COMPLETE ({preset.last_export_time:.4f}s) ===")
             self.report({'INFO'}, f"Batch Export {preset.name} Complete in {preset.last_export_time:.2f}s.")
             redraw_sidebars(context)
             self.cleanup(context)
@@ -144,7 +174,7 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
             self.cleanup(context)
             return {'CANCELLED'}
 
-        log_to_console(job, f"=== INITIATING HEADLESS EXPORT '{preset.name}' [{time.perf_counter() - t_spawn_start:.4f}s Boot] ===")
+        self._log(job, f"=== INITIATING HEADLESS EXPORT '{preset.name}' [{time.perf_counter() - t_spawn_start:.4f}s Boot] ===")
 
         self.q = queue.Queue()
         def enqueue_output(out, q):
@@ -153,8 +183,6 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
         self.t = threading.Thread(target=enqueue_output, args=(self.process.stdout, self.q)); self.t.daemon = True; self.t.start()
 
         job.is_exporting, job.cancel_export, job.export_progress = True, False, 0.0
-        self._timer = context.window_manager.event_timer_add(0.1, window=context.window)
-        context.window_manager.modal_handler_add(self)
         return {'RUNNING_MODAL'}
 
     def _preset(self):
@@ -180,9 +208,15 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
             elif line.startswith("BATCH_STL_DONE"):
                 return True
             elif line:
-                log_to_console(job, line)
+                self._log(job, line)
 
     def modal(self, context, event):
+        result = self._poll(context, read_output=event.type == 'TIMER')
+        return {'PASS_THROUGH'} if result == {'RUNNING_MODAL'} else result
+
+    def _poll(self, context, read_output=True):
+        """Follow the running worker: stop on a cancel, process its output, and finish once it is done or gone.
+        Returns {'RUNNING_MODAL'} while it runs."""
         try:
             job = self._job()
             if job is None:  # a file load cleared the jobs: this export belonged to a file that is gone
@@ -194,7 +228,7 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
                 self.report({'WARNING'}, f"Export cancelled for {self.preset_name}.")
                 return {'CANCELLED'}
 
-            if event.type == 'TIMER':
+            if read_output:
                 elapsed = time.perf_counter() - self.export_start_time
                 finished = self._drain_output(job)
                 worker_exited = self.process.poll() is not None
@@ -207,7 +241,7 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
                     self.cleanup(context)
                     preset = self._preset()
                     if preset: preset.last_export_time = elapsed
-                    log_to_console(job, f"=== BATCH EXPORT COMPLETE ({elapsed:.4f}s) ===")
+                    self._log(job, f"=== BATCH EXPORT COMPLETE ({elapsed:.4f}s) ===")
                     self.report({'INFO'}, f"Batch Export {self.preset_name} Complete in {elapsed:.2f}s.")
                     redraw_sidebars(context)
                     return {'FINISHED'}
@@ -215,7 +249,7 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
                 if worker_exited:
                     exit_code = self.process.returncode
                     self.cleanup(context)
-                    log_to_console(job, f"[!] CRASH DETECTED: Worker exited with code {exit_code} before finishing.")
+                    self._log(job, f"[!] CRASH DETECTED: Worker exited with code {exit_code} before finishing.")
                     self.report({'ERROR'}, f"Background worker crashed for preset {self.preset_name}.")
                     redraw_sidebars(context)
                     return {'CANCELLED'}
@@ -227,7 +261,7 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
             self.cleanup(context)
             self.report({'ERROR'}, "Unexpected error during batch export.")
             return {'CANCELLED'}
-        return {'PASS_THROUGH'}
+        return {'RUNNING_MODAL'}
 
     def cancel(self, context):
         # Called by Blender when the modal is torn down from outside (e.g. loading another file).

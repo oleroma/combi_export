@@ -78,6 +78,22 @@ class CombinationTests(EngineTestCase):
         override(self.obj_entry().nodegroups, "Size", "FLOAT", "\\3")
         self.assertPaths(["3/Box.stl", "1/Box2.stl", "2/Box2.stl"])
 
+    def test_block_keeps_its_folder_when_a_lower_level_replaces_its_values(self):
+        """The folder of an inherited block does not depend on whether the block keeps a value of its own."""
+        global_ng = lambda: self.scene.batch_stl_global_nodegroups[0]
+        override(self.scene.batch_stl_global_nodegroups, "Size", "FLOAT", "\\1", group_naming="\\G")
+        self.assertPaths(["G/1/Box.stl"])
+        override(self.obj_entry().nodegroups, "Size", "FLOAT", "\\3")
+        self.assertPaths(["G/3/Box.stl"])
+        add_input(global_ng().nodes[0], "Count", "INT", "\\7")
+        self.assertPaths(["G/7/3/Box.stl"])
+        # A block without naming whose values are all replaced still goes
+        global_ng().sub_path = ""
+        global_ng().nodes[0].inputs.remove(1)
+        live = ce.targets.live_collection_names(bpy.context.view_layer)
+        (*_rest, ovrs), = ce.targets.iter_export_objects(self.scene, self.preset, live)
+        self.assertEqual([o.level for o in ovrs], ["OBJECT"])
+
     def test_overrides_skip_objects_without_the_group(self):
         make_object("Plain")
         ce.targets.sync_collection_objects(self.col)
@@ -195,6 +211,25 @@ class FastCountTests(unittest.TestCase):
                 sub = rnd.choice(("", "", "blk"))
                 overrides.append(ce.engine.MockOverride('MODIFIER', None, "<Modifier Interface>", inputs, level, sub, "", "", "", (level, o)))
         return overrides
+
+    def test_count_and_keep(self):
+        """The worker's count: variants kept from enumerating (anchors) up to the limit, nothing without anchors."""
+        A = types.SimpleNamespace(input_name="A", override_type="INT")
+        def value(v, dir_t):
+            return types.SimpleNamespace(value_string=str(v), value_menu="", use_sweep=False, use_dir=True, dir_tag=dir_t, use_tag=False, tag="")
+        upstream = ce.engine.MockOverride('MODIFIER', None, "", [ce.engine.MockInput(A, value(v, "*"), True) for v in (1, 2, 3)], "GLOBAL", group_uid=1)
+        B = types.SimpleNamespace(input_name="B", override_type="INT")
+        anchored = ce.engine.MockOverride('MODIFIER', None, "", [ce.engine.MockInput(B, value(v, "2/*"), True) for v in (7, 8)], "PRESET", group_uid=2)
+        free = ce.engine.MockOverride('MODIFIER', None, "", [ce.engine.MockInput(B, value(v, "*"), True) for v in (7, 8)], "PRESET", group_uid=2)
+
+        stack = [upstream, anchored]  # B's values only apply in the 2 branch: 1, 2/7, 2/8, 3
+        variants = list(ce.engine.generate_named_combinations(stack))
+        self.assertEqual(len(variants), 4)
+        count, kept = ce.engine.count_and_keep_combinations(stack, 4)
+        self.assertEqual(count, 4)
+        self.assertEqual([(t, d) for _c, t, d in kept], [(t, d) for _c, t, d in variants])
+        self.assertEqual(ce.engine.count_and_keep_combinations(stack, 3), (4, None))
+        self.assertEqual(ce.engine.count_and_keep_combinations([upstream, free], 100), (6, None))
 
     def test_product_count_matches_pruned_generation(self):
         rnd, checked = random.Random(1234), 0

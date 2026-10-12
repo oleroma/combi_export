@@ -5,6 +5,8 @@ import re
 
 import bpy
 
+from .common import bump_revision
+
 def clean_node_name(name):
     if not name: return ""
     return name.split(" [")[0].strip()
@@ -100,7 +102,9 @@ def socket_menu_items(node, sock):
     except TypeError as e:
         listed = re.search(r"not found in \((.*)\)\s*$", str(e))
         if listed:
-            items = _socket_menu_memo[key] = re.findall(r"'([^']*)'", listed.group(1))
+            items = re.findall(r"'([^']*)'", listed.group(1))
+            if _socket_menu_memo.get(key) != items: bump_revision()  # the merge predictions drawn with the old items
+            _socket_menu_memo[key] = items
             return items
     except (AttributeError, RuntimeError): pass  # drawing, or linked (read-only) data
     return _socket_menu_memo.get(key)

@@ -8,7 +8,7 @@ import traceback
 import bpy
 from bpy.app.handlers import persistent
 
-from .common import COUNT_LIMIT, mark_dirty, redraw_sidebars, _ui_cache
+from .common import COUNT_LIMIT, bump_revision, mark_dirty, redraw_sidebars, _ui_cache
 from .nodes import cached_menu_items, get_menu_switch_items
 from .naming import clash_key
 from .engine import count_override_combinations, generate_named_combinations, get_flat_overrides, get_override_signature
@@ -130,6 +130,8 @@ def batch_stl_undo_handler(*args):
 
 @persistent
 def batch_stl_depsgraph_handler(scene, depsgraph):
+    # Menu items and node groups the merge predictions read can change in the node editor
+    if depsgraph.id_type_updated('NODETREE'): bump_revision()
     if _ui_cache.get("is_dirty", False): return
     if not any(c.collection_name for p in scene.batch_stl_presets for c in p.collections): return
 
@@ -138,10 +140,13 @@ def batch_stl_depsgraph_handler(scene, depsgraph):
         mark_dirty()
         return
 
-    if not depsgraph.id_type_updated('OBJECT') and not depsgraph.id_type_updated('SCENE'):
+    # Renamed or hidden objects; excluded or re-included collections. Only a scene update (exclusion, visibility) or an
+    # object update that re-evaluates nothing (a rename) can change them: every step of a transform drag, and every
+    # geometry or material edit, only re-evaluates objects, so they skip the walk over the mapped objects.
+    if not depsgraph.id_type_updated('SCENE') and not (depsgraph.id_type_updated('OBJECT') and any(
+            isinstance(u.id, bpy.types.Object) and not (u.is_updated_transform or u.is_updated_geometry or u.is_updated_shading)
+            for u in depsgraph.updates)):
         return
-
-    # Renamed or hidden objects; excluded or re-included collections
     if (mapped_objects_state(scene) != _ui_cache.get("objects_state")
             or live_collection_names(bpy.context.view_layer) != _ui_cache.get("live")):
         mark_dirty()

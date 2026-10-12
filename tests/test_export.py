@@ -1,5 +1,5 @@
-"""End to end: the export operator (invoke / modal) on the direct path and with the background worker, and the worker's
-output protocol."""
+"""End to end: the export operator (invoke / modal, and execute for scripts) on the direct path and with the background
+worker, and the worker's output protocol."""
 import contextlib
 import io
 import os
@@ -8,6 +8,7 @@ import threading
 import time
 import types
 import warnings
+from unittest import mock
 
 import bpy
 import combi_export as ce
@@ -171,12 +172,56 @@ class WorkerExportTests(BlenderTestCase):
             self.assertEqual(len(read_stl(os.path.join(self.tmp, path))[1]), tris, path)
         self.assertTrue(bpy.data.objects["Inst"].hide_get())
 
+    def test_scripted_export_waits_for_the_worker(self):
+        """bpy.ops runs execute(): the export is done when the call returns, with its log printed; errors raise."""
+        make_object("Box", group=make_gn_group())
+        make_object("Plain", mesh=cube_mesh())
+        preset = make_preset()
+        override(preset.nodegroups, "Size", "FLOAT", "\\1", "\\2")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(bpy.ops.export_scene.batch_stl_multi(), {'FINISHED'})
+        self.assertEqual(written_files(self.tmp), ["1/Box.stl", "2/Box.stl", "Plain.stl"])
+        self.assertIn("Permutation 2/2", out.getvalue())
+        self.assertIn("BATCH EXPORT COMPLETE", out.getvalue())
+        self.assertFalse(ce.data.get_job(preset).is_exporting)
+        with self.assertRaises(RuntimeError): bpy.ops.export_scene.batch_stl_multi(preset_index=3)
+        bpy.context.scene.batch_stl_root_dir = ""
+        with self.assertRaises(RuntimeError): bpy.ops.export_scene.batch_stl_multi()
+
     def run_worker(self, job):
         """run_headless_export in this process: (exit code, printed output)."""
         out = io.StringIO()
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as exit:
             ce.headless.run_headless_export(job)
         return exit.exception.code, out.getvalue()
+
+    def test_worker_generates_merged_variants_once(self):
+        """Variants that values merging into a branch limit are only counted by enumerating them: the worker keeps them
+        from counting for the export, unless there are more than KEEP_VARIANTS."""
+        make_object("Box", group=make_gn_group())
+        preset = make_preset()
+        override(bpy.context.scene.batch_stl_global_nodegroups, "Mode", "MENU", "\\A", "\\B")
+        override(preset.nodegroups, "Size", "FLOAT", "\\A\\3")
+        expected = sorted(planned_paths())
+        self.assertEqual(expected, ["A/3/Box.stl", "B/Box.stl"])
+        generate = ce.engine.generate_named_combinations
+        for keep, generations in ((ce.headless.KEEP_VARIANTS, 1), (1, 2)):
+            with self.subTest(keep=keep):
+                calls = []
+                def counted(*args, **kwargs):
+                    calls.append(1)
+                    return generate(*args, **kwargs)
+                job, root = os.path.join(self.tmp, "job.json"), os.path.join(self.tmp, f"out{keep}")
+                write_job(job, preset, root)
+                with mock.patch.object(ce.engine, "generate_named_combinations", counted), \
+                        mock.patch.object(ce.headless, "generate_named_combinations", counted), \
+                        mock.patch.object(ce.headless, "KEEP_VARIANTS", keep):
+                    code, out = self.run_worker(job)
+                self.assertEqual(code, 0, out)
+                self.assertIn("BATCH_STL_TOTAL:2", out)
+                self.assertEqual(written_files(root), expected)
+                self.assertEqual(len(calls), generations)
 
     def test_worker_exports_the_preset_of_the_job_scene(self):
         """Not the one of the context's scene (in the worker: the saved file's first window), here 'Main'."""

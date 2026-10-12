@@ -100,11 +100,18 @@ class ValueInferenceTests(unittest.TestCase):
 class RejectionTests(unittest.TestCase):
     def test_rejected(self):
         cases = [("1.5", "INT"), ("abc", "INT"), ("0:1:1001", "FLOAT"), ("0:1:0", "FLOAT"), ("0:1", "FLOAT"),
-                 ("\\a<b", "INT"), ("\\a b\\15", "INT"), ("\\a\\_b\\c", "INT"), ("Z", "MENU"), ("{ , }", "STRING")]
+                 ("\\a<b", "INT"), ("\\a b\\15", "INT"), ("\\a\\_b\\c", "INT"), ("Z", "MENU"), ("{ , }", "STRING"),
+                 # every step of a sweep differs; numbers are finite
+                 ("0:0:5", "FLOAT"), ("\\1:0:3", "INT"), ("0:1e-9:3", "FLOAT"), ("{a, b, a}", "STRING"),
+                 ("nan", "FLOAT"), ("inf\\", "FLOAT"), ("-Infinity", "FLOAT"), ("1e999", "FLOAT"), ("0:nan:3", "FLOAT"),
+                 ("1e308:1e308:3", "FLOAT")]
         for text, override_type in cases:
             with self.subTest(field=text, type=override_type):
                 with self.assertRaises(ValueError):
                     parse(text, override_type, None if override_type != "MENU" else "A", items=MENU if override_type == "MENU" else None)
+
+    def test_single_step_sweep_may_have_any_step(self):
+        self.assertTrue(parse("\\2:0:1", "FLOAT")[0]["use_sweep"])
 
     def test_numbers_never_hold_underscores(self):
         # int('1_0') would accept it: the '_' starts the filename section instead

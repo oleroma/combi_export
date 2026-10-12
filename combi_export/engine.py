@@ -8,6 +8,7 @@ import bpy
 from .common import COUNT_LIMIT, MAX_SWEEP_STEPS
 from .nodes import clean_node_name, get_menu_switch_items
 from .naming import SCOPE_KINDS, segment_tags, split_path_parts, split_tag_parts, value_field_anchors, value_parts
+from .fields import parse_number, string_sweep_values, sweep_numbers
 
 def get_input_value(inp):
     if inp.override_type == 'BOOLEAN': return inp.value_menu.lower() == 'true'
@@ -43,7 +44,11 @@ def resolve_overrides(overrides):
     for ovr in overrides:
         rank = LEVEL_RANK.get(ovr.level, -1)
         kept = [inp for inp in ovr.inputs if best_rank[override_param_key(ovr, inp.input_name)] == rank]
-        if kept or not ovr.inputs: resolved.append(MockOverride(ovr.override_target, ovr.parent_group_ptr, ovr.node_name, kept, ovr.level, getattr(ovr, "ng_sub_path", ""), getattr(ovr, "node_sub_path", ""), getattr(ovr, "ng_tag", ""), getattr(ovr, "node_tag", ""), getattr(ovr, "group_uid", None)))
+        naming = tuple(getattr(ovr, k, "") for k in ("ng_sub_path", "node_sub_path", "ng_tag", "node_tag"))
+        # A block whose values are all replaced keeps its sub-folder and tag, like a block without inputs: they name
+        # what the stack puts below them, wherever its values come from (a Global '\G' over Size keeps G/ when an
+        # object sets its own Size)
+        if kept or not ovr.inputs or any(naming): resolved.append(MockOverride(ovr.override_target, ovr.parent_group_ptr, ovr.node_name, kept, ovr.level, *naming, getattr(ovr, "group_uid", None)))
     return resolved
 
 def get_override_signature(overrides):
@@ -148,34 +153,17 @@ def parse_sweep_values(ovr, inp):
     if inp.override_type == 'BOOLEAN':
         return [True, False]
     elif inp.override_type == 'STRING':
-        if not inp.sweep_range:
-            return [""]
-        res = [s.strip() for s in inp.sweep_range.split(',') if s.strip()]
-        return res if res else [""]
+        return string_sweep_values(inp.sweep_range) or [""]
     elif inp.override_type in ['INT', 'FLOAT']:
-        vals = []
+        # Validation flags every fallback below (see number_sweep_values); they only keep imported data drawable
         is_float = (inp.override_type == 'FLOAT')
-        start_str = getattr(inp, "sweep_start", "0")
-        step_str = getattr(inp, "sweep_step", "1")
-        count_str = getattr(inp, "sweep_count", "2")
-
-        try: start = float(start_str) if is_float else int(start_str)
+        try: start = parse_number(getattr(inp, "sweep_start", "0"), inp.override_type)
         except ValueError: start = 0.0 if is_float else 0
-
-        try: step = float(step_str) if is_float else int(step_str)
+        try: step = parse_number(getattr(inp, "sweep_step", "1"), inp.override_type)
         except ValueError: step = 1.0 if is_float else 1
-
-        try: count = int(count_str)
+        try: count = int(getattr(inp, "sweep_count", "2"))
         except ValueError: count = 2
-        count = min(count, MAX_SWEEP_STEPS)  # validation flags larger counts; this only guards imported data
-
-        if count <= 0:
-            vals.append(round(start, 8) if is_float else int(start))
-        else:
-            for i in range(count):
-                v = round(start + i * step, 8) if is_float else int(start + i * step)
-                vals.append(v)
-        return vals
+        return sweep_numbers(start, step, min(max(count, 1), MAX_SWEEP_STEPS), inp.override_type)
     elif inp.override_type == 'MENU':
         items = get_menu_switch_items(ovr.parent_group_ptr, ovr.node_name, inp.input_name)
         return items if items else [""]
@@ -216,6 +204,22 @@ def count_override_combinations(overrides, cache=None, limit=COUNT_LIMIT):
         count = math.prod(len(pool) for pool in _build_override_pools(overrides))
     if cache is not None: cache[sig] = count
     return count
+
+def count_and_keep_combinations(overrides, keep):
+    """(number of variants, the variants or None), for a caller that needs the number before it goes through them (the
+    worker's progress total). With branch anchors only enumerating counts them, so up to `keep` variants are kept from
+    that pass instead of being generated twice (None when there are more). Without anchors the count is a product and
+    nothing is kept: generating costs little more than reading a list would."""
+    known_before = _known_branch_dirs(overrides)
+    if not _has_branch_anchors(overrides, known_before):
+        return math.prod(len(pool) for pool in _build_override_pools(overrides)), None
+    count, kept = 0, []
+    for variant in generate_named_combinations(overrides, known_before):
+        count += 1
+        if kept is not None:
+            if count > keep: kept = None
+            else: kept.append(variant)
+    return count, kept
 
 def _has_branch_anchors(overrides, known_before):
     """Whether a block or an explicitly named value names a branch name created above it. Only then can a value be

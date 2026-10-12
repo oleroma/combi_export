@@ -1,6 +1,7 @@
 """Syntax of the override table's text fields: a value field ('\\B\\15\\_x_15') read into a value and its naming
 templates and written back, a block naming field ('\\C\\2\\_B'), and the naming of new values (ARCHITECTURE.md,
 Expression Fields). Text only: the property callbacks that use it are in props."""
+import math
 import re
 
 from .common import MAX_SWEEP_STEPS
@@ -219,26 +220,56 @@ def section_template(kind, chars, closed, is_value):
     if not run: return _typed_text(chars, "_/")
     return _typed_text(chars[:run[0]], "_/") + VALUE_SLOT + _typed_text(chars[run[1]:], "_/")
 
+def parse_number(text, override_type):
+    """The number in a FLOAT / INT field. ValueError for other text, and for nan and inf: a socket set to them gives no
+    usable geometry, and no file should be named after them."""
+    value = float(text) if override_type == 'FLOAT' else int(text)
+    if not math.isfinite(value): raise ValueError(f"{text} is not a finite number")
+    return value
+
+def sweep_numbers(start, step, count, override_type):
+    """The values of a number sweep start:step:count (floats rounded to 8 decimals)."""
+    if override_type == 'FLOAT': return [round(start + i * step, 8) for i in range(count)]
+    return [int(start + i * step) for i in range(count)]
+
+def string_sweep_values(sweep_range):
+    """The strings of a string sweep '{a, b}' (the text inside the braces), blanks left out."""
+    return [s.strip() for s in sweep_range.split(",") if s.strip()]
+
+def steps_differ(values):
+    """Whether every step of a sweep is a different, finite value. A step of 0 (or one lost in the rounding) repeats
+    the start, and every repeat would write the same files again."""
+    return len(set(values)) == len(values) and all(math.isfinite(v) for v in values if isinstance(v, float))
+
+def number_sweep_values(start, step, count, override_type):
+    """The values of the number sweep with the texts start:step:count. ValueError when they are not valid: numbers (see
+    parse_number), a count from 1 to MAX_SWEEP_STEPS, and values that all differ (steps_differ)."""
+    count = int(count)
+    if not 1 <= count <= MAX_SWEEP_STEPS: raise ValueError(f"a sweep has 1 to {MAX_SWEEP_STEPS} steps")
+    values = sweep_numbers(parse_number(start, override_type), parse_number(step, override_type), count, override_type)
+    if not steps_differ(values): raise ValueError("every step of a sweep must be a different finite value")
+    return values
+
 def read_expr_value(chars, override_type, items=None):
     """{property: value} the value text (lexed chars) sets on a BatchSTLValue. Raises ValueError when it does not fit
     the input type. `items` are the menu items, when they are known (a menu value is then one of them)."""
     text = expr_text(chars)
     if not text: raise ValueError("no value")
     if override_type in ('FLOAT', 'INT'):
-        parse = float if override_type == 'FLOAT' else int
         if "_" in text: raise ValueError("'_' starts a filename section")  # int() and float() would accept '1_0'
         if ":" in text:
             pieces = [p.strip() for p in text.split(":")]
             if len(pieces) != 3: raise ValueError("a number sweep is start:step:count")
-            parse(pieces[0]); parse(pieces[1])
-            if not 1 <= int(pieces[2]) <= MAX_SWEEP_STEPS: raise ValueError(f"a sweep has 1 to {MAX_SWEEP_STEPS} steps")
+            number_sweep_values(*pieces, override_type)
             return {"use_sweep": True, "sweep_start": pieces[0], "sweep_step": pieces[1], "sweep_count": pieces[2]}
-        parse(text)
+        parse_number(text, override_type)
         return {"use_sweep": False, "value_string": text}
     if override_type == 'STRING':
         if len(chars) > 1 and bare(chars[0], "{") and bare(chars[-1], "}"):
             inner = expr_text(chars[1:-1])
-            if not any(s.strip() for s in inner.split(",")): raise ValueError("an empty list")
+            strings = string_sweep_values(inner)
+            if not strings: raise ValueError("an empty list")
+            if not steps_differ(strings): raise ValueError("a list holds a string twice")
             return {"use_sweep": True, "sweep_range": inner}
         return {"use_sweep": False, "value_string": text}
     if override_type in ('BOOLEAN', 'MENU'):

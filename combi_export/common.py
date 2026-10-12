@@ -16,10 +16,18 @@ _ui_cache = {
     "stats": {"global": {"presets": 0, "cols": 0, "objs": 0, "exp": 0}, "presets": {}, "cols": {}},
     "tree": ({}, set()),
     "preset_metrics": {},
+    # Bumped whenever data the panels show may have changed: every edit (mark_dirty), node tree updates and menu items
+    # found changed. Draw-time caches (the override tables' merge predictions) hold for one revision.
+    "revision": 0,
 }
 
 def mark_dirty(self=None, context=None):
     _ui_cache["is_dirty"] = True
+    _ui_cache["revision"] += 1
+
+def bump_revision():
+    """Data the panels show changed without needing a UI cache rebuild (see _ui_cache["revision"])."""
+    _ui_cache["revision"] += 1
 
 # Blender gives every UI-edited property an undo step except search fields (prop_search / StringProperty(search=...)):
 # those buttons are created without UI_BUT_UNDO, so picking an item from the dropdown leaves no history entry.

@@ -112,6 +112,59 @@ def naming_icon(block, res):
     if any(res[kind][0] or res[kind][1] for kind in SCOPE_KINDS): return ICONS['MERGE']
     return ICONS['TAG'] if block.tag and not block.sub_path else ICONS['DIR']
 
+def merge_state(res, scope):
+    """(dead, text, tooltip) of a block whose sub-folder or tag merges into upstream names, else None. Dead when the
+    chosen names can never exist together (the block never applies). The tooltip is taken now: names added further
+    down the stack must not change it."""
+    hits = [(k, n) for k in SCOPE_KINDS for n in res[k][0]]
+    dead = [(k, n) for k in SCOPE_KINDS for n in res[k][1]]
+    if not hits and not dead: return None
+    segments = []
+    d_names, t_names = res["dir"][0] + res["dir"][1], res["tag"][0] + res["tag"][1]
+    if d_names: segments.append(" / ".join(d_names))
+    if t_names: segments.append("name " + " + ".join(t_names))
+    text = ("Never applies: " if dead else "Merges into ") + " · ".join(segments)
+    return bool(dead), text, merge_tooltip(hits, dead, scope)
+
+def predict_table(nodegroups):
+    """Merge predictions of a non-empty override table, built in export order like the exporter walks it (see
+    BranchScope): {(ng_idx,) and (ng_idx, n_idx): (naming icon, merge state or None), (ng_idx, n_idx, i_idx, v_idx):
+    value_info()}."""
+    out = {}
+    scope = upstream_scope(nodegroups[0])[0]
+    for ng_idx, ng in enumerate(nodegroups):
+        ng_ptr = bpy.data.node_groups.get(ng.group_name)
+        ng_ctx, ng_res = scope.enter_block(ng, frozenset(), ng)
+        ng_alive = not scope_dead(ng_res)
+        out[ng_idx,] = naming_icon(ng, ng_res), merge_state(ng_res, scope)
+        for n_idx, node in enumerate(ng.nodes):
+            n_ctx, n_res = scope.enter_block(node, ng_ctx, ng, node, ng_alive)
+            n_alive = ng_alive and not scope_dead(n_res)
+            out[ng_idx, n_idx] = naming_icon(node, n_res), merge_state(n_res, scope)
+            for i_idx, inp in enumerate(node.inputs):
+                if inp.override_type in SUPPORTED_OVERRIDE_TYPES:
+                    for v_idx, val in enumerate(inp.values):
+                        v_res = scope.resolve_value(value_field_anchors(val), n_ctx)[1]
+                        out[ng_idx, n_idx, i_idx, v_idx] = value_info(ng_ptr, node, inp, val, v_res, scope)
+                scope.add_input(ng, ng_ptr, node, inp, n_ctx, n_alive)
+    return out
+
+# Building a table's predictions is most of its draw time (about 180 of 225 ms for 200 values with merges), and the
+# sidebar redraws on every hover and every step of a transform drag. They only change with the data, so they are kept
+# per table for one _ui_cache["revision"] (bumped by edits, undo, loads, node tree updates and changed menu items).
+_predictions = {}
+
+def table_predictions(nodegroups):
+    """predict_table() of a non-empty override table, kept until the data changes. The key holds the table's shape too:
+    rows added without an edit callback (by a script) must not be drawn from predictions that lack them."""
+    if _predictions.get("revision") != _ui_cache["revision"]:
+        _predictions.clear()
+        _predictions["revision"] = _ui_cache["revision"]
+    shape = tuple(tuple(tuple(len(inp.values) for inp in node.inputs) for node in ng.nodes) for ng in nodegroups)
+    key = (nodegroups[0].id_data.session_uid, nodegroups[0].path_from_id(), shape)
+    if key not in _predictions: _predictions[key] = predict_table(nodegroups)
+    return _predictions[key]
+
 
 class BATCH_STL_UL_presets(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
@@ -235,20 +288,6 @@ def _draw_overrides_table(layout, wm, nodegroups, is_collection, is_open_prop, t
         content_col.label(text="No overrides defined.")
         return
 
-    def merge_state(res):
-        """(dead, text, tooltip) of a block whose sub-folder or tag merges into upstream names, else None. Dead when
-        the chosen names can never exist together (the block never applies). The tooltip is taken now: names added
-        further down the stack must not change it."""
-        hits = [(k, n) for k in SCOPE_KINDS for n in res[k][0]]
-        dead = [(k, n) for k in SCOPE_KINDS for n in res[k][1]]
-        if not hits and not dead: return None
-        segments = []
-        d_names, t_names = res["dir"][0] + res["dir"][1], res["tag"][0] + res["tag"][1]
-        if d_names: segments.append(" / ".join(d_names))
-        if t_names: segments.append("name " + " + ".join(t_names))
-        text = ("Never applies: " if dead else "Merges into ") + " · ".join(segments)
-        return bool(dead), text, merge_tooltip(hits, dead, scope)
-
     def draw_merge_bar(parent, state):
         """Bar on top of a merging block: marks the block and its children. Blue for a merge, red when it is dead."""
         if not state: return
@@ -270,9 +309,9 @@ def _draw_overrides_table(layout, wm, nodegroups, is_collection, is_open_prop, t
             parent.label(text="", icon=ICONS['BLANK'])
         parent.separator(factor=0.5)
 
-    def draw_input(parent, ng_idx, ng, ng_ptr, n_idx, node, n_ctx, i_idx, inp, merges=None, alive=True):
-        """Rows of one input (its first value on the input's row, the others below), then record what it creates.
-        `merges` is given in the clear view only (see draw_merge_icon); `alive` is False inside a dead block."""
+    def draw_input(parent, ng_idx, ng, ng_ptr, n_idx, node, i_idx, inp, merges=None):
+        """Rows of one input (its first value on the input's row, the others below). `merges` is given in the clear
+        view only (see draw_merge_icon)."""
         input_layout = parent.column()
         # Wrap in array to ensure rendering block triggers at least once even if 'values' logic is empty
         values = inp.values if inp.values else [None]
@@ -307,8 +346,7 @@ def _draw_overrides_table(layout, wm, nodegroups, is_collection, is_open_prop, t
             # The button before the field explains the expression (hover it) and shows its merges: blue when its
             # folder / token merges into an upstream one, red when it cannot exist in this block's branch (the value
             # never applies). The field is red for that too, and for a value that does not fit the input.
-            v_res = scope.resolve_value(value_field_anchors(val), n_ctx)[1]
-            icon, v_merges, v_dead, info = value_info(ng_ptr, node, inp, val, v_res, scope)
+            icon, v_merges, v_dead, info = predictions[ng_idx, n_idx, i_idx, v_idx]
             c_info = c_val.row(align=True)
             c_info.alert = v_dead
             c_info.operator("batch_stl.merge_info", text="", icon=icon, depress=v_merges, emboss=v_merges or v_dead).info = info
@@ -316,18 +354,14 @@ def _draw_overrides_table(layout, wm, nodegroups, is_collection, is_open_prop, t
             c_field.alert = v_dead or not is_override_val_valid(inp, val, ng_ptr, node)
             c_field.prop(val, "expr", text="")
 
-        scope.add_input(ng, ng_ptr, node, inp, n_ctx, alive)
-
-    # Folders / filename tokens that exist so far and their branch contexts, built in export order while drawing.
-    # The clear view walks the same blocks (it needs their context and names) without drawing their rows.
-    scope = upstream_scope(nodegroups[0])[0]
+    # Merge bars, naming icons and value icons, predicted in export order (kept until the data changes). The clear view
+    # shows the same predictions without the node group / node rows.
+    predictions = table_predictions(nodegroups)
     clear_layout = content_col.box().column() if clear else None
 
     for ng_idx, ng in enumerate(nodegroups):
         ng_ptr = bpy.data.node_groups.get(ng.group_name)
-        ng_ctx, ng_res = scope.enter_block(ng, frozenset(), ng)
-        ng_alive = not scope_dead(ng_res)
-        ng_merge = merge_state(ng_res)
+        ng_icon, ng_merge = predictions[ng_idx,]
 
         if not clear:
             ng_layout = content_col.box().column()
@@ -339,7 +373,7 @@ def _draw_overrides_table(layout, wm, nodegroups, is_collection, is_open_prop, t
             ng_sub = ng_row.row(align=True)
             ng_sub.alert = not is_override_group_valid(ng)
             ng_sub.prop(ng, "group_name", text="")
-            ng_row.prop(ng, "naming", text="", icon=naming_icon(ng, ng_res))
+            ng_row.prop(ng, "naming", text="", icon=ng_icon)
             draw_op(ng_row, 'MOVE_GROUP_UP', ICONS['UP'], ng_idx=ng_idx)
             draw_op(ng_row, 'MOVE_GROUP_DOWN', ICONS['DOWN'], ng_idx=ng_idx)
             draw_op(ng_row, 'COPY_GROUP', ICONS['COPY'], ng_idx=ng_idx)
@@ -354,9 +388,7 @@ def _draw_overrides_table(layout, wm, nodegroups, is_collection, is_open_prop, t
             nodes_layout = nodes_box.column()
 
         for n_idx, node in enumerate(ng.nodes):
-            n_ctx, n_res = scope.enter_block(node, ng_ctx, ng, node, ng_alive)
-            n_alive = ng_alive and not scope_dead(n_res)
-            n_merge = merge_state(n_res)
+            n_icon, n_merge = predictions[ng_idx, n_idx]
 
             if clear:
                 inputs_layout = clear_layout
@@ -370,7 +402,7 @@ def _draw_overrides_table(layout, wm, nodegroups, is_collection, is_open_prop, t
                 n_sub = n_row.row(align=True)
                 n_sub.alert = not is_override_node_valid(ng_ptr, node)
                 n_sub.prop(node, "name", text="", icon=ICONS['NODE'])
-                n_row.prop(node, "naming", text="", icon=naming_icon(node, n_res))
+                n_row.prop(node, "naming", text="", icon=n_icon)
 
                 if len(ng.nodes) > 1:
                     draw_op(n_row, 'MOVE_NODE_UP', ICONS['UP'], ng_idx=ng_idx, n_idx=n_idx)
@@ -382,7 +414,7 @@ def _draw_overrides_table(layout, wm, nodegroups, is_collection, is_open_prop, t
                 merges = None
 
             for i_idx, inp in enumerate(node.inputs):
-                draw_input(inputs_layout, ng_idx, ng, ng_ptr, n_idx, node, n_ctx, i_idx, inp, merges, n_alive)
+                draw_input(inputs_layout, ng_idx, ng, ng_ptr, n_idx, node, i_idx, inp, merges)
 
 
 class VIEW3D_PT_batch_export_stl_main(bpy.types.Panel):

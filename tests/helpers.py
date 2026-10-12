@@ -219,8 +219,9 @@ class _WindowManagerProxy:
 class ExportRun:
     """Runs EXPORT_OT_batch_stl_multi's invoke() and modal() (worker included) outside Blender's operator system."""
     _op = ce.export_operator.EXPORT_OT_batch_stl_multi
-    invoke, modal, cleanup, cancel = _op.invoke, _op.modal, _op.cleanup, _op.cancel
-    _preset, _job, _drain_output = _op._preset, _op._job, _op._drain_output
+    invoke, execute, modal, cleanup, cancel = _op.invoke, _op.execute, _op.modal, _op.cleanup, _op.cancel
+    _start, _poll, _log, _preset, _job, _drain_output = _op._start, _op._poll, _op._log, _op._preset, _op._job, _op._drain_output
+    echo = _op.echo
 
     def __init__(self, preset_index=-1):
         self.preset_index = preset_index
