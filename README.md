@@ -23,7 +23,7 @@ For in-depth architectural details, execution flowcharts, and engine design, see
 * **Instant Disk Streaming:** Meshes with hundreds of thousands of triangles are triangulated, evaluated, and streamed to disk in milliseconds.
 
 ### 2. Adaptive Dual-Path Execution Model
-* **Synchronous Bypass (Fast Path):** Exports without node overrides or parameter sweeps are evaluated natively in the current Blender process and written directly to disk.
+* **Direct Fast Path:** Exports without node overrides or parameter sweeps are evaluated natively in the current Blender process and written directly to disk, a few objects per timer tick so the interface keeps redrawing, while the background worker for the other objects boots.
 * **Headless Background Worker (Safe Isolation Path):** When geometry node overrides, modifier changes, or parameter sweeps are present:
   - Automatically creates a temporary copy of the `.blend` file.
   - Spawns an isolated background Blender worker (`--factory-startup --python-exit-code 1 -b <temp.blend> -P ...`).

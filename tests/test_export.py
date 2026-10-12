@@ -1,5 +1,6 @@
 """End to end: the export operator (invoke / modal, and execute for scripts) on the direct path and with the background
 worker, and the worker's output protocol."""
+import collections
 import contextlib
 import io
 import os
@@ -77,6 +78,59 @@ class DirectExportTests(BlenderTestCase):
         for name in names:
             self.assertEqual(len(read_stl(os.path.join(self.tmp, f"{name}.stl"))[1]), 10 * 12, name)
         self.assertEqual(state(), before)
+
+    def start_sliced_export(self, names="ABC"):
+        """An export of plain objects that writes one of them per poll (a budget of 0 still writes one): (run, context, job)."""
+        for name in names: make_object(name, mesh=cube_mesh())
+        preset = make_preset()
+        run, context = ExportRun(), ContextProxy()
+        run.direct_budget = 0
+        self.assertEqual(run.invoke(context, None), {'RUNNING_MODAL'})
+        self.assertEqual(written_files(self.tmp), [], "the click only queues the objects")
+        job = ce.data.get_job(preset)
+        self.assertTrue(job.is_exporting)
+        return run, context, job
+
+    def test_direct_objects_are_written_a_few_per_poll(self):
+        """Each timer poll writes the next objects and returns, so the UI redraws in between instead of freezing."""
+        run, context, job = self.start_sliced_export()
+        for count in (1, 2):
+            self.assertEqual(run.modal(context, TIMER), {'PASS_THROUGH'})
+            self.assertEqual(written_files(self.tmp), ["A.stl", "B.stl"][:count])
+            self.assertEqual(job.export_status.split(" | ")[0], f"Direct {count}/3")
+            self.assertAlmostEqual(job.export_progress, count / 3, places=5)
+        self.assertEqual(run.modal(context, TIMER), {'FINISHED'})
+        self.assertEqual(written_files(self.tmp), ["A.stl", "B.stl", "C.stl"])
+        self.assertFalse(job.is_exporting)
+        log = run.log()
+        self.assertIn("BATCH EXPORT COMPLETE", log[-1])
+        self.assertEqual(sum("STARTING NATIVE DIRECT EXPORT (3 Objects)" in line for line in log), 1)
+
+    def test_a_poll_writes_objects_up_to_its_budget(self):
+        make_object("A", mesh=cube_mesh())
+        make_object("B", mesh=cube_mesh())
+        make_preset()
+        run, context = ExportRun(), ContextProxy()
+        run.direct_budget = 3600.0
+        self.assertEqual(run.invoke(context, None), {'RUNNING_MODAL'})
+        self.assertEqual(run.modal(context, TIMER), {'FINISHED'})
+        self.assertEqual(written_files(self.tmp), ["A.stl", "B.stl"])
+
+    def test_object_deleted_between_polls_is_skipped(self):
+        run, context, _job = self.start_sliced_export("AB")
+        self.assertEqual(run.modal(context, TIMER), {'PASS_THROUGH'})
+        bpy.data.objects.remove(bpy.data.objects["B"])
+        self.assertEqual(run.modal(context, TIMER), {'FINISHED'})
+        self.assertEqual(written_files(self.tmp), ["A.stl"])
+        self.assertTrue(any("SKIPPED (object no longer in the collection)" in line for line in run.log()))
+
+    def test_cancel_stops_the_direct_export(self):
+        run, context, job = self.start_sliced_export()
+        self.assertEqual(run.modal(context, TIMER), {'PASS_THROUGH'})
+        bpy.ops.batch_stl.cancel_export(preset_uid=job.preset_uid)
+        self.assertEqual(run.modal(context, TIMER), {'CANCELLED'})
+        self.assertEqual(written_files(self.tmp), ["A.stl"])
+        self.assertFalse(job.is_exporting)
 
 
 class RefusalTests(BlenderTestCase):
@@ -188,6 +242,37 @@ class WorkerExportTests(BlenderTestCase):
         with self.assertRaises(RuntimeError): bpy.ops.export_scene.batch_stl_multi(preset_index=3)
         bpy.context.scene.batch_stl_root_dir = ""
         with self.assertRaises(RuntimeError): bpy.ops.export_scene.batch_stl_multi()
+
+    def test_worker_starts_before_the_direct_objects_are_written(self):
+        """The worker boots while the objects without overrides are written, so the click only saves the snapshot and
+        starts it."""
+        make_object("Box", group=make_gn_group())
+        make_object("Plain", mesh=cube_mesh())
+        override(make_preset().nodegroups, "Size", "FLOAT", "\\1", "\\2")
+        run, context = ExportRun(), ContextProxy()
+        run.direct_budget = 0
+        result = run.invoke(context, None)
+        self.addCleanup(run.cleanup, context)
+        self.assertEqual(result, {'RUNNING_MODAL'})
+        self.assertIsNotNone(run.process)
+        self.assertNotIn("Plain.stl", written_files(self.tmp))
+        self.assertEqual(run.drive(context, result), {'FINISHED'})
+        self.assertEqual(written_files(self.tmp), ["1/Box.stl", "2/Box.stl", "Plain.stl"])
+
+    def test_worker_crash_still_writes_the_direct_objects(self):
+        for name in "AB": make_object(name, mesh=cube_mesh())
+        make_object("Box", group=make_gn_group())
+        override(make_preset().nodegroups, "Size", "FLOAT", "\\1", "\\2")
+        crashed = FakeProcess(returncode=1)
+        crashed.stdout = io.StringIO("")
+        run, context = ExportRun(), ContextProxy()
+        run.direct_budget = 0
+        with mock.patch.object(ce.export_operator.subprocess, "Popen", return_value=crashed):
+            self.assertEqual(run.invoke(context, None), {'RUNNING_MODAL'})
+        self.assertEqual(run.modal(context, TIMER), {'CANCELLED'})
+        self.assertEqual(written_files(self.tmp), ["A.stl", "B.stl"])
+        self.assertIn("CRASH DETECTED: Worker exited with code 1", run.log()[-1])
+        self.assertFalse(ce.data.get_job(bpy.context.scene.batch_stl_presets[0]).is_exporting)
 
     def run_worker(self, job):
         """run_headless_export in this process: (exit code, printed output)."""
@@ -316,6 +401,22 @@ class WorkerProtocolTests(BlenderTestCase):
         self.assertIn("P | Parts | Box | Permutation 1/4", log)
         self.assertIn("BATCH EXPORT COMPLETE", log[-1])
         self.assertFalse(self.job.is_exporting)
+
+    def test_worker_finishing_before_the_direct_queue_is_not_a_crash(self):
+        """The worker's DONE line is read once; the polls that still write queued objects must not mistake the exited
+        worker for a crash."""
+        make_object("Box2", mesh=cube_mesh())
+        run = self.run
+        run.process = FakeProcess(returncode=0)
+        run.direct_queue = collections.deque(("Parts", name, os.path.join(self.tmp, f"{name}.stl"), name) for name in ("Box", "Box2"))
+        run.direct_total, run.direct_budget = 2, 0
+        self.feed("BATCH_STL_DONE")
+        self.assertEqual(run.modal(ContextProxy(), TIMER), {'PASS_THROUGH'})
+        self.assertEqual(written_files(self.tmp), ["Box.stl"])
+        self.assertTrue(self.job.is_exporting)
+        self.assertEqual(run.modal(ContextProxy(), TIMER), {'FINISHED'})
+        self.assertEqual(written_files(self.tmp), ["Box.stl", "Box2.stl"])
+        self.assertNotIn("CRASH", "\n".join(run.log()))
 
     def test_worker_that_exits_early_is_a_crash(self):
         self.run.process = FakeProcess(returncode=1)

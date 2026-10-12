@@ -1,5 +1,6 @@
 """The export operator: objects without overrides are written directly, the others by a headless worker process
-(headless_main.py) that the operator follows through a modal timer (ARCHITECTURE.md, Execution Pipelines)."""
+(headless_main.py). Both are driven by a modal timer, so Blender stays usable (ARCHITECTURE.md, Execution Pipelines)."""
+import collections
 import os
 import time
 import threading
@@ -25,6 +26,16 @@ from .headless import WORKER_SCRIPT, write_job_file
 # export running in another Blender instance.
 STALE_TEMP_AGE = 24 * 3600
 
+# Seconds of direct writing per timer poll: the UI redraws between the polls, and the timer's other work (reading the
+# worker's output) is not held up by a long queue of objects.
+DIRECT_SLICE = 0.05
+
+def find_direct_object(collection_name, object_name):
+    """The object a direct export entry was queued for, found the way iter_export_objects finds it; None when it is gone.
+    Pointers do not survive the undo steps that can happen between two polls, names do."""
+    collection = bpy.data.collections.get(collection_name)
+    return collection.all_objects.get(object_name) if collection else None
+
 class BATCH_STL_OT_cancel_export(bpy.types.Operator):
     bl_idname = "batch_stl.cancel_export"
     bl_label = "Cancel Export"
@@ -38,15 +49,23 @@ class BATCH_STL_OT_cancel_export(bpy.types.Operator):
         return {'FINISHED'}
 
 class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
-    """The export button follows the worker with a modal timer, so Blender stays usable (invoke). Called from a script,
-    bpy.ops.export_scene.batch_stl_multi(preset_index=...) waits for the worker and returns once every file is written,
-    with the worker's output printed as it comes (execute). An error is reported as such: bpy.ops raises it."""
+    """The export button starts the worker, then writes the objects without overrides a few at a time while following the
+    worker, both with a modal timer, so Blender stays usable (invoke). Called from a script,
+    bpy.ops.export_scene.batch_stl_multi(preset_index=...) writes them all and waits for the worker and returns once
+    every file is written, with the worker's output printed as it comes (execute). An error is reported as such: bpy.ops
+    raises it."""
     bl_idname = "export_scene.batch_stl_multi"
     bl_label = "Export"
     bl_description = "Start batch STL export"
     bl_options = {"REGISTER"}
     preset_index: bpy.props.IntProperty(name="Preset Index", description="Preset to export; -1 exports the active preset", default=-1, options={'SKIP_SAVE'})
     echo = False  # print the log lines too (a scripted export, see execute)
+    direct_budget = DIRECT_SLICE  # seconds of direct writing per poll; None writes everything queued at once (see execute)
+    # Run state, set by _start; these are what an operator that did not start a worker or queue anything has.
+    process = instance_arrays = None
+    direct_queue = ()
+    direct_total = direct_done = 0
+    worker_done = False
 
     @classmethod
     def poll(cls, context): return len(context.scene.batch_stl_presets) > 0
@@ -59,7 +78,7 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
         return result
 
     def execute(self, context):
-        self.echo = True
+        self.echo, self.direct_budget = True, None
         result = self._start(context)
         while result == {'RUNNING_MODAL'}:
             time.sleep(0.1)
@@ -72,9 +91,11 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
         if self.echo: print(text, flush=True)
 
     def _start(self, context):
-        """Check the preset, write the objects without overrides and start the worker for the others. Returns
-        {'RUNNING_MODAL'} while the worker runs (see _poll)."""
-        self._timer = self.process = None
+        """Check the preset, start the worker for the objects with overrides and queue the others for direct writing.
+        Only the work that has to happen at the click is done here (the checks, the snapshot the worker opens, its
+        start); _poll does the rest. Returns {'RUNNING_MODAL'} while the worker runs or objects are queued."""
+        self._timer = self.process = self.instance_arrays = None
+        self.direct_queue, self.direct_total, self.direct_done, self.worker_done = collections.deque(), 0, 0, True
         self.total_operations, self.current_op = 1, 0
         self.export_start_time = time.perf_counter()
         scene = context.scene
@@ -125,21 +146,19 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
         objects_to_export_directly = [(c, obj_prop, bl_obj) for _c_idx, c, obj_prop, bl_obj, ovrs in targets if not ovrs]
         needs_headless = any(t[4] for t in targets)
 
-        if objects_to_export_directly:
-            depsgraph = context.evaluated_depsgraph_get()
-            instance_arrays = collect_instance_arrays(depsgraph, [item[2] for item in objects_to_export_directly])
-            self._log(job, f"=== STARTING NATIVE DIRECT EXPORT ({len(objects_to_export_directly)} Objects) ===")
-            for c, obj_prop, bl_obj in objects_to_export_directly:
-                t_dir_start = time.perf_counter()
-                full_dir_parts, filename = export_file_parts(preset, c, obj_prop, bl_obj)
-                out_dir = os.path.normpath(os.path.join(preset_root, *full_dir_parts)) if full_dir_parts else preset_root
-                filepath = os.path.join(out_dir, filename)
+        # The worker goes first: it takes a second or more to boot, while the direct objects are written meanwhile.
+        # Its snapshot is taken before the direct export touches the scene (it unhides eye-hidden objects for a moment).
+        if needs_headless and not self._start_worker(context, scene, preset, job): return {'CANCELLED'}
 
-                result_text = export_object_stl(filepath, bl_obj, depsgraph, instance_arrays.get(bl_obj.name_full, ()))
+        # Resolve every path now (the settings are the ones at the click); _export_direct finds the objects again by name.
+        for c, obj_prop, bl_obj in objects_to_export_directly:
+            full_dir_parts, filename = export_file_parts(preset, c, obj_prop, bl_obj)
+            out_dir = os.path.normpath(os.path.join(preset_root, *full_dir_parts)) if full_dir_parts else preset_root
+            label = f"{preset.name} | {c.collection_name} | {bl_obj.name} | Permutation 1/1 | Batch 1/1"
+            self.direct_queue.append((c.collection_name, bl_obj.name, os.path.join(out_dir, filename), label))
+        self.direct_total = len(self.direct_queue)
 
-                self._log(job, f"{preset.name} | {c.collection_name} | {bl_obj.name} | Permutation 1/1 | Batch 1/1\n  └─ {result_text} | {time.perf_counter() - t_dir_start:.2f} s")
-
-        if not needs_headless:
+        if not self.direct_queue and not needs_headless:
             preset.last_export_time = time.perf_counter() - self.export_start_time
             self._log(job, f"=== BATCH EXPORT COMPLETE ({preset.last_export_time:.4f}s) ===")
             self.report({'INFO'}, f"Batch Export {preset.name} Complete in {preset.last_export_time:.2f}s.")
@@ -147,6 +166,11 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
             self.cleanup(context)
             return {'FINISHED'}
 
+        job.is_exporting, job.cancel_export, job.export_progress = True, False, 0.0
+        return {'RUNNING_MODAL'}
+
+    def _start_worker(self, context, scene, preset, job):
+        """Save the snapshot the worker opens, write its job file and start it. False (reported) when it did not start."""
         job.export_status = "Spawning Worker... (0.0s)"
         t_spawn_start = time.perf_counter()
         self.temp_dir = tempfile.mkdtemp(prefix="fast_batch_stl_")
@@ -154,7 +178,7 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
         self.job_json = os.path.join(self.temp_dir, "job.json")
 
         bpy.ops.wm.save_as_mainfile(filepath=self.temp_blend, copy=True, compress=False)
-        # context.view_layer, as for `live` above: the worker must export what was checked for clashes here
+        # context.view_layer, as for `live` in _start: the worker must export what was checked for clashes there
         write_job_file(self.job_json, scene, context.view_layer, preset, bpy.path.abspath(scene.batch_stl_root_dir), skip_direct=True)
 
         # The worker starts with WORKER_SCRIPT, which loads this package from its folder and runs the job.
@@ -172,7 +196,7 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
         except Exception as e:
             self.report({'ERROR'}, f"Failed to spawn headless Blender: {e}")
             self.cleanup(context)
-            return {'CANCELLED'}
+            return False
 
         self._log(job, f"=== INITIATING HEADLESS EXPORT '{preset.name}' [{time.perf_counter() - t_spawn_start:.4f}s Boot] ===")
 
@@ -181,9 +205,30 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
             for line in iter(out.readline, ''): q.put(line)
             out.close()
         self.t = threading.Thread(target=enqueue_output, args=(self.process.stdout, self.q)); self.t.daemon = True; self.t.start()
+        self.worker_done = False
+        return True
 
-        job.is_exporting, job.cancel_export, job.export_progress = True, False, 0.0
-        return {'RUNNING_MODAL'}
+    def _export_direct(self, context, job, budget):
+        """Write the queued objects without overrides, for about `budget` seconds (None: all of them), but at least one.
+        The first call also collects the instances of all of them in one pass over the depsgraph."""
+        t_start = time.perf_counter()
+        depsgraph = context.evaluated_depsgraph_get()
+        if self.instance_arrays is None:
+            self._log(job, f"=== STARTING NATIVE DIRECT EXPORT ({self.direct_total} Objects) ===")
+            objects = (find_direct_object(entry[0], entry[1]) for entry in self.direct_queue)
+            self.instance_arrays = collect_instance_arrays(depsgraph, [ob for ob in objects if ob])
+        while self.direct_queue:
+            collection_name, object_name, filepath, label = self.direct_queue.popleft()
+            t_object = time.perf_counter()
+            bl_obj = find_direct_object(collection_name, object_name)
+            if bl_obj:
+                result_text = export_object_stl(filepath, bl_obj, depsgraph, self.instance_arrays.get(bl_obj.name_full, ()))
+            else:
+                result_text = f"SKIPPED (object no longer in the collection): {filepath}"
+            self.direct_done += 1
+            self._log(job, f"{label}\n  └─ {result_text} | {time.perf_counter() - t_object:.2f} s")
+            if budget is not None and time.perf_counter() - t_start >= budget: break
+        if self.process is None: job.export_progress = self.direct_done / max(1, self.direct_total)
 
     def _preset(self):
         """The preset being exported, or None when an undo removed it (the export carries on regardless)."""
@@ -215,8 +260,8 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
         return {'PASS_THROUGH'} if result == {'RUNNING_MODAL'} else result
 
     def _poll(self, context, read_output=True):
-        """Follow the running worker: stop on a cancel, process its output, and finish once it is done or gone.
-        Returns {'RUNNING_MODAL'} while it runs."""
+        """One step of the export: stop on a cancel, write the next queued objects without overrides, process the worker's
+        output, and finish once the queue is empty and the worker is done or gone. Returns {'RUNNING_MODAL'} until then."""
         try:
             job = self._job()
             if job is None:  # a file load cleared the jobs: this export belonged to a file that is gone
@@ -229,15 +274,26 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
                 return {'CANCELLED'}
 
             if read_output:
+                if self.direct_queue: self._export_direct(context, job, self.direct_budget)
                 elapsed = time.perf_counter() - self.export_start_time
-                finished = self._drain_output(job)
-                worker_exited = self.process.poll() is not None
-                if worker_exited and not finished:
-                    # The worker prints BATCH_STL_DONE right before exiting; let the reader thread flush before judging.
-                    self.t.join(timeout=2.0)
-                    finished = self._drain_output(job)
+                if not self.worker_done:
+                    self.worker_done = self._drain_output(job)
+                    if not self.worker_done and self.process.poll() is not None:
+                        # The worker prints BATCH_STL_DONE right before exiting; let the reader thread flush before judging.
+                        self.t.join(timeout=2.0)
+                        self.worker_done = self._drain_output(job)
+                        if not self.worker_done:
+                            exit_code = self.process.returncode
+                            # The objects without overrides do not depend on the worker: they are written all the same.
+                            if self.direct_queue: self._export_direct(context, job, None)
+                            self.cleanup(context)
+                            self._log(job, f"[!] CRASH DETECTED: Worker exited with code {exit_code} before finishing.")
+                            self.report({'ERROR'}, f"Background worker crashed for preset {self.preset_name}.")
+                            redraw_sidebars(context)
+                            return {'CANCELLED'}
 
-                if finished:
+                # worker_done is kept: the worker's DONE line is read once, and it may finish before the queue does.
+                if self.worker_done and not self.direct_queue:
                     self.cleanup(context)
                     preset = self._preset()
                     if preset: preset.last_export_time = elapsed
@@ -246,15 +302,9 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
                     redraw_sidebars(context)
                     return {'FINISHED'}
 
-                if worker_exited:
-                    exit_code = self.process.returncode
-                    self.cleanup(context)
-                    self._log(job, f"[!] CRASH DETECTED: Worker exited with code {exit_code} before finishing.")
-                    self.report({'ERROR'}, f"Background worker crashed for preset {self.preset_name}.")
-                    redraw_sidebars(context)
-                    return {'CANCELLED'}
-
-                job.export_status = f"Obj {self.current_op}/{self.total_operations} | {elapsed:.1f}s" if (self.total_operations > 1 or self.current_op > 0) else f"Spawning Worker... ({elapsed:.1f}s)"
+                if self.direct_queue: job.export_status = f"Direct {self.direct_done}/{self.direct_total} | {elapsed:.1f}s"
+                elif self.total_operations > 1 or self.current_op > 0: job.export_status = f"Obj {self.current_op}/{self.total_operations} | {elapsed:.1f}s"
+                else: job.export_status = f"Spawning Worker... ({elapsed:.1f}s)"
                 redraw_sidebars(context)
         except Exception:
             traceback.print_exc()

@@ -221,7 +221,10 @@ class ExportRun:
     _op = ce.export_operator.EXPORT_OT_batch_stl_multi
     invoke, execute, modal, cleanup, cancel = _op.invoke, _op.execute, _op.modal, _op.cleanup, _op.cancel
     _start, _poll, _log, _preset, _job, _drain_output = _op._start, _op._poll, _op._log, _op._preset, _op._job, _op._drain_output
-    echo = _op.echo
+    _start_worker, _export_direct = _op._start_worker, _op._export_direct
+    echo, direct_budget, process, instance_arrays, direct_queue, direct_total, direct_done, worker_done = (
+        _op.echo, _op.direct_budget, _op.process, _op.instance_arrays, _op.direct_queue, _op.direct_total, _op.direct_done,
+        _op.worker_done)
 
     def __init__(self, preset_index=-1):
         self.preset_index = preset_index
@@ -231,7 +234,10 @@ class ExportRun:
 
     def __call__(self, timeout=180.0):
         context = ContextProxy()
-        result = self.invoke(context, None)
+        return self.drive(context, self.invoke(context, None), timeout)
+
+    def drive(self, context, result, timeout=180.0):
+        """Poll an export that invoke() started with `result`, as Blender's timer does, until it finishes."""
         deadline = time.monotonic() + timeout
         timer = type("Event", (), {"type": 'TIMER'})()
         while result == {'RUNNING_MODAL'} or result == {'PASS_THROUGH'}:
