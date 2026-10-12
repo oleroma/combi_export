@@ -8,11 +8,11 @@ MENU = ["A", "B", "C"]
 
 
 def stored_fields(text, override_type, items=None):
-    return None if text is None else ce.read_expr_value(ce.lex_expr(text), override_type, items)
+    return None if text is None else ce.fields.read_expr_value(ce.fields.lex_expr(text), override_type, items)
 
 
 def parse(text, override_type="INT", stored="15", items=None, templates=None, upstream=None):
-    return ce.parse_value_field(text, override_type, items, stored_fields(stored, override_type, items), None,
+    return ce.fields.parse_value_field(text, override_type, items, stored_fields(stored, override_type, items), None,
                                 templates or NO_NAMING, upstream)
 
 
@@ -26,7 +26,7 @@ def naming(text, override_type="INT", stored="15", **kw):
     """(value, folders, filename tokens) a field gives."""
     fields, templates = parse(text, override_type, stored, **kw)
     value = value_of(fields, override_type)
-    names = {kind: sum(ce.value_name_parts(value, templates[kind], kind), []) if templates[kind] is not None else []
+    names = {kind: sum(ce.naming.value_name_parts(value, templates[kind], kind), []) if templates[kind] is not None else []
              for kind in ("dir", "tag")}
     return value, names["dir"], names["tag"]
 
@@ -109,7 +109,7 @@ class RejectionTests(unittest.TestCase):
     def test_numbers_never_hold_underscores(self):
         # int('1_0') would accept it: the '_' starts the filename section instead
         with self.assertRaises(ValueError):
-            ce.read_expr_value(ce.lex_expr("1_0"), "INT")
+            ce.fields.read_expr_value(ce.fields.lex_expr("1_0"), "INT")
         self.assertEqual(naming("1_0"), (1, [], ["0"]))
 
 
@@ -118,9 +118,9 @@ class ComposeTests(unittest.TestCase):
 
     def assertRoundTrip(self, text, override_type="INT", stored="15", items=None):
         fields, templates = parse(text, override_type, stored, items=items)
-        shown = ce.compose_value_field(fields, templates, override_type, items)
-        again = ce.parse_value_field(shown, override_type, items, fields, None, templates)
-        self.assertTrue(ce.same_fields(override_type, again[0], fields), f"{text!r} shown as {shown!r}")
+        shown = ce.fields.compose_value_field(fields, templates, override_type, items)
+        again = ce.fields.parse_value_field(shown, override_type, items, fields, None, templates)
+        self.assertTrue(ce.fields.same_fields(override_type, again[0], fields), f"{text!r} shown as {shown!r}")
         norm = lambda t: {k: (v or "*") if v is not None else None for k, v in t.items()}
         self.assertEqual(norm(again[1]), norm(templates), f"{text!r} shown as {shown!r}")
         return shown
@@ -136,21 +136,21 @@ class ComposeTests(unittest.TestCase):
         self.assertRoundTrip("\\*", "MENU", "A", MENU)
 
     def test_display(self):
-        self.assertEqual(ce.compose_value_field({"use_sweep": False, "value_string": "15"}, {"dir": "big", "tag": None}, "INT"), "\\big")
-        self.assertEqual(ce.compose_value_field({"use_sweep": False, "value_string": "15"}, NO_NAMING, "INT"), "15")
-        self.assertEqual(ce.compose_value_field({"use_sweep": False, "value_string": "15"}, {"dir": "B/*", "tag": "x_*"}, "FLOAT"), "\\B\\15\\_x_15")
+        self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "15"}, {"dir": "big", "tag": None}, "INT"), "\\big")
+        self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "15"}, NO_NAMING, "INT"), "15")
+        self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "15"}, {"dir": "B/*", "tag": "x_*"}, "FLOAT"), "\\B\\15\\_x_15")
 
 
 class BlockNamingTests(unittest.TestCase):
     def test_parse(self):
-        self.assertEqual(ce.parse_block_naming("\\C\\2\\_B"), ("C/2", "B"))
-        self.assertEqual(ce.parse_block_naming("C/2"), ("C/2", ""))
-        self.assertEqual(ce.parse_block_naming("_B"), ("", "B"))
-        self.assertEqual(ce.parse_block_naming(""), ("", ""))
+        self.assertEqual(ce.fields.parse_block_naming("\\C\\2\\_B"), ("C/2", "B"))
+        self.assertEqual(ce.fields.parse_block_naming("C/2"), ("C/2", ""))
+        self.assertEqual(ce.fields.parse_block_naming("_B"), ("", "B"))
+        self.assertEqual(ce.fields.parse_block_naming(""), ("", ""))
         with self.assertRaises(ValueError):
-            ce.parse_block_naming("\\a b")
+            ce.fields.parse_block_naming("\\a b")
 
     def test_compose_round_trip(self):
         for sub_path, tag in (("C/2", "B"), ("X", ""), ("", "B_2"), ("_odd", "")):
             with self.subTest(sub_path=sub_path, tag=tag):
-                self.assertEqual(ce.parse_block_naming(ce.compose_block_naming(sub_path, tag)), (sub_path, tag))
+                self.assertEqual(ce.fields.parse_block_naming(ce.fields.compose_block_naming(sub_path, tag)), (sub_path, tag))

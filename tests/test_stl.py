@@ -13,8 +13,8 @@ class STLWriterTests(BlenderTestCase):
     def write(self, ob, name="out.stl"):
         path = os.path.join(self.tmp, name)
         depsgraph = bpy.context.evaluated_depsgraph_get()
-        arrays = ce.collect_instance_arrays(depsgraph, [ob])
-        return path, ce.export_object_stl(path, ob, depsgraph, arrays.get(ob.name_full, ()))
+        arrays = ce.stl.collect_instance_arrays(depsgraph, [ob])
+        return path, ce.stl.export_object_stl(path, ob, depsgraph, arrays.get(ob.name_full, ()))
 
     def assertNormalsMatchGeometry(self, recs, center):
         """Each stored normal is the unit normal of its triangle as wound, and points away from `center`."""
@@ -29,7 +29,7 @@ class STLWriterTests(BlenderTestCase):
         path, result = self.write(make_object("Cube", mesh=cube_mesh()))
         self.assertEqual(result, path)
         header, recs = read_stl(path)
-        self.assertEqual(header, ce.STL_HEADER)
+        self.assertEqual(header, ce.stl.STL_HEADER)
         self.assertEqual(len(header), 80)
         self.assertFalse(header.startswith(b"solid"), "readers would take the file for ASCII STL")
         self.assertEqual(len(recs), 12)
@@ -58,7 +58,7 @@ class STLWriterTests(BlenderTestCase):
         ob = make_object("Empty", mesh=bpy.data.meshes.new("empty"))
         path = os.path.join(self.tmp, "sub", "empty.stl")
         depsgraph = bpy.context.evaluated_depsgraph_get()
-        self.assertTrue(ce.export_object_stl(path, ob, depsgraph).startswith("SKIPPED (no geometry)"))
+        self.assertTrue(ce.stl.export_object_stl(path, ob, depsgraph).startswith("SKIPPED (no geometry)"))
         self.assertFalse(os.path.exists(os.path.dirname(path)), "the folder is created without a file")
 
     def test_unwritable_path_is_reported(self):
@@ -66,14 +66,14 @@ class STLWriterTests(BlenderTestCase):
         target = os.path.join(self.tmp, "taken.stl")
         os.makedirs(target)  # a folder where the file should go
         depsgraph = bpy.context.evaluated_depsgraph_get()
-        self.assertTrue(ce.export_object_stl(target, ob, depsgraph).startswith("FAILED"))
+        self.assertTrue(ce.stl.export_object_stl(target, ob, depsgraph).startswith("FAILED"))
 
     def test_object_disabled_in_viewports_is_not_written(self):
         ob = make_object("Cube", mesh=cube_mesh())
         ob.hide_viewport = True
         bpy.context.view_layer.update()
         path = os.path.join(self.tmp, "cube.stl")
-        result = ce.export_object_stl(path, ob, bpy.context.evaluated_depsgraph_get())
+        result = ce.stl.export_object_stl(path, ob, bpy.context.evaluated_depsgraph_get())
         self.assertTrue(result.startswith("SKIPPED (not evaluated"), result)
         self.assertFalse(os.path.exists(path))
 
@@ -110,12 +110,12 @@ class STLWriterTests(BlenderTestCase):
         ob = make_object("Inst", group=make_instancing_group(count=2))
         ob.hide_set(True)
         def broken(*_args): raise ValueError("broken")
-        original, ce.mesh_to_stl_array = ce.mesh_to_stl_array, broken
+        original, ce.stl.mesh_to_stl_array = ce.stl.mesh_to_stl_array, broken
         try:
             with self.assertRaises(ValueError):
-                ce.collect_instance_arrays(bpy.context.evaluated_depsgraph_get(), [ob])
+                ce.stl.collect_instance_arrays(bpy.context.evaluated_depsgraph_get(), [ob])
         finally:
-            ce.mesh_to_stl_array = original
+            ce.stl.mesh_to_stl_array = original
         self.assertTrue(ob.hide_get())
 
     def test_text_object(self):

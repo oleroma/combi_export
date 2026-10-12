@@ -37,12 +37,12 @@ class EngineTestCase(BlenderTestCase):
     def assertCountsMatch(self):
         """The variant count (product of pool sizes without anchors) equals the variants generated, and every variant's
         values are all active when it is walked again."""
-        live = ce.live_collection_names(bpy.context.view_layer)
-        for *_rest, ovrs in ce.iter_export_objects(self.scene, self.preset, live):
-            variants = list(ce.generate_named_combinations(ovrs))
-            self.assertEqual(ce.count_override_combinations(ovrs), len(variants))
+        live = ce.targets.live_collection_names(bpy.context.view_layer)
+        for *_rest, ovrs in ce.targets.iter_export_objects(self.scene, self.preset, live):
+            variants = list(ce.engine.generate_named_combinations(ovrs))
+            self.assertEqual(ce.engine.count_override_combinations(ovrs), len(variants))
             for combo, _tags, _dirs in variants:
-                active = ce.walk_override_branch(ovrs, combo)[0]
+                active = ce.engine.walk_override_branch(ovrs, combo)[0]
                 self.assertTrue(all(id(inp) in active for _ovr, inp in combo))
 
 
@@ -73,20 +73,20 @@ class CombinationTests(EngineTestCase):
 
     def test_more_specific_level_replaces_the_value(self):
         make_object("Box2", group=self.group)
-        ce.sync_collection_objects(self.col)
+        ce.targets.sync_collection_objects(self.col)
         override(self.preset.nodegroups, "Size", "FLOAT", "\\1", "\\2")
         override(self.obj_entry().nodegroups, "Size", "FLOAT", "\\3")
         self.assertPaths(["3/Box.stl", "1/Box2.stl", "2/Box2.stl"])
 
     def test_overrides_skip_objects_without_the_group(self):
         make_object("Plain")
-        ce.sync_collection_objects(self.col)
+        ce.targets.sync_collection_objects(self.col)
         override(self.preset.nodegroups, "Size", "FLOAT", "\\1", "\\2")
         self.assertPaths(["1/Box.stl", "2/Box.stl", "Plain.stl"])
 
     def test_plain_values_clash(self):
         override(self.preset.nodegroups, "Size", "FLOAT", "1", "2")
-        clashes = ce.find_export_clashes(self.scene, self.preset, ce.live_collection_names(bpy.context.view_layer), self.tmp)
+        clashes = ce.targets.find_export_clashes(self.scene, self.preset, ce.targets.live_collection_names(bpy.context.view_layer), self.tmp)
         self.assertEqual(len(clashes), 1)
 
     def test_prefix_and_sub_folders(self):
@@ -144,29 +144,29 @@ class BranchMergeTests(EngineTestCase):
         add_input(add_node(dead), "Count", "INT", "\\5", "\\6")
         self.assertPaths(["A/X/Box.stl", "A/Y/Box.stl", "B/Box.stl", "C/Box.stl"])
 
-        scope, _ctx = ce.upstream_scope(dead)
+        scope, _ctx = ce.props.upstream_scope(dead)
         _ctx, res = scope.enter_block(dead, frozenset(), dead)
-        self.assertTrue(ce.scope_dead(res), "the UI does not flag the dead block")
+        self.assertTrue(ce.scope.scope_dead(res), "the UI does not flag the dead block")
 
     def test_live_merge_is_predicted(self):
         self.letters_and_numbers()
         ng = self.block("\\C\\2", "1\\X")
-        scope, _ctx = ce.upstream_scope(ng)
+        scope, _ctx = ce.props.upstream_scope(ng)
         _ctx, res = scope.enter_block(ng, frozenset(), ng)
-        self.assertFalse(ce.scope_dead(res))
+        self.assertFalse(ce.scope.scope_dead(res))
         self.assertEqual(res["dir"][0], ["C", "2"])
 
     def test_block_search_offers_names_under_the_typed_branch(self):
         self.letters_and_numbers()
         ng = add_group(self.col.nodegroups)
-        offers = [text for text, _desc in ce.search_block_naming(ng, bpy.context, "\\C\\")]
+        offers = [text for text, _desc in ce.props.search_block_naming(ng, bpy.context, "\\C\\")]
         for n in "123": self.assertIn(f"\\C\\{n}\\", offers)
         self.assertFalse(any(text.startswith(("\\C\\A", "\\C\\B")) for text in offers))
 
     def test_value_search_offers_chains_with_the_value(self):
         self.letters_and_numbers(numbers=("1", "2"))
         val = override(self.col.nodegroups, "Size", "FLOAT", "\\15").values[0]
-        offers = [text for text, _desc in ce.search_value_expr(val, bpy.context, "\\B\\")]
+        offers = [text for text, _desc in ce.props.search_value_expr(val, bpy.context, "\\B\\")]
         for text in ("\\B\\1\\15", "\\B\\1\\", "\\B\\2\\15", "\\B\\2\\"): self.assertIn(text, offers)
 
     # Note: an inherited block keeps its folder only while one of its inputs survives resolve_overrides. Whether its
@@ -191,22 +191,22 @@ class FastCountTests(unittest.TestCase):
                         tag_t = rnd.choice((None, "*", f"t{name}_*"))
                         val = types.SimpleNamespace(value_string=str(v), value_menu="", use_sweep=False, use_dir=dir_t is not None,
                                                     dir_tag=dir_t or "", use_tag=tag_t is not None, tag=tag_t or "")
-                        inputs.append(ce.MockInput(base, val, is_temp=True))
+                        inputs.append(ce.engine.MockInput(base, val, is_temp=True))
                 sub = rnd.choice(("", "", "blk"))
-                overrides.append(ce.MockOverride('MODIFIER', None, "<Modifier Interface>", inputs, level, sub, "", "", "", (level, o)))
+                overrides.append(ce.engine.MockOverride('MODIFIER', None, "<Modifier Interface>", inputs, level, sub, "", "", "", (level, o)))
         return overrides
 
     def test_product_count_matches_pruned_generation(self):
         rnd, checked = random.Random(1234), 0
         for trial in range(40):
             stack = self.random_stack(rnd)
-            known = ce._known_branch_dirs(stack)
-            if ce._has_branch_anchors(stack, known): continue
+            known = ce.engine._known_branch_dirs(stack)
+            if ce.engine._has_branch_anchors(stack, known): continue
             checked += 1
-            fast = [(t, d) for _c, t, d in ce.generate_named_combinations(stack)]
-            with mock.patch.object(ce, "_has_branch_anchors", lambda *_a: True):
-                pruned = [(t, d) for _c, t, d in ce.generate_named_combinations(stack)]
+            fast = [(t, d) for _c, t, d in ce.engine.generate_named_combinations(stack)]
+            with mock.patch.object(ce.engine, "_has_branch_anchors", lambda *_a: True):
+                pruned = [(t, d) for _c, t, d in ce.engine.generate_named_combinations(stack)]
             with self.subTest(trial=trial):
-                self.assertEqual(ce.count_override_combinations(stack), len(fast))
+                self.assertEqual(ce.engine.count_override_combinations(stack), len(fast))
                 self.assertEqual(fast, pruned)
         self.assertGreater(checked, 30)

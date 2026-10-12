@@ -8,7 +8,7 @@ from helpers import BlenderTestCase, cube_mesh, get_collection, make_gn_group, m
 
 
 def preset_dicts(scene=None):
-    return [ce.copy_preset_to_dict(p) for p in (scene or bpy.context.scene).batch_stl_presets]
+    return [ce.data.copy_preset_to_dict(p) for p in (scene or bpy.context.scene).batch_stl_presets]
 
 
 def build_rich_preset():
@@ -69,10 +69,10 @@ class JsonTests(BlenderTestCase):
                 "nodegroups": [{"group": "GN", "nodes": [{"name": "<Modifier Interface>", "inputs": inputs}]}]}
         make_gn_group()
         preset = bpy.context.scene.batch_stl_presets.add()
-        ce.paste_preset_from_dict(preset, data)
+        ce.data.paste_preset_from_dict(preset, data)
         inputs = preset.nodegroups[0].nodes[0].inputs
         # The tag 'lid' replaced the value in the file name; the value itself stays (hover shows it)
-        self.assertEqual([ce.value_expr(i.values[0], i.override_type) for i in inputs], ["\\5", "\\0.5:0.25:3", "_lid"])
+        self.assertEqual([ce.fields.value_expr(i.values[0], i.override_type) for i in inputs], ["\\5", "\\0.5:0.25:3", "_lid"])
         self.assertEqual(inputs["Flag"].values[0].value_menu, "False")
 
     def test_earlier_field_syntax(self):
@@ -81,8 +81,8 @@ class JsonTests(BlenderTestCase):
         data = {"name": "Old", "data_version": 2, "collections": [], "nodegroups": [{"group": "GN", "nodes": [
             {"name": "<Modifier Interface>", "inputs": [{"name": "Size", "override_type": "FLOAT", "values": [value]}]}]}]}
         preset = bpy.context.scene.batch_stl_presets.add()
-        ce.paste_preset_from_dict(preset, data)
-        self.assertEqual(ce.value_expr(preset.nodegroups[0].nodes[0].inputs[0].values[0], "FLOAT"), "\\B\\15\\_x_15")
+        ce.data.paste_preset_from_dict(preset, data)
+        self.assertEqual(ce.fields.value_expr(preset.nodegroups[0].nodes[0].inputs[0].values[0], "FLOAT"), "\\B\\15\\_x_15")
 
 
 class ClipboardAndMoveTests(BlenderTestCase):
@@ -101,28 +101,28 @@ class ClipboardAndMoveTests(BlenderTestCase):
         make_object("Lid", collection="Lids")
         preset = make_preset(collections=("Parts", "Lids"))
         override(preset.nodegroups, "Size", "FLOAT", "\\1", "\\2")
-        group = ce.copy_ng_to_dict(preset.nodegroups[0])
+        group = ce.data.copy_ng_to_dict(preset.nodegroups[0])
         bpy.ops.batch_stl.table_action(action='MOVE_GROUP_DOWN', is_preset=True, ng_idx=0, shift_pressed=True)
         self.assertEqual(len(preset.nodegroups), 0)
-        self.assertEqual([[ce.copy_ng_to_dict(ng) for ng in c.nodegroups] for c in preset.collections], [[group], [group]])
+        self.assertEqual([[ce.data.copy_ng_to_dict(ng) for ng in c.nodegroups] for c in preset.collections], [[group], [group]])
 
     def test_shift_up_moves_a_group_to_the_collection(self):
         make_object("Box", group=make_gn_group())
         preset = make_preset()
         col = preset.collections[0]
         override(col.objects[0].nodegroups, "Size", "FLOAT", "\\1", "\\2")
-        group = ce.copy_ng_to_dict(col.objects[0].nodegroups[0])
+        group = ce.data.copy_ng_to_dict(col.objects[0].nodegroups[0])
         bpy.ops.batch_stl.table_action(action='MOVE_GROUP_UP', ng_idx=0, shift_pressed=True)
         self.assertEqual(len(col.objects[0].nodegroups), 0)
-        self.assertEqual([ce.copy_ng_to_dict(ng) for ng in col.nodegroups], [group])
+        self.assertEqual([ce.data.copy_ng_to_dict(ng) for ng in col.nodegroups], [group])
 
     def test_exporting_preset_cannot_be_removed(self):
         make_object("Box")
         preset = make_preset()
-        ce.get_job(preset, create=True).is_exporting = True
+        ce.data.get_job(preset, create=True).is_exporting = True
         bpy.ops.batch_stl.preset_actions(action='REMOVE')
         self.assertEqual(len(bpy.context.scene.batch_stl_presets), 1)
-        ce.get_job(preset).is_exporting = False
+        ce.data.get_job(preset).is_exporting = False
         bpy.ops.batch_stl.preset_actions(action='REMOVE')
         self.assertEqual(len(bpy.context.scene.batch_stl_presets), 0)
         self.assertEqual(len(bpy.context.window_manager.batch_stl_jobs), 0, "the removed preset's job (its log) stays")
@@ -135,7 +135,7 @@ class MigrationTests(BlenderTestCase):
         preset = make_preset()
         val = override(preset.nodegroups, "Count", "INT", "\\1").values[0]
         # Stored as an unversioned (v1.0.0) scene: a typed int, one tag for folder and file name, an ID pointer, UI state
-        with ce.raw_edits():
+        with ce.common.raw_edits():
             val.value_string, val.dir_tag, val.tag, val.use_tag = "", "", "B_", True
         val["value_int"] = 7
         entry = preset.collections[0].objects[0]
@@ -143,14 +143,14 @@ class MigrationTests(BlenderTestCase):
         scene["batch_stl_ui_tips"] = 1
         scene.property_unset("batch_stl_data_version")
 
-        ce.migrate_scene_data(scene)
+        ce.data.migrate_scene_data(scene)
         self.assertEqual(val.value_string, "7")
         self.assertEqual((val.dir_tag, val.tag), ("B_*", "B_*"))
         self.assertNotIn("value_int", val.keys())
         self.assertNotIn("obj_ptr", entry.keys())
         self.assertNotIn("batch_stl_ui_tips", scene.keys())
-        self.assertEqual(scene.batch_stl_data_version, ce.DATA_VERSION)
-        ce.migrate_scene_data(scene)  # a current scene is left alone
+        self.assertEqual(scene.batch_stl_data_version, ce.data.DATA_VERSION)
+        ce.data.migrate_scene_data(scene)  # a current scene is left alone
         self.assertEqual((val.dir_tag, val.tag), ("B_*", "B_*"))
 
     def test_save_and_reload(self):
@@ -184,15 +184,15 @@ class MigrationTests(BlenderTestCase):
         scene.name = "Old"
         make_object("Box", group=make_gn_group())
         val = override(make_preset().nodegroups, "Count", "INT", "\\1").values[0]
-        with ce.raw_edits():
+        with ce.common.raw_edits():
             val.value_string, val.dir_tag, val.tag, val.use_tag = "", "", "B_", True
         val["value_int"] = 7
         scene.property_unset("batch_stl_data_version")
         old_path = os.path.join(self.tmp, "old.blend")
         save_pre = bpy.app.handlers.save_pre
-        save_pre.remove(ce.batch_stl_save_handler)
+        save_pre.remove(ce.data.batch_stl_save_handler)
         try: bpy.ops.wm.save_as_mainfile(filepath=old_path)
-        finally: save_pre.append(ce.batch_stl_save_handler)
+        finally: save_pre.append(ce.data.batch_stl_save_handler)
         bpy.ops.wm.read_factory_settings(use_empty=True)
         return old_path + "/Scene/"
 
@@ -226,7 +226,7 @@ class ObjectEntryTests(BlenderTestCase):
         self.col = self.preset.collections[0]
 
     def sync(self):
-        ce.sync_collection_objects(self.col)
+        ce.targets.sync_collection_objects(self.col)
         return [o.name for o in self.col.objects]
 
     def test_entries_follow_the_collection(self):
@@ -269,5 +269,5 @@ class ObjectEntryTests(BlenderTestCase):
     def test_preset_uids_are_unique(self):
         copy = bpy.context.scene.batch_stl_presets.add()
         copy.uid = self.preset.uid
-        ce.ensure_preset_uids(bpy.context.scene)
+        ce.data.ensure_preset_uids(bpy.context.scene)
         self.assertNotEqual(copy.uid, self.preset.uid)

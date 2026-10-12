@@ -27,8 +27,8 @@ class TableTestCase(BlenderTestCase):
         return bpy.ops.batch_stl.table_action(action=action, is_preset=True, ng_idx=0, n_idx=0, **kwargs)
 
     def exprs(self, inp):
-        items = ce.input_items(self.ng, self.node, inp)
-        return [ce.value_expr(v, inp.override_type, items) for v in inp.values]
+        items = ce.props.input_items(self.ng, self.node, inp)
+        return [ce.fields.value_expr(v, inp.override_type, items) for v in inp.values]
 
 
 class InputTests(TableTestCase):
@@ -45,12 +45,12 @@ class InputTests(TableTestCase):
             with self.subTest(name):
                 self.new_input(name)  # a duplicate swaps the two rows, so look at the names, not the new item
                 self.assertEqual(sorted(i.name for i in self.node.inputs), ["", "Size"])
-                with ce.raw_edits(): self.node.inputs.remove(next(k for k, i in enumerate(self.node.inputs) if not i.name))
+                with ce.common.raw_edits(): self.node.inputs.remove(next(k for k, i in enumerate(self.node.inputs) if not i.name))
 
     def test_shift_add_input_adds_every_supported_input(self):
         self.table_action('ADD_INPUT', shift_pressed=True)
         self.assertEqual([i.name for i in self.node.inputs], ["Size", "Count", "Flag", "Word", "Mode"])
-        self.assertTrue(ce.is_preset_setup_valid(bpy.context.scene, self.preset))
+        self.assertTrue(ce.validation.is_preset_setup_valid(bpy.context.scene, self.preset))
 
     def test_node_target(self):
         self.node.name = "Cube [MESH_PRIMITIVE_CUBE]"
@@ -133,35 +133,35 @@ class ValidationTests(TableTestCase):
         for name, text in cases:
             with self.subTest(name=name, value=text):
                 inp = self.new_input(name)
-                self.assertTrue(ce.is_preset_setup_valid(scene, self.preset))
-                with ce.raw_edits():  # stored data the field would reject (e.g. from a hand-edited JSON file)
+                self.assertTrue(ce.validation.is_preset_setup_valid(scene, self.preset))
+                with ce.common.raw_edits():  # stored data the field would reject (e.g. from a hand-edited JSON file)
                     if text.count(":") == 2:
                         val = inp.values[0]
                         val.use_sweep, (val.sweep_start, val.sweep_step, val.sweep_count) = True, text.split(":")
                     else:
                         setattr(inp.values[0], "value_menu" if inp.override_type == "MENU" else "value_string", text)
-                self.assertFalse(ce.is_preset_setup_valid(scene, self.preset))
-                with ce.raw_edits(): self.node.inputs.remove(len(self.node.inputs) - 1)
+                self.assertFalse(ce.validation.is_preset_setup_valid(scene, self.preset))
+                with ce.common.raw_edits(): self.node.inputs.remove(len(self.node.inputs) - 1)
 
     def test_missing_group_blocks_the_export(self):
-        with ce.raw_edits(): self.preset.collections[0].nodegroups.add().group_name = "Gone"
-        self.assertFalse(ce.is_preset_setup_valid(bpy.context.scene, self.preset))
+        with ce.common.raw_edits(): self.preset.collections[0].nodegroups.add().group_name = "Gone"
+        self.assertFalse(ce.validation.is_preset_setup_valid(bpy.context.scene, self.preset))
 
 
 class SocketDiscoveryTests(TableTestCase):
     def test_menu_items(self):
-        self.assertEqual(ce.get_menu_switch_items(self.group, "Switch [MENU_SWITCH]", "Menu"), ["A", "B", "C"])
-        self.assertEqual(ce.get_menu_switch_items(self.group, MODIFIER, "Mode"), ["A", "B", "C"])
-        self.assertEqual(ce.get_menu_switch_items(self.group, "Merge [MERGE_BY_DISTANCE]", "Mode"), ["All", "Connected"])
+        self.assertEqual(ce.nodes.get_menu_switch_items(self.group, "Switch [MENU_SWITCH]", "Menu"), ["A", "B", "C"])
+        self.assertEqual(ce.nodes.get_menu_switch_items(self.group, MODIFIER, "Mode"), ["A", "B", "C"])
+        self.assertEqual(ce.nodes.get_menu_switch_items(self.group, "Merge [MERGE_BY_DISTANCE]", "Mode"), ["All", "Connected"])
         self.box.modifiers.clear()  # no modifier to ask: read from the Menu Switch the input feeds
-        self.assertEqual(ce.get_menu_switch_items(self.group, MODIFIER, "Mode"), ["A", "B", "C"])
+        self.assertEqual(ce.nodes.get_menu_switch_items(self.group, MODIFIER, "Mode"), ["A", "B", "C"])
 
     def test_menu_behind_a_reroute(self):
         links = self.group.links
         switch, reroute = self.group.nodes["Switch"], self.group.nodes.new("NodeReroute")
         links.new(switch.inputs["Menu"].links[0].from_socket, reroute.inputs[0])
         links.new(reroute.outputs[0], switch.inputs["Menu"])
-        self.assertEqual(ce.get_menu_switch_items(self.group, MODIFIER, "Mode"), ["A", "B", "C"])
+        self.assertEqual(ce.nodes.get_menu_switch_items(self.group, MODIFIER, "Mode"), ["A", "B", "C"])
 
     def test_socket_classification(self):
         cases = {"NodeSocketFloat": "FLOAT", "NodeSocketFloatDistance": "FLOAT", "VALUE": "FLOAT", "NodeSocketInt": "INT",
@@ -170,11 +170,11 @@ class SocketDiscoveryTests(TableTestCase):
                  "RGBA": "UNSUPPORTED", "NodeSocketColor": "UNSUPPORTED", "NodeSocketObject": "UNSUPPORTED", "ROTATION": "UNSUPPORTED"}
         for socket_type, expected in cases.items():
             with self.subTest(socket_type):
-                self.assertEqual(ce.classify_socket_type(socket_type), expected)
+                self.assertEqual(ce.nodes.classify_socket_type(socket_type), expected)
 
     def test_target_node_order(self):
         self.group.interface.new_socket("Height", in_out="OUTPUT", socket_type="NodeSocketFloat")
-        targets = ce.get_target_node_names(self.group)
+        targets = ce.nodes.get_target_node_names(self.group)
         self.assertEqual(targets[-2:], ["Group Output [GROUP_OUTPUT]", MODIFIER])
         self.assertFalse(any(t.startswith("Group Input") for t in targets))
         self.assertEqual(targets[0], "Cube [MESH_PRIMITIVE_CUBE]")
@@ -184,7 +184,7 @@ class ApplyOverridesTests(TableTestCase):
     def mock(self, node, input_name, override_type, value):
         base = types.SimpleNamespace(input_name=input_name, override_type=override_type)
         target = 'MODIFIER' if node == MODIFIER else 'NODE'
-        return ce.MockOverride(target, self.group, node, [ce.MockInput(base, value)])
+        return ce.engine.MockOverride(target, self.group, node, [ce.engine.MockInput(base, value)])
 
     def size_of_box(self):
         bpy.context.view_layer.update()
@@ -194,23 +194,23 @@ class ApplyOverridesTests(TableTestCase):
 
     def test_modifier_input_is_applied_and_reverted(self):
         ovrs = [self.mock(MODIFIER, "Size", "FLOAT", 3.0)]
-        states = ce.capture_baseline_states(ovrs, [self.box])
-        ce.apply_overrides(ovrs, [self.box])
+        states = ce.headless.capture_baseline_states(ovrs, [self.box])
+        ce.headless.apply_overrides(ovrs, [self.box])
         self.assertEqual(self.size_of_box()[0], 3.0)
-        ce.revert_overrides(*states, [self.box], skip=ce.override_targets(ovrs))
+        ce.headless.revert_overrides(*states, [self.box], skip=ce.headless.override_targets(ovrs))
         self.assertEqual(self.size_of_box()[0], 3.0, "a skipped socket was reverted")
-        ce.revert_overrides(*states, [self.box])
+        ce.headless.revert_overrides(*states, [self.box])
         self.assertEqual(self.size_of_box()[0], 1.0)
 
     def test_linked_node_socket_is_applied_and_reverted(self):
         cube_socket = self.group.nodes["Cube"].inputs["Vertices X"]
         ovrs = [self.mock("Cube [MESH_PRIMITIVE_CUBE]", "Vertices X", "INT", 4)]
-        states = ce.capture_baseline_states(ovrs, [self.box])
+        states = ce.headless.capture_baseline_states(ovrs, [self.box])
         before = self.size_of_box()
-        ce.apply_overrides(ovrs, [self.box])
+        ce.headless.apply_overrides(ovrs, [self.box])
         self.assertFalse(cube_socket.is_linked)
         self.assertEqual(self.size_of_box()[1], 14)  # 3 segments along X: 4 x 3 + 2 quads
-        ce.revert_overrides(*states, [self.box])
+        ce.headless.revert_overrides(*states, [self.box])
         self.assertTrue(cube_socket.is_linked)
         self.assertEqual(cube_socket.default_value, 2)
         self.assertEqual(self.size_of_box(), before)
@@ -219,15 +219,15 @@ class ApplyOverridesTests(TableTestCase):
         ovrs = [self.mock(MODIFIER, "Mode", "MENU", "Z")]
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            ce.apply_overrides(ovrs, [self.box])
-            ce.apply_overrides(ovrs, [self.box])
+            ce.headless.apply_overrides(ovrs, [self.box])
+            ce.headless.apply_overrides(ovrs, [self.box])
         self.assertEqual(out.getvalue().count("WARNING: could not set"), 1)
 
 
 class SearchResultTests(TableTestCase):
     def test_tab_reaches_the_separator(self):
         offers = [("\\A\\", "Branch"), ("\\A\\15", "Branch"), ("\\B\\", "Branch")]
-        texts = [t for t, _d in ce.search_results("\\A", offers, tab=["\\A\\"])]
+        texts = [t for t, _d in ce.props.search_results("\\A", offers, tab=["\\A\\"])]
         self.assertEqual(texts, ["\\A\\", "\\A\\15", "\\B\\"])
-        texts = [t for t, _d in ce.search_results("\\A", offers)]
+        texts = [t for t, _d in ce.props.search_results("\\A", offers)]
         self.assertEqual(texts[0], "\\A", "the text as typed comes first")

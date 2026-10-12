@@ -20,8 +20,8 @@ class BlenderTestCase(unittest.TestCase):
 
     def setUp(self):
         bpy.ops.wm.read_factory_settings(use_empty=True)
-        ce._clipboard.update(preset=None, collection=None, nodegroup=None)
-        for cache in (ce._compose_memo, ce._socket_menu_memo, ce._reported_failures, ce._expr_edits):
+        ce.operators._clipboard.update(preset=None, collection=None, nodegroup=None)
+        for cache in (ce.fields._compose_memo, ce.nodes._socket_menu_memo, ce.headless._reported_failures, ce.props._expr_edits):
             cache.clear()
         self.tmp = tempfile.mkdtemp(prefix="combi_test_")
         self.addCleanup(shutil.rmtree, self.tmp, True)
@@ -114,14 +114,14 @@ def make_preset(name="P", collections=("Parts",), prefix="", scene=None):
     for col_name in collections:
         entry = preset.collections.add()
         entry.collection_name = col_name
-        ce.sync_collection_objects(entry)
-    ce.ensure_preset_uids(scene)
+        ce.targets.sync_collection_objects(entry)
+    ce.data.ensure_preset_uids(scene)
     scene.batch_stl_preset_index = len(scene.batch_stl_presets) - 1
     return preset
 
 
 def add_group(nodegroups, group=GN, naming=""):
-    with ce.raw_edits():
+    with ce.common.raw_edits():
         ng = nodegroups.add()
         ng.group_name = group
     ng.naming = naming
@@ -129,7 +129,7 @@ def add_group(nodegroups, group=GN, naming=""):
 
 
 def add_node(ng, node=MODIFIER, naming=""):
-    with ce.raw_edits():
+    with ce.common.raw_edits():
         n = ng.nodes.add()
         n.name = node
     n.naming = naming
@@ -138,13 +138,13 @@ def add_node(ng, node=MODIFIER, naming=""):
 
 def add_input(node, name, override_type, *exprs):
     """An input whose values are typed into their value fields, like the override table does."""
-    with ce.raw_edits():
+    with ce.common.raw_edits():
         inp = node.inputs.add()
         inp.name, inp.override_type = name, override_type
     for text in exprs:
-        val = ce.add_value(inp.values)
+        val = ce.fields.add_value(inp.values)
         val.expr = text
-        if ce.value_fields(val, override_type) is None:
+        if ce.fields.value_fields(val, override_type) is None:
             raise AssertionError(f"value field rejected {text!r} ({override_type})")
     return inp
 
@@ -161,15 +161,15 @@ def override(nodegroups, input_name, override_type, *exprs, group=GN, node=MODIF
 def planned_paths(preset=None, scene=None):
     """'folder/.../file.stl' of every file the preset writes, in export order (duplicates kept)."""
     scene = scene or bpy.context.scene
-    preset = preset or ce.get_active_preset(scene)
-    for c in preset.collections: ce.sync_collection_objects(c)
-    live = ce.live_collection_names(bpy.context.view_layer)
+    preset = preset or ce.data.get_active_preset(scene)
+    for c in preset.collections: ce.targets.sync_collection_objects(c)
+    live = ce.targets.live_collection_names(bpy.context.view_layer)
     paths = []
-    with ce.cached_menu_items():
-        for ovrs, items in ce.group_by_signature(ce.iter_export_objects(scene, preset, live)).values():
-            for _combo, tags, dirs in ce.generate_named_combinations(ovrs):
+    with ce.nodes.cached_menu_items():
+        for ovrs, items in ce.targets.group_by_signature(ce.targets.iter_export_objects(scene, preset, live)).values():
+            for _combo, tags, dirs in ce.engine.generate_named_combinations(ovrs):
                 for c, obj_prop, bl_obj in items:
-                    parts, filename = ce.export_file_parts(preset, c, obj_prop, bl_obj, tags, dirs)
+                    parts, filename = ce.targets.export_file_parts(preset, c, obj_prop, bl_obj, tags, dirs)
                     paths.append("/".join(parts + [filename]))
     return paths
 
@@ -188,7 +188,7 @@ def read_stl(path):
     with open(path, "rb") as f: data = f.read()
     count = struct.unpack("<I", data[80:84])[0]
     assert len(data) == 84 + 50 * count, f"{path}: {len(data)} bytes for {count} triangles"
-    return data[:80], np.frombuffer(data[84:], dtype=ce.STL_DTYPE)
+    return data[:80], np.frombuffer(data[84:], dtype=ce.stl.STL_DTYPE)
 
 
 def stl_bounds(path):
@@ -218,7 +218,7 @@ class _WindowManagerProxy:
 
 class ExportRun:
     """Runs EXPORT_OT_batch_stl_multi's invoke() and modal() (worker included) outside Blender's operator system."""
-    _op = ce.EXPORT_OT_batch_stl_multi
+    _op = ce.export_operator.EXPORT_OT_batch_stl_multi
     invoke, modal, cleanup, cancel = _op.invoke, _op.modal, _op.cleanup, _op.cancel
     _preset, _job, _drain_output = _op._preset, _op._job, _op._drain_output
 
@@ -256,4 +256,4 @@ def write_job(path, preset, root, view_layer=None):
     """The worker's job file for exporting every object of `preset` to `root`, evaluated in the preset's own scene and
     `view_layer` (default: the scene's first)."""
     scene = preset.id_data
-    ce.write_job_file(path, scene, view_layer or scene.view_layers[0], preset, root, skip_direct=False)
+    ce.headless.write_job_file(path, scene, view_layer or scene.view_layers[0], preset, root, skip_direct=False)

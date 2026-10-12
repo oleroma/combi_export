@@ -27,7 +27,7 @@ class DirectExportTests(BlenderTestCase):
         self.assertEqual(written_files(self.tmp), ["Box.stl"])
         self.assertEqual(len(read_stl(os.path.join(self.tmp, "Box.stl"))[1]), 12)
         self.assertIn("BATCH EXPORT COMPLETE", run.log()[-1])
-        self.assertFalse(ce.get_job(preset).is_exporting)
+        self.assertFalse(ce.data.get_job(preset).is_exporting)
 
     def test_only_evaluated_objects_are_exported(self):
         parts = get_collection("Parts")
@@ -96,7 +96,7 @@ class RefusalTests(BlenderTestCase):
 
     def test_invalid_value(self):
         inp = override(self.preset.nodegroups, "Size", "FLOAT", "\\1")
-        with ce.raw_edits(): inp.values[0].value_string = "x"
+        with ce.common.raw_edits(): inp.values[0].value_string = "x"
         self.assertRefused("Improper setup")
 
     def test_missing_root(self):
@@ -133,7 +133,7 @@ class WorkerExportTests(BlenderTestCase):
         self.assertEqual(result, {'FINISHED'}, log)
         self.assertNotIn("CRASH", log)
         self.assertEqual(written_files(self.tmp), expected)
-        self.assertFalse(ce.get_job(preset).is_exporting)
+        self.assertFalse(ce.data.get_job(preset).is_exporting)
         self.assertFalse(os.path.exists(run.temp_dir), "the worker's temp folder is left behind")
 
         # Size 3 in the A branch; back at its default 1 in the B branch, moved by Mode B; 4 vertices along X everywhere
@@ -145,17 +145,17 @@ class WorkerExportTests(BlenderTestCase):
 
         # The open file is untouched: the worker exported from its own copy
         self.assertTrue(group.nodes["Cube"].inputs["Vertices X"].is_linked)
-        mode = ce.get_modifier_socket_identifier(group, "Mode")
-        self.assertEqual(ce.get_modifier_input(box.modifiers[0], mode), "A")
+        mode = ce.nodes.get_modifier_socket_identifier(group, "Mode")
+        self.assertEqual(ce.nodes.get_modifier_input(box.modifiers[0], mode), "A")
 
         # The same state set by hand and written in this process gives the same bytes
-        ce.set_modifier_input(box.modifiers[0], mode, "B")
+        ce.nodes.set_modifier_input(box.modifiers[0], mode, "B")
         cube_socket = group.nodes["Cube"].inputs["Vertices X"]
         group.links.remove(cube_socket.links[0])
         cube_socket.default_value = 4
         bpy.context.view_layer.update()
         direct = os.path.join(self.tmp, "direct.stl")
-        ce.write_object_stl(direct, box, bpy.context.evaluated_depsgraph_get())
+        ce.stl.write_object_stl(direct, box, bpy.context.evaluated_depsgraph_get())
         with open(direct, "rb") as a, open(os.path.join(self.tmp, "B/Box.stl"), "rb") as b:
             self.assertEqual(a.read(), b.read())
 
@@ -175,7 +175,7 @@ class WorkerExportTests(BlenderTestCase):
         """run_headless_export in this process: (exit code, printed output)."""
         out = io.StringIO()
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as exit:
-            ce.run_headless_export(job)
+            ce.headless.run_headless_export(job)
         return exit.exception.code, out.getvalue()
 
     def test_worker_exports_the_preset_of_the_job_scene(self):
@@ -247,7 +247,7 @@ class WorkerProtocolTests(BlenderTestCase):
         super().setUp()
         make_object("Box", mesh=cube_mesh())
         self.preset = make_preset()
-        self.job = ce.get_job(self.preset, create=True)
+        self.job = ce.data.get_job(self.preset, create=True)
         self.job.is_exporting = True
         run = self.run = ExportRun()
         run.scene_uid, run.preset_uid, run.preset_name = bpy.context.scene.session_uid, self.preset.uid, self.preset.name

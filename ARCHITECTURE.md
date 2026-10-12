@@ -51,6 +51,36 @@
                                       +───────────────────────────────────────────+
 ```
 
+### Module Layout
+The package (`combi_export/`) has one module per subsystem. Each module imports only modules listed above it, so the import graph has no cycles:
+
+| Module | Contents |
+|---|---|
+| `common.py` | The UI cache dict and `mark_dirty`, `MAX_SWEEP_STEPS` / `COUNT_LIMIT`, and the undo / raw-edit plumbing (`push_search_undo`, `inside_operator`, `nested_edits`, `raw_edits`, `in_raw_edits`, `edit_callback`, `DELETED`). |
+| `nodes.py` | Node tree and modifier access: interface sockets, modifier inputs, menu items (`cached_menu_items`, `socket_menu_items`), socket types, override targets and socket defaults. |
+| `naming.py` | `sanitize_name`, value naming templates (`VALUE_SLOT`, `value_name_parts`, `legacy_naming_template`), tag splitting (`segment_tag`), `SCOPE_KINDS`, `clash_key` and *Filename Assembly*. |
+| `fields.py` | Value field and block naming syntax (`lex_expr` … `parse_value_field`, `compose_value_field`, `parse_block_naming`) and the naming of new values (`add_value`, `name_permutations`). Text only. |
+| `engine.py` | `MockInput` / `MockOverride`, `get_flat_overrides`, `resolve_overrides`, sweeps and pools, the branch walker (`walk_override_branch`, `generate_named_combinations`) and `count_override_combinations`. |
+| `scope.py` | Merge predictions: `BranchScope` and `naming_completions`. |
+| `targets.py` | What is exported where: `live_collection_names`, `sync_collection_objects`, `iter_export_objects`, `group_by_signature`, `export_file_parts`, `find_export_clashes`. |
+| `stl.py` | The STL writer (section 5). |
+| `data.py` | Active item lookups, export jobs and their logs, JSON / clipboard copies and data versioning (`DATA_VERSION`, `migrate_scene_data`, `prepare_scene`, the append and save handlers). |
+| `validation.py` | `is_override_*_valid`, `is_preset_setup_valid`. |
+| `headless.py` | The worker side: `write_job_file`, baseline capture, `apply_overrides` / `revert_overrides`, `run_headless_export`. |
+| `headless_main.py` | The script the worker process starts with (see *Process Spawn*). Not imported by the add-on. |
+| `ui_cache.py` | `rebuild_ui_cache_if_dirty`, the stats, the depsgraph / undo handlers and the directory tree data with its expansion state. |
+| `props.py` | The property groups with their update / get / set / search callbacks, `upstream_scope` and `search_results`. |
+| `operators.py` | Editing operators and the internal clipboard (`_clipboard`). |
+| `export_operator.py` | `EXPORT_OT_batch_stl_multi` (direct export, worker spawn, modal progress), cancel, and the cleanup of stale temp folders. |
+| `ui.py` | `ICONS`, UI lists, panels, `draw_overrides_table` with the value icons and merge bars (`value_info`, `merge_tooltip`), `draw_tree_dict`. |
+| `__init__.py` | Registration: classes (each module lists its own in `classes`), Scene / WindowManager properties, app handlers, the UI timer. |
+
+Conventions that come with the split:
+- Imports inside the package are relative (`from .engine import ...`), as Blender extensions require: an installed add-on is the package `bl_ext.<repo>.combi_export`.
+- A module-level value that is reassigned (the `_raw_edit_depth`, `_undo_suppress_depth` and `_menu_items_cache` counters / caches) is read and written only in its own module. Other modules call a function (`in_raw_edits()`, `nested_edits()`, `cached_menu_items()`): an imported copy of the value would never change. Dicts that are only changed in place (`_ui_cache`, the memos) can be imported.
+- Code calls functions by the name it imported, so a test that replaces a function must patch it in the module that calls it (`mock.patch.object(ce.engine, "_has_branch_anchors", ...)`).
+- *Reload Scripts* re-runs `__init__.py` only. When it runs again, it first reloads every module in `_MODULES` order, so that edits to any file take effect.
+
 ---
 
 ## 3. Data Model & Hierarchy
@@ -59,7 +89,7 @@ The add-on structures export configurations in a strictly scoped 8-tier hierarch
 
 `Global` → `Preset` → `Collection` → `Object` → `NodeGroup` → `Node` → `Input Socket` → `Value / Sweep`
 
-### Property Groups (`combi_export/__init__.py`)
+### Property Groups (`props.py`)
 
 1. **`BatchSTLExportPreset`**:
    - Holds preset name, root directory prefix (`preset_prefix`) and the duration of the last export (`last_export_time`).
@@ -125,7 +155,8 @@ When generating variations for an object, overrides are gathered in hierarchical
      - Saves a snapshot of current memory to a temporary file via `bpy.ops.wm.save_as_mainfile(filepath=..., copy=True)`.
      - Writes a job manifest `job.json` (`write_job_file`): the scene and view layer the export was started from (the window's, as used for the clash check), the preset's `uid`, the root directory path, the start time and `skip_direct` (objects without overrides were already written on the direct path). Job files are temporary and always written by the same add-on version, so they carry no version or fallbacks.
   2. **Process Spawn**:
-     - Spawns background Blender: `[blender, "--factory-startup", "--python-exit-code", "1", ("--enable-autoexec",) "-b", temp_blend, "-P", script_file, "--", "--batch-stl-headless", job_json]`. `--enable-autoexec` is only added when the user allows Python auto-execution.
+     - Spawns background Blender: `[blender, "--factory-startup", "--python-exit-code", "1", ("--enable-autoexec",) "-b", temp_blend, "-P", WORKER_SCRIPT, "--", "--batch-stl-headless", job_json]`. `--enable-autoexec` is only added when the user allows Python auto-execution.
+     - `WORKER_SCRIPT` is `headless_main.py`. Blender runs it as a plain script outside the package, where relative imports fail, and `--factory-startup` leaves the add-on disabled. The script therefore imports the package from its own folder by path (`load_package`), registers it and calls `headless.run_headless_export`. This works wherever the add-on is installed (`bl_ext.<repo>.combi_export`, or `combi_export` from the repository in the tests).
   3. **IPC & Streaming**:
      - A background reader thread drains worker `stdout` into a thread-safe `queue.Queue`.
      - A Blender modal timer operator (`0.1s`) polls the queue, updates preset progress bars (`BATCH_STL_PROGRESS:X`), and logs stdout into the preset's console UI.
