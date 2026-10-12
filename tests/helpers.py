@@ -1,5 +1,4 @@
 """Fixtures shared by the tests. Everything here runs inside headless Blender (see run.py)."""
-import json
 import os
 import shutil
 import struct
@@ -253,7 +252,8 @@ def run_export(preset_index=-1, timeout=180.0):
     return result, run
 
 
-def write_job(path, preset, root, preset_index=0):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump({"preset_index": preset_index, "preset_uid": preset.uid, "root_dir": root, "start_time": time.time(),
-                   "skip_direct": False}, f)
+def write_job(path, preset, root, view_layer=None):
+    """The worker's job file for exporting every object of `preset` to `root`, evaluated in the preset's own scene and
+    `view_layer` (default: the scene's first)."""
+    scene = preset.id_data
+    ce.write_job_file(path, scene, view_layer or scene.view_layers[0], preset, root, skip_direct=False)

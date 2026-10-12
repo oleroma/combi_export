@@ -177,11 +177,15 @@ class WorkerExportTests(BlenderTestCase):
             self.assertEqual(len(read_stl(os.path.join(self.tmp, path))[1]), tris, path)
         self.assertTrue(bpy.data.objects["Inst"].hide_get())
 
-    # BUG: the worker exports from bpy.context.scene, the scene of the saved file's first window, and falls back to the
-    # preset *index* when the uid is not there. Started from a second window showing another scene, it exports a
-    # different preset (here 'Main' instead of 'Other'). The job file should name the scene (and view layer).
-    @unittest.expectedFailure
+    def run_worker(self, job):
+        """run_headless_export in this process: (exit code, printed output)."""
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as exit:
+            ce.run_headless_export(job)
+        return exit.exception.code, out.getvalue()
+
     def test_worker_exports_the_preset_of_the_job_scene(self):
+        """Not the one of the context's scene (in the worker: the saved file's first window), here 'Main'."""
         make_object("Box", group=make_gn_group())
         override(make_preset("Main").nodegroups, "Size", "FLOAT", "\\1", "\\2")
         second = bpy.data.scenes.new("Second")
@@ -189,10 +193,49 @@ class WorkerExportTests(BlenderTestCase):
         other = make_preset("Other", scene=second)
         override(other.nodegroups, "Size", "FLOAT", "\\5", "\\6")
         job, root = os.path.join(self.tmp, "job.json"), os.path.join(self.tmp, "out")
-        write_job(job, other, root, preset_index=0)
-        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
-            ce.run_headless_export(job)
+        write_job(job, other, root)
+        code, out = self.run_worker(job)
+        self.assertEqual(code, 0, out)
         self.assertEqual(written_files(root), ["5/Box.stl", "6/Box.stl"])
+
+    def test_worker_without_the_job_preset_exports_nothing(self):
+        """A uid that is not in the job's scene is an error (reported as a crash), never a fallback to another preset,
+        e.g. the one now at the same index."""
+        make_object("Box", mesh=cube_mesh())
+        job, root = os.path.join(self.tmp, "job.json"), os.path.join(self.tmp, "out")
+        write_job(job, make_preset("Removed"), root)
+        bpy.context.scene.batch_stl_presets.remove(0)
+        make_preset("Other")
+        code, out = self.run_worker(job)
+        self.assertEqual(code, 1)
+        self.assertIn("ERROR: Preset not found", out)
+        self.assertEqual(written_files(root), [])
+
+    def run_view_layer_job(self, window=True):
+        """The job's view layer decides which objects are exported and evaluates them, not the context's: here the
+        mapped collection is excluded in the context's view layer only."""
+        make_object("Box", group=make_gn_group())
+        preset = make_preset()
+        override(preset.nodegroups, "Size", "FLOAT", "\\1", "\\2")
+        job_layer = bpy.context.scene.view_layers.new("Job")
+        bpy.context.view_layer.layer_collection.children["Parts"].exclude = True
+        job, root = os.path.join(self.tmp, "job.json"), os.path.join(self.tmp, "out")
+        write_job(job, preset, root, view_layer=job_layer)
+        with contextlib.nullcontext() if window else bpy.context.temp_override(window=None):
+            code, out = self.run_worker(job)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(written_files(root), ["1/Box.stl", "2/Box.stl"])
+        for size in (1, 2):
+            lo, hi = stl_bounds(os.path.join(root, f"{size}/Box.stl"))
+            self.assertAlmostEqual(hi[0] - lo[0], size, places=4)
+
+    def test_worker_evaluates_the_job_view_layer(self):
+        self.run_view_layer_job()
+        self.assertEqual(bpy.context.view_layer.name, "Job")  # the window shows it, so the context matches
+
+    def test_worker_evaluates_the_job_view_layer_without_a_window(self):
+        self.run_view_layer_job(window=False)
+        self.assertEqual(bpy.context.view_layer.name, "ViewLayer")  # the worker used the job's view layer explicitly
 
 
 class FakeProcess:

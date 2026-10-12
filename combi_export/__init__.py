@@ -2254,29 +2254,46 @@ def draw_tree_dict(layout, tree_node, current_path="", toggled_list=None, duplic
         row.label(text=str(f), icon=ICONS['OBJECT'])
 
 # --- HEADLESS EXPORT EXECUTION ROUTINE ---
+def write_job_file(path, scene, view_layer, preset, root_dir, skip_direct):
+    """The job manifest run_headless_export reads: the preset (by uid) of `scene` to export, evaluated in `view_layer`
+    (one of the scene's), to `root_dir`. skip_direct: the objects without overrides were already written."""
+    with open(path, 'w', encoding="utf-8") as f:
+        json.dump({"scene": scene.name, "view_layer": view_layer.name, "preset_uid": preset.uid, "root_dir": root_dir,
+                   "start_time": time.time(), "skip_direct": skip_direct}, f)
+
 def run_headless_export(job_file_path):
     try:
         with open(job_file_path, 'r', encoding="utf-8") as f: job_data = json.load(f)
-        preset_index, root_dir, start_time_unix, skip_direct = job_data["preset_index"], job_data["root_dir"], job_data.get("start_time", time.time()), job_data.get("skip_direct", False)
-        preset_uid = job_data.get("preset_uid", "")
+        scene_name, view_layer_name, preset_uid = job_data["scene"], job_data["view_layer"], job_data["preset_uid"]
+        root_dir, start_time_unix, skip_direct = job_data["root_dir"], job_data["start_time"], job_data["skip_direct"]
     except Exception as e:
         print(f"ERROR: Failed to load job manifest: {e}", flush=True)
         sys.exit(1)
 
-    scene = bpy.context.scene
-    presets = scene.batch_stl_presets
-    preset = next((p for p in presets if preset_uid and p.uid == preset_uid), None)
-    if preset is None and 0 <= preset_index < len(presets): preset = presets[preset_index]
+    # The scene and view layer the export was started from. A background load opens the scene of the saved file's
+    # first window, which may be another one (e.g. a second window showing another scene).
+    scene = bpy.data.scenes.get(scene_name)
+    view_layer = scene.view_layers.get(view_layer_name) if scene else None
+    if view_layer is None:
+        print(f"ERROR: View layer '{view_layer_name}' of scene '{scene_name}' not found", flush=True)
+        sys.exit(1)
+    preset = next((p for p in scene.batch_stl_presets if p.uid == preset_uid), None) if preset_uid else None
     if preset is None:
         print("ERROR: Preset not found", flush=True)
         sys.exit(1)
+    # Show them in the window too, so that the context (e.g. scripted drivers) matches. The scene first: switching
+    # scenes resets the window's view layer.
+    window = bpy.context.window
+    if window:
+        window.scene = scene
+        window.view_layer = view_layer
 
     print("\n  [Phase 0] Evaluating Targets and Building Depsgraph Culling Maps...", flush=True)
     t_phase0_start = time.perf_counter()
 
     # Objects whose effective overrides are identical share one batch (one set of variants, one depsgraph pass).
     # Objects without overrides were already written by the main process (skip_direct).
-    targets = iter_export_objects(scene, preset, live_collection_names(bpy.context.view_layer))
+    targets = iter_export_objects(scene, preset, live_collection_names(view_layer))
     batches = group_by_signature(t for t in targets if t[4] or not skip_direct)
 
     layer_collection_map, layer_collection_parents = {}, {}
@@ -2285,7 +2302,7 @@ def run_headless_export(job_file_path):
             layer_collection_map[lc.collection.name] = lc
             layer_collection_parents[lc.collection.name] = parent
         for child in lc.children: map_layer_collections(child, lc)
-    map_layer_collections(bpy.context.view_layer.layer_collection)
+    map_layer_collections(view_layer.layer_collection)
 
     print(f"    ├─ Mapped {len(layer_collection_map)} collections for depsgraph culling in {time.perf_counter() - t_phase0_start:.4f}s", flush=True)
 
@@ -2333,8 +2350,8 @@ def run_headless_export(job_file_path):
                 combo_overrides = reconstruct_overrides_for_combo(combo)
                 revert_overrides(baseline_global_states, baseline_mod_states, batch_objects, skip=override_targets(combo_overrides))
                 apply_overrides(combo_overrides, batch_objects)
-                bpy.context.view_layer.update()
-                depsgraph = bpy.context.evaluated_depsgraph_get()
+                view_layer.update()
+                depsgraph = view_layer.depsgraph
                 instance_arrays = collect_instance_arrays(depsgraph, batch_objects)
 
                 for c, obj_prop, bl_obj in batch_items:
@@ -2352,7 +2369,7 @@ def run_headless_export(job_file_path):
             revert_overrides(baseline_global_states, baseline_mod_states, batch_objects)
             for name in isolated_collections:
                 if name in layer_collection_map: layer_collection_map[name].exclude = False
-            bpy.context.view_layer.update()
+            view_layer.update()
 
         batch_counter += 1
 
@@ -4255,7 +4272,8 @@ class EXPORT_OT_batch_stl_multi(bpy.types.Operator):
         self.job_json = os.path.join(self.temp_dir, "job.json")
 
         bpy.ops.wm.save_as_mainfile(filepath=self.temp_blend, copy=True, compress=False)
-        with open(self.job_json, 'w', encoding="utf-8") as f: json.dump({"preset_index": preset_idx, "preset_uid": preset.uid, "root_dir": bpy.path.abspath(scene.batch_stl_root_dir), "start_time": time.time(), "skip_direct": True}, f)
+        # context.view_layer, as for `live` above: the worker must export what was checked for clashes here
+        write_job_file(self.job_json, scene, context.view_layer, preset, bpy.path.abspath(scene.batch_stl_root_dir), skip_direct=True)
 
         # The worker runs this very file as a script (see the __main__ block at the bottom).
         # --factory-startup disables Python auto-run, so mirror the user's setting to keep scripted drivers working.

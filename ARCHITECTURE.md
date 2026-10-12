@@ -123,20 +123,21 @@ When generating variations for an object, overrides are gathered in hierarchical
   1. **Preparation**:
      - Checks every output path of the preset for collisions (`find_export_clashes`, no limit); a collision aborts the export before anything is written.
      - Saves a snapshot of current memory to a temporary file via `bpy.ops.wm.save_as_mainfile(filepath=..., copy=True)`.
-     - Writes a job manifest `job.json` containing preset index, root directory path, and flags.
+     - Writes a job manifest `job.json` (`write_job_file`): the scene and view layer the export was started from (the window's, as used for the clash check), the preset's `uid`, the root directory path, the start time and `skip_direct` (objects without overrides were already written on the direct path). Job files are temporary and always written by the same add-on version, so they carry no version or fallbacks.
   2. **Process Spawn**:
      - Spawns background Blender: `[blender, "--factory-startup", "--python-exit-code", "1", ("--enable-autoexec",) "-b", temp_blend, "-P", script_file, "--", "--batch-stl-headless", job_json]`. `--enable-autoexec` is only added when the user allows Python auto-execution.
   3. **IPC & Streaming**:
      - A background reader thread drains worker `stdout` into a thread-safe `queue.Queue`.
      - A Blender modal timer operator (`0.1s`) polls the queue, updates preset progress bars (`BATCH_STL_PROGRESS:X`), and logs stdout into the preset's console UI.
   4. **Headless Execution Engine (`run_headless_export`)**:
-     - **Phase 0 (Depsgraph Culling)**: Groups objects by override signature (`execution_batches`). Excludes unrelated layer collections (`lc.exclude = True`) to prevent Blender from evaluating unneeded geometry trees during node updates.
+     - **Job Scope**: Resolves the job's scene (`bpy.data.scenes`) and view layer, and looks the preset up by `uid` in that scene only. The context can't be used for this: a background load's `bpy.context.scene` is the scene of the saved file's first window, not necessarily the one the export was started from. A missing scene, view layer or preset prints an `ERROR:` line and exits with code 1 (reported as a crash); there is no fallback to another preset. The window (when there is one) is switched to the job's scene, then its view layer, so the context matches (e.g. for scripted drivers); the worker itself uses the view layer and its depsgraph explicitly.
+     - **Phase 0 (Depsgraph Culling)**: Groups objects by override signature (`execution_batches`). Excludes unrelated layer collections of the job's view layer (`lc.exclude = True`) to prevent Blender from evaluating unneeded geometry trees during node updates.
      - **Baseline Capture (`capture_baseline_states`)**: Caches baseline modifier socket values, internal node socket defaults, and node link connections.
      - **Branch-Aware Combinations (`generate_named_combinations`)**: Recursively picks one value per parameter pool (sweeps expanded) and keeps only the values that apply to the branch built so far, yielding each variant with its folder and filename naming. See *Branching & Merging* below.
      - **Evaluation Loop**:
        - Restores the baseline of every socket the variant leaves out (`revert_overrides(..., skip=override_targets(combo))`), so a parameter without a value in this branch is back at its default instead of keeping the previous variant's value.
        - Applies overrides via `apply_overrides`.
-       - Calls `bpy.context.view_layer.update()` and fetches updated depsgraph.
+       - Calls `view_layer.update()` on the job's view layer and takes its depsgraph (`view_layer.depsgraph`).
        - Collects the batch's unrealized instances (`collect_instance_arrays`, eye-hidden objects included as on the direct path).
        - Writes STL files via `export_object_stl` (a wrapper around `write_object_stl` that logs an unwritable file as `FAILED` and continues).
      - **Restoration (`revert_overrides`)**: Re-applies baseline values and links, restores layer collection exclusion states.
