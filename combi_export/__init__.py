@@ -22,7 +22,7 @@ import bpy
 from bpy.app.handlers import persistent
 
 from . import export_operator, operators, props, ui
-from .common import mark_dirty
+from .common import OVERRIDES_OPEN_PROPS, mark_dirty
 from .data import batch_stl_import_handler, batch_stl_save_handler, prepare_scenes
 from .export_operator import remove_stale_temp_dirs
 from .props import BatchSTLExportPreset, BatchSTLJob, BatchSTLNodeGroup
@@ -43,7 +43,7 @@ def reset_batch_stl_state(*args):
 classes = props.classes + operators.classes + export_operator.classes + ui.classes
 
 # Open state of the override tables (Global, Preset, Collection, Object)
-UI_OPEN_PROPS = ("batch_stl_ui_global_ovr", "batch_stl_ui_preset_ovr", "batch_stl_ui_collection_ovr", "batch_stl_ui_object_ovr")
+UI_OPEN_PROPS = tuple(OVERRIDES_OPEN_PROPS.values())
 WM_PROPS = ("batch_stl_jobs", "batch_stl_verbose_console", "batch_stl_ui_tips", "batch_stl_collapsed_dirs", "batch_stl_info_tab",
             "batch_stl_info_global") + UI_OPEN_PROPS
 SCENE_PROPS = ("batch_stl_data_version", "batch_stl_root_dir", "batch_stl_presets", "batch_stl_preset_index", "batch_stl_global_nodegroups")

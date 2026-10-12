@@ -10,6 +10,14 @@ MAX_SWEEP_STEPS = 1000
 # the tree preview. The export's collision check has no limit.
 COUNT_LIMIT = 5000
 
+# Open state of the override tables, one WindowManager flag per level (the tables of a level share it)
+OVERRIDES_OPEN_PROPS = {"global": "batch_stl_ui_global_ovr", "preset": "batch_stl_ui_preset_ovr",
+                        "collection": "batch_stl_ui_collection_ovr", "object": "batch_stl_ui_object_ovr"}
+
+def overrides_open_prop(is_collection=False, is_preset=False, is_global=False):
+    """Name of the WindowManager flag that holds the open state of the override table of a level."""
+    return OVERRIDES_OPEN_PROPS["global" if is_global else "preset" if is_preset else "collection" if is_collection else "object"]
+
 _ui_cache = {
     "is_dirty": True,
     "live": set(),

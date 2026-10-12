@@ -6,7 +6,7 @@ import json
 import bpy
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
-from .common import inside_operator, mark_dirty, raw_edits, _ui_cache
+from .common import inside_operator, mark_dirty, overrides_open_prop, raw_edits, _ui_cache
 from .nodes import clean_node_name, get_menu_switch_items, get_supported_inputs, get_target_node_names
 from .fields import add_value, name_permutations, same_fields, value_fields
 from .engine import MockInput, MockOverride, parse_sweep_values
@@ -220,6 +220,7 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
     def description(cls, context, properties):
         act = properties.action
         if act == 'ADD_GROUP': return "Add an Override Group to this level"
+        if act == 'CLEAR_GROUPS': return "Clear the overrides: remove every Override Group of this level"
         if act == 'COPY_GROUP': return "Copy this Override Group to clipboard"
         if act == 'PASTE_GROUP': return "Paste an Override Group from clipboard"
         if act == 'MOVE_GROUP_UP': return "Move group up (Shift: Move directly to parent hierarchy level)"
@@ -248,13 +249,21 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
         active_obj = get_active_object(active_col)
         return active_obj.nodegroups if active_obj else None
 
+    def _show_table(self, context):
+        """Open the table of this level, collapsed it would hide the group that was just added."""
+        setattr(context.window_manager, overrides_open_prop(self.is_collection, self.is_preset, self.is_global), True)
+
     def _handle_group_action(self, ng_list, context, preset):
         if self.action == 'ADD_GROUP':
             ng_list.add()
+            self._show_table(context)
+        elif self.action == 'CLEAR_GROUPS':
+            ng_list.clear()
         elif self.action == 'COPY_GROUP' and 0 <= self.ng_idx < len(ng_list):
             _clipboard["nodegroup"] = copy_ng_to_dict(ng_list[self.ng_idx])
         elif self.action == 'PASTE_GROUP' and _clipboard.get("nodegroup"):
             paste_ng_from_dict(ng_list, _clipboard["nodegroup"])
+            self._show_table(context)
         elif self.action == 'MOVE_GROUP_UP' and 0 <= self.ng_idx < len(ng_list):
             if self.shift_pressed:
                 src_ng = ng_list[self.ng_idx]
