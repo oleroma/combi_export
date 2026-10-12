@@ -6,7 +6,7 @@ import types
 
 import bpy
 import combi_export as ce
-from helpers import MODIFIER, BlenderTestCase, add_group, add_node, make_gn_group, make_object, make_preset, stl_bounds
+from helpers import MODIFIER, BlenderTestCase, add_group, add_node, make_gn_group, make_object, make_preset
 
 
 class TableTestCase(BlenderTestCase):

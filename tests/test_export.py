@@ -7,7 +7,6 @@ import queue
 import threading
 import time
 import types
-import unittest
 import warnings
 
 import bpy
