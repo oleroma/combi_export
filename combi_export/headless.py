@@ -58,14 +58,16 @@ def capture_baseline_states(overrides, target_objects):
 
 def link_missing_collections(scene, collections):
     """Link the mapped collections that are not in `scene` at all (e.g. only in another scene) into its master
-    collection, so that its view layers can evaluate them. Only ever in the worker's copy. Returns their names."""
+    collection, so that its view layers can evaluate them. One inside another of them comes in with that one. Only ever
+    in the worker's copy. Returns the names of the linked ones."""
     in_scene = set(scene.collection.children_recursive)
+    missing = sorted((col for col in collections if col not in in_scene), key=lambda col: col.name)
+    nested = {child for col in missing for child in col.children_recursive}
     linked = []
-    for col in collections:
-        if col not in in_scene:
-            scene.collection.children.link(col)
-            in_scene.update([col, *col.children_recursive])
-            linked.append(col.name)
+    for col in missing:
+        if col in nested: continue
+        scene.collection.children.link(col)
+        linked.append(col.name)
     return linked
 
 def layer_collection_tree(view_layer):
@@ -97,18 +99,31 @@ def isolate_batch(tree, batch_objects):
     and their parents are included and enabled in viewports, and so are the objects. The view layer as saved does not
     matter, so an excluded or disabled collection is exported like any other. Collections that only a node or modifier
     reads (a basemesh, cutters) stay excluded: Blender evaluates what is referenced all the same. Every batch sets every
-    layer collection, so the next batch needs nothing restored.
+    layer collection, so exclusion needs nothing restored.
+
+    Returns the collections and objects it enabled in viewports, for restore_disabled after the batch: unlike exclusion,
+    that flag belongs to the collection or object itself, and a collection instance of a later batch reading them
+    leaves out what is disabled in viewports.
 
     Tree order matters: setting `exclude` on a layer collection sets it on its children too (and including it again
     restores what they had), so a parent is set before its children."""
     keep = batch_collections(tree, batch_objects)
+    enabled = []
     for lc, _parent in tree:
         on = lc.collection.name in keep
         if lc.exclude == on: lc.exclude = not on
-        if on and lc.collection.hide_viewport: lc.collection.hide_viewport = False
+        if on and lc.collection.hide_viewport:
+            lc.collection.hide_viewport = False
+            enabled.append(lc.collection)
     for obj in batch_objects:
-        if obj.hide_viewport: obj.hide_viewport = False
-    return keep
+        if obj.hide_viewport:
+            obj.hide_viewport = False
+            enabled.append(obj)
+    return enabled
+
+def restore_disabled(enabled):
+    """Disable in viewports again what isolate_batch enabled."""
+    for id_data in enabled: id_data.hide_viewport = True
 
 _reported_failures = set()
 
@@ -281,7 +296,7 @@ def run_headless_export(job_file_path):
         num_combinations, variants = batch_variants.pop(signature)
         if variants is None: variants = generate_named_combinations(all_overrides)
         batch_objects = {item[2] for item in batch_items}
-        isolate_batch(tree, batch_objects)
+        enabled = isolate_batch(tree, batch_objects)
 
         baseline_global_states, baseline_mod_states = capture_baseline_states(all_overrides, batch_objects)
 
@@ -314,6 +329,7 @@ def run_headless_export(job_file_path):
 
         finally:
             revert_overrides(baseline_global_states, baseline_mod_states, batch_objects)
+            restore_disabled(enabled)
             view_layer.update()
 
         batch_counter += 1

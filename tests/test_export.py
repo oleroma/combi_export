@@ -410,9 +410,9 @@ class WorkerExportTests(BlenderTestCase):
 
         states, isolate = [], ce.headless.isolate_batch
         def recording(tree, batch_objects):
-            keep = isolate(tree, batch_objects)
+            enabled = isolate(tree, batch_objects)
             states.append(({ob.name for ob in batch_objects}, {lc.collection.name for lc, _p in tree if not lc.exclude}))
-            return keep
+            return enabled
         job, root = os.path.join(self.tmp, "job.json"), os.path.join(self.tmp, "out")
         write_job(job, preset, root)
         with mock.patch.object(ce.headless, "isolate_batch", recording):
@@ -423,6 +423,30 @@ class WorkerExportTests(BlenderTestCase):
         for size in (1, 2):
             lo, hi = stl_bounds(os.path.join(root, f"{size}/Lid.stl"))
             self.assertAlmostEqual(hi[0] - lo[0], size, places=4)
+
+    def test_worker_disables_again_what_a_batch_enabled(self):
+        """A collection or object disabled in viewports is enabled for its own batch only: the next batch sees it as
+        saved (a collection instance leaves out what is disabled)."""
+        group = make_gn_group()
+        make_object("Lid", collection="Side", group=group).hide_viewport = True
+        make_object("Box", collection="Parts", group=group)
+        bpy.data.collections["Side"].hide_viewport = True
+        preset = make_preset(collections=("Side", "Parts"))
+        override(preset.nodegroups, "Size", "FLOAT", "1")
+        override(preset.collections[0].nodegroups, "Count", "INT", "3")  # Lid gets a batch of its own, the first
+
+        states, isolate = [], ce.headless.isolate_batch
+        def recording(tree, batch_objects):
+            side, lid = bpy.data.collections["Side"], bpy.data.objects["Lid"]
+            states.append(({ob.name for ob in batch_objects}, side.hide_viewport, lid.hide_viewport))
+            return isolate(tree, batch_objects)
+        job, root = os.path.join(self.tmp, "job.json"), os.path.join(self.tmp, "out")
+        write_job(job, preset, root)
+        with mock.patch.object(ce.headless, "isolate_batch", recording):
+            code, out = self.run_worker(job)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(written_files(root), ["Box.stl", "Lid.stl"])
+        self.assertEqual(states, [({"Lid"}, True, True), ({"Box"}, True, True)])
 
     def test_worker_evaluates_what_the_parts_reference_in_excluded_collections(self):
         """Collections a node reads (here a cutter-like object through Object Info, and a collection through Collection
@@ -473,24 +497,32 @@ class WorkerExportTests(BlenderTestCase):
         self.assertEqual(written_files(root), ["Box.stl", "PlainHidden.stl"])
 
     def test_worker_links_a_collection_that_is_not_in_the_scene(self):
-        """A mapped collection that only another scene holds is linked into the job's scene in the worker's copy."""
+        """A mapped collection that only another scene holds is linked into the job's scene in the worker's copy. A
+        mapped collection inside it comes in with it, and is not linked a second time."""
         group = make_gn_group()
         elsewhere = bpy.data.scenes.new("Elsewhere")
-        col = bpy.data.collections.new("Only There")
+        col, inner = bpy.data.collections.new("Only There"), bpy.data.collections.new("Inner There")
         elsewhere.collection.children.link(col)
-        ob = bpy.data.objects.new("Box", bpy.data.meshes.new("Box"))
-        ob.modifiers.new("GN", "NODES").node_group = group
-        col.objects.link(ob)
-        preset = make_preset(collections=("Only There",))
+        col.children.link(inner)
+        for name, owner in (("Box", col), ("Pin", inner)):
+            ob = bpy.data.objects.new(name, bpy.data.meshes.new(name))
+            ob.modifiers.new("GN", "NODES").node_group = group
+            owner.objects.link(ob)
+        preset = make_preset(collections=("Inner There", "Only There"))
+        preset.collections[0].sub_path = "inner"
         override(preset.nodegroups, "Size", "FLOAT", "2")
-        self.assertEqual(planned_paths(), ["Box.stl"])
+        self.assertEqual(sorted(planned_paths()), ["Box.stl", "Pin.stl", "inner/Pin.stl"])
         job, root = os.path.join(self.tmp, "job.json"), os.path.join(self.tmp, "out")
         write_job(job, preset, root)
         code, out = self.run_worker(job)
         self.assertEqual(code, 0, out)
         self.assertIn("Linked 'Only There' into scene 'Scene'", out)
-        lo, hi = stl_bounds(os.path.join(root, "Box.stl"))
-        self.assertAlmostEqual(hi[0] - lo[0], 2.0, places=4)
+        self.assertNotIn("Linked 'Inner There'", out)
+        self.assertEqual(list(bpy.context.scene.collection.children_recursive).count(inner), 1)
+        self.assertEqual(written_files(root), ["Box.stl", "Pin.stl", "inner/Pin.stl"])
+        for name in ("Box.stl", "inner/Pin.stl"):
+            lo, hi = stl_bounds(os.path.join(root, name))
+            self.assertAlmostEqual(hi[0] - lo[0], 2.0, places=4)
 
 
 class FakeProcess:

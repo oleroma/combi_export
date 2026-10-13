@@ -27,6 +27,7 @@ def _get_preset_status(scene, preset, g_has_ovr=False, g_has_perm=False):
     has_perm = g_has_perm or php
 
     for c in preset.collections:
+        if not c.export: continue
         cho, chp = check_ng_for_overrides(c.nodegroups)
         has_ovr = has_ovr or cho
         has_perm = has_perm or chp
