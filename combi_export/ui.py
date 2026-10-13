@@ -207,8 +207,7 @@ def collection_note(scene, item):
 class BATCH_STL_UL_collections(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         row = layout.row(align=True)
-        op = row.operator("batch_stl.table_action", text="", icon=ICONS['CHECK_ON'] if item.export else ICONS['CHECK_OFF'], emboss=False)
-        op.action = 'TOGGLE_COLLECTION_EXPORT'; op.c_idx = index
+        row.prop(item, "export_tick", text="", icon=ICONS['CHECK_ON'] if item.export else ICONS['CHECK_OFF'], emboss=False)
         row.prop_search(item, "collection_name", bpy.data, "collections", text="", icon=ICONS['COLLECTION'])
         note = collection_note(context.scene, item)
         if note: row.operator("batch_stl.collection_note", text="", icon=ICONS['INFO'], emboss=False).info = note
@@ -224,8 +223,7 @@ class BATCH_STL_UL_objects(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         split = layout.split(factor=0.45)
         row = split.row(align=True)
-        op = row.operator("batch_stl.table_action", text="", icon=ICONS['CHECK_ON'] if item.export else ICONS['CHECK_OFF'], emboss=False)
-        op.action = 'TOGGLE_OBJECT_EXPORT'; op.o_idx = index
+        row.prop(item, "export_tick", text="", icon=ICONS['CHECK_ON'] if item.export else ICONS['CHECK_OFF'], emboss=False)
         row.prop(item, "export_name", text="", emboss=False)
 
         tools = split.row(align=True)

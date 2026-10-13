@@ -6,7 +6,7 @@ import json
 import bpy
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
-from .common import inside_operator, mark_dirty, overrides_open_prop, raw_edits, _ui_cache
+from .common import inside_operator, mark_dirty, overrides_open_prop, raw_edits, _held_keys, _ui_cache
 from .nodes import clean_node_name, get_menu_switch_items, get_supported_inputs, get_target_node_names
 from .fields import add_value, name_permutations, same_fields, value_fields
 from .engine import MockInput, MockOverride, parse_sweep_values
@@ -232,8 +232,6 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
         if act == 'ADD_INPUT': return "Add an Input Parameter override (Shift: Auto-populate all available socket inputs)"
         if act == 'VALUE_ACTION': return "Add Permutation (Shift: Toggle Sweep range mode)"
         if act == 'TOGGLE_COLLECTION_USE_TAG': return "Toggle collection-level filename prefix/suffix tag"
-        if act == 'TOGGLE_OBJECT_EXPORT': return "Toggle object active export state"
-        if act == 'TOGGLE_COLLECTION_EXPORT': return "Export this collection's ticked objects. The view layer does not matter: an excluded or hidden collection is still exported"
         return "Perform structural table action"
 
     def invoke(self, context, event):
@@ -454,11 +452,6 @@ class BATCH_STL_OT_table_action(bpy.types.Operator):
         try:
             if self.action == 'TOGGLE_COLLECTION_USE_TAG':
                 if 0 <= self.c_idx < len(preset.collections): preset.collections[self.c_idx].use_tag = not preset.collections[self.c_idx].use_tag
-            elif self.action == 'TOGGLE_COLLECTION_EXPORT':
-                if 0 <= self.c_idx < len(preset.collections): preset.collections[self.c_idx].export = not preset.collections[self.c_idx].export
-            elif self.action == 'TOGGLE_OBJECT_EXPORT':
-                active_col = get_active_collection(preset)
-                if active_col and 0 <= self.o_idx < len(active_col.objects): active_col.objects[self.o_idx].export = not active_col.objects[self.o_idx].export
             else:
                 ng_list = self._resolve_context_list(context, preset)
                 if ng_list is None: return {'CANCELLED'}
@@ -558,6 +551,17 @@ class BATCH_STL_OT_collection_note(bpy.types.Operator):
     def execute(self, context):
         return {'CANCELLED'}
 
+class BATCH_STL_OT_read_modifiers(bpy.types.Operator):
+    """Records the modifier keys of the window's event state, for a property setter (ctrl_held)."""
+    bl_idname = "batch_stl.read_modifiers"
+    bl_label = "Read Modifier Keys"
+    bl_options = {'INTERNAL'}
+
+    def invoke(self, context, event):
+        _held_keys["ctrl"] = event.ctrl
+        return {'CANCELLED'}
+
 classes = (BATCH_STL_OT_export_presets_json, BATCH_STL_OT_import_presets_json, BATCH_STL_OT_clear_console,
            BATCH_STL_OT_preset_actions, BATCH_STL_OT_collection_actions, BATCH_STL_OT_table_action,
-           BATCH_STL_OT_toggle_dir_tree, BATCH_STL_OT_tree_expansion, BATCH_STL_OT_merge_info, BATCH_STL_OT_collection_note)
+           BATCH_STL_OT_toggle_dir_tree, BATCH_STL_OT_tree_expansion, BATCH_STL_OT_merge_info, BATCH_STL_OT_collection_note,
+           BATCH_STL_OT_read_modifiers)

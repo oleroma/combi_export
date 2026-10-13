@@ -455,8 +455,9 @@ class PanelLayoutTests(BlenderTestCase):
         return layout.log
 
     def test_collection_tick_leads_its_row(self):
-        """The export tick comes before the collection field, like the object tick; a ticked collection the view layer
-        does not evaluate gets a note icon after the field, whose tooltip says it is exported all the same."""
+        """The export tick (a property, so a drag across ticks sets them all) comes before the collection field, like
+        the object tick; a ticked collection the view layer does not evaluate gets a note icon after the field, whose
+        tooltip says it is exported all the same."""
         entry = bpy.context.scene.batch_stl_presets[0].collections[0]
         layer = bpy.context.view_layer.layer_collection.children["Parts"]
         for export, excluded, note in ((True, False, False), (False, False, False), (True, True, True), (False, True, False)):
@@ -464,20 +465,48 @@ class PanelLayoutTests(BlenderTestCase):
                 entry.export, layer.exclude = export, excluded
                 _ui_cache["live"] = ce.targets.live_collection_names(bpy.context.view_layer)
                 log = self.draw_collection_item()
-                tick = next(item for item in log if item.kind == "operator")
+                tick = log[0]
                 field, = (item for item in log if item.kind == "prop_search")
-                self.assertEqual((tick.action, tick.c_idx, tick.icon), ('TOGGLE_COLLECTION_EXPORT', 0, ce.ui.ICONS['CHECK_ON' if export else 'CHECK_OFF']))
+                self.assertEqual((tick.kind, tick.prop, tick.icon), ("prop", "export_tick", ce.ui.ICONS['CHECK_ON' if export else 'CHECK_OFF']))
                 self.assertLess(log.index(tick), log.index(field))
                 notes = [item for item in log if item.kind == "operator" and item.idname == "batch_stl.collection_note"]
                 self.assertEqual(len(notes), int(note))
                 if note: self.assertGreater(log.index(notes[0]), log.index(field))
 
-    def test_collection_tick_toggles(self):
-        entry = bpy.context.scene.batch_stl_presets[0].collections[0]
-        bpy.ops.batch_stl.table_action(action='TOGGLE_COLLECTION_EXPORT', c_idx=0)
-        self.assertFalse(entry.export)
-        bpy.ops.batch_stl.table_action(action='TOGGLE_COLLECTION_EXPORT', c_idx=0)
-        self.assertTrue(entry.export)
+    def test_object_tick_is_a_property(self):
+        layout, preset = FakeLayout(), bpy.context.scene.batch_stl_presets[0]
+        entry = preset.collections[0].objects[0]
+        ce.ui.BATCH_STL_UL_objects.draw_item(None, bpy.context, layout, preset.collections[0], entry, 0, None, "", 0)
+        tick = layout.log[0]
+        self.assertEqual((tick.kind, tick.prop, tick.icon), ("prop", "export_tick", ce.ui.ICONS['CHECK_ON']))
+
+    def test_ticks_set_and_ctrl_click_isolates(self):
+        """A click (or a drag) sets the entry's tick. Ctrl+click ticks it alone among its siblings, and Ctrl+click on
+        the only ticked one ticks them all again: collections in a preset, objects in a collection."""
+        for name in ("Lid", "Pin"): make_object(name, collection="Parts")
+        make_object("Cap", collection="Side")
+        preset = bpy.context.scene.batch_stl_presets[0]
+        preset.collections.add().collection_name = "Side"
+        ce.targets.sync_collection_objects(preset.collections[0])
+        for entries in (preset.collections, preset.collections[0].objects):
+            with self.subTest(entries=entries[0].bl_rna.identifier):
+                ticks = lambda: [e.export for e in entries]
+                entries[0].export_tick = False
+                self.assertEqual(ticks()[0], False)
+                entries[0].export_tick = True
+                with mock.patch.object(ce.props, "ctrl_held", return_value=True):
+                    entries[1].export_tick = False  # Ctrl+click flips nothing: it isolates
+                    self.assertEqual(ticks(), [i == 1 for i in range(len(entries))])
+                    entries[1].export_tick = False
+                    self.assertTrue(all(ticks()))
+                    entries[0].export_tick = False  # on an unticked entry
+                    entries[1].export_tick = True
+                    self.assertEqual(ticks(), [i == 1 for i in range(len(entries))])
+                for e in entries: e.export = True
+
+    def test_ctrl_held_reads_the_click(self):
+        """In the background (here) there is no click: no Ctrl."""
+        self.assertFalse(ce.common.ctrl_held())
 
     def test_preset_export_button_leads_its_row_set_apart_by_a_gap(self):
         """Export, and Cancel while it runs, come before the name field, with a gap after them."""

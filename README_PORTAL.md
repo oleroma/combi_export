@@ -40,7 +40,7 @@ A cube with a Geometry Nodes modifier that has a `Size` input, in a collection t
 - **Blender 5.2 or newer.** NumPy ships with Blender, so there is nothing else to install.
 - **STL output only** (binary STL, mesh objects).
 - **Supported input types:** float, integer, boolean, string and menu. Other socket types (vectors, colors, objects and so on) block the export until their override is removed.
-- **The ticks decide what is exported.** Each collection and each object has an export tick, and the view layer does not matter: a collection excluded in the view layer or disabled in viewports, or an object disabled in viewports, is exported all the same (the background worker switches it on in its copy of the file). Hiding with the eye icon never mattered. Files from earlier versions come in with what their view layer skipped unticked, so they export the same files.
+- **The ticks decide what is exported.** Each collection and each object has an export tick (drag across ticks to set several, Ctrl+click to export only one, again to tick them all), and the view layer does not matter: a collection excluded in the view layer or disabled in viewports, or an object disabled in viewports, is exported all the same (the background worker switches it on in its copy of the file). Hiding with the eye icon never mattered. Files from earlier versions come in with what their view layer skipped unticked, so they export the same files.
 - **File permission.** The add-on writes the exported STL files, and a temporary copy of the `.blend` file for the background worker. It uses no network access.
 - If a file cannot be written (for example, it is locked by a slicer), it is logged as `FAILED` and the export continues with the next file.
 
