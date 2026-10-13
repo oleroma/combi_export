@@ -93,16 +93,21 @@ class WindowTargetTests(BlenderTestCase):
         self.rebuild()
         self.assertEqual(self.tree_files(), ["BoxA.stl"])
 
-    def test_the_tree_follows_the_windows_view_layer(self):
-        """A view layer with the mapped collection excluded evaluates none of its objects."""
+    def test_the_tree_ignores_the_windows_view_layer(self):
+        """The ticks decide what is exported: with the mapped collection excluded the tree and counts stay the same, and
+        the collection's row gets a note that it is exported all the same."""
+        entry = self.scene_a.batch_stl_presets[0].collections[0]
         bare = self.scene_a.view_layers.new("Bare")
         bare.layer_collection.children["Parts"].exclude = True
         bpy.context.window.view_layer = bare
         self.rebuild()
-        self.assertEqual(self.tree_files(), [])
+        self.assertEqual(self.tree_files(), ["BoxA.stl"])
+        self.assertEqual(_ui_cache["stats"]["global"]["objs"], 1)
+        self.assertIn("Excluded or disabled in this view layer", ce.ui.collection_note(self.scene_a, entry))
         bpy.context.window.view_layer = self.scene_a.view_layers[0]
         self.rebuild()
         self.assertEqual(self.tree_files(), ["BoxA.stl"])
+        self.assertIsNone(ce.ui.collection_note(self.scene_a, entry))
 
     def test_an_unchanged_window_costs_no_rebuild(self):
         builds, build = [], ce.ui_cache._rebuild_ui_cache
@@ -146,6 +151,10 @@ class FakeLayout:
 
     def operator(self, idname, text="", icon='NONE', **_kwargs):
         return self._record(kind="operator", idname=idname, text=text, icon=icon, info="")
+
+    def prop_search(self, data, prop, search_data, search_prop, text=None, icon='NONE', **_kwargs):
+        getattr(data, prop)
+        self._record(kind="prop_search", prop=prop, text=text, icon=icon)
 
 
 class PredictionCacheTests(BlenderTestCase):
@@ -438,6 +447,37 @@ class PanelLayoutTests(BlenderTestCase):
         preset = bpy.context.scene.batch_stl_presets[0]
         ce.ui.BATCH_STL_UL_presets.draw_item(None, bpy.context, layout, bpy.context.scene, preset, 0, None, "", 0)
         return layout.log
+
+    def draw_collection_item(self, index=0):
+        layout = FakeLayout()
+        preset = bpy.context.scene.batch_stl_presets[0]
+        ce.ui.BATCH_STL_UL_collections.draw_item(None, bpy.context, layout, preset, preset.collections[index], 0, None, "", index)
+        return layout.log
+
+    def test_collection_tick_leads_its_row(self):
+        """The export tick comes before the collection field, like the object tick; a ticked collection the view layer
+        does not evaluate gets a note icon after the field, whose tooltip says it is exported all the same."""
+        entry = bpy.context.scene.batch_stl_presets[0].collections[0]
+        layer = bpy.context.view_layer.layer_collection.children["Parts"]
+        for export, excluded, note in ((True, False, False), (False, False, False), (True, True, True), (False, True, False)):
+            with self.subTest(export=export, excluded=excluded):
+                entry.export, layer.exclude = export, excluded
+                _ui_cache["live"] = ce.targets.live_collection_names(bpy.context.view_layer)
+                log = self.draw_collection_item()
+                tick = next(item for item in log if item.kind == "operator")
+                field, = (item for item in log if item.kind == "prop_search")
+                self.assertEqual((tick.action, tick.c_idx, tick.icon), ('TOGGLE_COLLECTION_EXPORT', 0, ce.ui.ICONS['CHECK_ON' if export else 'CHECK_OFF']))
+                self.assertLess(log.index(tick), log.index(field))
+                notes = [item for item in log if item.kind == "operator" and item.idname == "batch_stl.collection_note"]
+                self.assertEqual(len(notes), int(note))
+                if note: self.assertGreater(log.index(notes[0]), log.index(field))
+
+    def test_collection_tick_toggles(self):
+        entry = bpy.context.scene.batch_stl_presets[0].collections[0]
+        bpy.ops.batch_stl.table_action(action='TOGGLE_COLLECTION_EXPORT', c_idx=0)
+        self.assertFalse(entry.export)
+        bpy.ops.batch_stl.table_action(action='TOGGLE_COLLECTION_EXPORT', c_idx=0)
+        self.assertTrue(entry.export)
 
     def test_preset_export_button_leads_its_row_set_apart_by_a_gap(self):
         """Export, and Cancel while it runs, come before the name field, with a gap after them."""

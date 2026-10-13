@@ -738,6 +738,8 @@ def on_collection_name_update(self, context):
 class BatchSTLCollection(bpy.types.PropertyGroup):
     collection_name: bpy.props.StringProperty(name="Collection", default="", update=on_collection_name_update)
     prev_collection_name: bpy.props.StringProperty(default="", options={'HIDDEN'})
+    # With the object ticks, the only filter of what is exported: the view layer does not decide (iter_export_objects)
+    export: bpy.props.BoolProperty(name="Export", default=True, update=mark_dirty)
     use_tag: bpy.props.BoolProperty(name="Use Tag", default=True, update=mark_dirty)
     tag: bpy.props.StringProperty(name="Tag", default="", description="Filename token(s), '/' between tokens. Placed in hierarchy order: Global, Preset, Collection, Object", update=on_name_field_update("tag"))
     sub_path: bpy.props.StringProperty(name="Sub-folder", default="", update=on_name_field_update("sub_path"))

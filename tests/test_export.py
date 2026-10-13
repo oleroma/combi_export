@@ -31,24 +31,56 @@ class DirectExportTests(BlenderTestCase):
         self.assertIn("BATCH EXPORT COMPLETE", run.log()[-1])
         self.assertFalse(ce.data.get_job(preset).is_exporting)
 
-    def test_only_evaluated_objects_are_exported(self):
+    def test_the_ticks_decide_not_the_view_layer(self):
+        """Every ticked object of a ticked collection is written, whatever the view layer says: objects it does not
+        evaluate (excluded or disabled collections, disabled objects) go to the worker, which switches them on in its
+        copy, so they come with their modifiers. The open file's view layer is left as it was."""
         parts = get_collection("Parts")
+        group = make_gn_group()
         make_object("Visible", mesh=cube_mesh())
         eye_hidden = make_object("EyeHidden", mesh=cube_mesh())
         make_object("Disabled", mesh=cube_mesh()).hide_viewport = True
         make_object("Unticked", mesh=cube_mesh())
         get_collection("Excluded", parent=parts).objects.link(bpy.data.objects.new("InExcluded", cube_mesh("x")))
         get_collection("Off", parent=parts).objects.link(bpy.data.objects.new("InOff", cube_mesh("o")))
+        ce.nodes.set_modifier_input(make_object("Sized", collection="Excluded", group=group).modifiers[0],
+                                    ce.nodes.get_modifier_socket_identifier(group, "Size"), 3.0)
+        make_object("Skipped", collection="Other", mesh=cube_mesh("s"))
         bpy.data.collections["Off"].hide_viewport = True
-        bpy.context.view_layer.layer_collection.children["Parts"].children["Excluded"].exclude = True
+        layers = bpy.context.view_layer.layer_collection.children
+        layers["Parts"].children["Excluded"].exclude = True
         eye_hidden.hide_set(True)
-        preset = make_preset()
+        preset = make_preset(collections=("Parts", "Other"))
         next(o for o in preset.collections[0].objects if o.name == "Unticked").export = False
+        preset.collections[1].export = False
 
-        self.assertEqual(sorted(planned_paths()), ["EyeHidden.stl", "Visible.stl"])
-        result, _run = run_export()
+        expected = ["Disabled.stl", "EyeHidden.stl", "InExcluded.stl", "InOff.stl", "Sized.stl", "Visible.stl"]
+        self.assertEqual(sorted(planned_paths()), expected)
+        result, run = run_export()
+        log = "\n".join(run.log())
+        self.assertEqual(result, {'FINISHED'}, log)
+        self.assertEqual(written_files(self.tmp), expected)
+        for name in expected:
+            self.assertEqual(len(read_stl(os.path.join(self.tmp, name))[1]), 12, name)
+        lo, hi = stl_bounds(os.path.join(self.tmp, "Sized.stl"))
+        self.assertAlmostEqual(hi[0] - lo[0], 3.0, places=4)  # evaluated: the modifier's size, not the empty mesh
+        self.assertIn("Exporting collections the view layer excludes or disables: Excluded, Off", log)
+        self.assertNotIn("SKIPPED", log)
+        # The worker switched them on in its copy only
+        self.assertTrue(layers["Parts"].children["Excluded"].exclude)
+        self.assertTrue(bpy.data.collections["Off"].hide_viewport)
+        self.assertTrue(bpy.data.objects["Disabled"].hide_viewport)
+
+    def test_objects_without_overrides_the_view_layer_evaluates_stay_on_the_direct_path(self):
+        """Only what the view layer does not evaluate costs a worker; a plain preset is still written in this process."""
+        make_object("A", mesh=cube_mesh())
+        make_object("B", mesh=cube_mesh())
+        make_preset()
+        with mock.patch.object(ce.export_operator.subprocess, "Popen") as popen:
+            result, _run = run_export()
         self.assertEqual(result, {'FINISHED'})
-        self.assertEqual(written_files(self.tmp), ["EyeHidden.stl", "Visible.stl"])
+        popen.assert_not_called()
+        self.assertEqual(written_files(self.tmp), ["A.stl", "B.stl"])
 
     def test_eye_hidden_objects_keep_their_instances_and_visibility(self):
         """Objects hidden with the eye icon (their own or their collection's) are written with their instances, and the
@@ -336,8 +368,8 @@ class WorkerExportTests(BlenderTestCase):
         self.assertEqual(written_files(root), [])
 
     def run_view_layer_job(self, window=True):
-        """The job's view layer decides which objects are exported and evaluates them, not the context's: here the
-        mapped collection is excluded in the context's view layer only."""
+        """The job's view layer evaluates the objects, not the context's: here the mapped collection is excluded in the
+        context's view layer only."""
         make_object("Box", group=make_gn_group())
         preset = make_preset()
         override(preset.nodegroups, "Size", "FLOAT", "\\1", "\\2")
@@ -360,6 +392,105 @@ class WorkerExportTests(BlenderTestCase):
     def test_worker_evaluates_the_job_view_layer_without_a_window(self):
         self.run_view_layer_job(window=False)
         self.assertEqual(bpy.context.view_layer.name, "ViewLayer")  # the worker used the job's view layer explicitly
+
+    def test_worker_switches_on_only_what_each_batch_exports(self):
+        """Each batch includes and enables the collections of its objects and their parents, whatever the saved view
+        layer says, and excludes everything else."""
+        group = make_gn_group()
+        parts = get_collection("Parts")
+        make_object("Box", collection=get_collection("Deep", parent=get_collection("Mid", parent=parts)).name, group=group)
+        make_object("Lid", collection="Side", group=group).hide_viewport = True
+        make_object("Unmapped", collection="Unmapped", group=group)
+        layers = bpy.context.view_layer.layer_collection.children
+        layers["Parts"].exclude = True
+        bpy.data.collections["Side"].hide_viewport = True
+        preset = make_preset(collections=("Parts", "Side"))
+        override(preset.nodegroups, "Size", "FLOAT", "\\1", "\\2")
+        override(preset.collections[1].nodegroups, "Count", "INT", "3")  # Lid gets a batch of its own
+
+        states, isolate = [], ce.headless.isolate_batch
+        def recording(tree, batch_objects):
+            keep = isolate(tree, batch_objects)
+            states.append(({ob.name for ob in batch_objects}, {lc.collection.name for lc, _p in tree if not lc.exclude}))
+            return keep
+        job, root = os.path.join(self.tmp, "job.json"), os.path.join(self.tmp, "out")
+        write_job(job, preset, root)
+        with mock.patch.object(ce.headless, "isolate_batch", recording):
+            code, out = self.run_worker(job)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(written_files(root), ["1/Box.stl", "1/Lid.stl", "2/Box.stl", "2/Lid.stl"])
+        self.assertEqual(sorted(states, key=lambda st: sorted(st[0])), [({"Box"}, {"Parts", "Mid", "Deep"}), ({"Lid"}, {"Side"})])
+        for size in (1, 2):
+            lo, hi = stl_bounds(os.path.join(root, f"{size}/Lid.stl"))
+            self.assertAlmostEqual(hi[0] - lo[0], size, places=4)
+
+    def test_worker_evaluates_what_the_parts_reference_in_excluded_collections(self):
+        """Collections a node reads (here a cutter-like object through Object Info, and a collection through Collection
+        Info) stay excluded in the worker: Blender evaluates what is referenced all the same, modifiers included."""
+        reader = bpy.data.node_groups.new("Reader", "GeometryNodeTree")
+        reader.is_modifier = True
+        reader.interface.new_socket("Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
+        reader.interface.new_socket("Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
+        info, coll_info = reader.nodes.new("GeometryNodeObjectInfo"), reader.nodes.new("GeometryNodeCollectionInfo")
+        join, realize, out = reader.nodes.new("GeometryNodeJoinGeometry"), reader.nodes.new("GeometryNodeRealizeInstances"), reader.nodes.new("NodeGroupOutput")
+        size = reader.interface.new_socket("Size", in_out="INPUT", socket_type="NodeSocketFloat")
+        size.default_value = 1.0
+        gi, cube = reader.nodes.new("NodeGroupInput"), reader.nodes.new("GeometryNodeMeshCube")
+        reader.links.new(gi.outputs["Size"], cube.inputs["Size"])
+        for socket in (info.outputs["Geometry"], coll_info.outputs["Instances"], cube.outputs["Mesh"]): reader.links.new(socket, join.inputs[0])
+        reader.links.new(join.outputs[0], realize.inputs[0])
+        reader.links.new(realize.outputs[0], out.inputs[0])
+        refs = get_collection("Refs")
+        info.inputs["Object"].default_value = make_object("Cutter", collection="Refs", group=make_gn_group("CutterGN"))
+        coll_info.inputs["Collection"].default_value = refs
+        bpy.context.view_layer.layer_collection.children["Refs"].exclude = True
+        make_object("Part", group=reader)
+        preset = make_preset()
+        override(preset.nodegroups, "Size", "FLOAT", "\\1", "\\2", group="Reader")
+        job, root = os.path.join(self.tmp, "job.json"), os.path.join(self.tmp, "out")
+        write_job(job, preset, root)
+        code, out = self.run_worker(job)
+        self.assertEqual(code, 0, out)
+        # The part's own cube (12) plus the cutter twice (Object Info and Collection Info), each a GN cube of 2 x 2 x 2
+        # vertices (12 triangles): without its modifier the cutter's empty mesh would add nothing
+        for size in (1, 2):
+            self.assertEqual(len(read_stl(os.path.join(root, f"{size}/Part.stl"))[1]), 36, size)
+
+    def test_worker_skips_only_what_was_written_directly(self):
+        """With skip_direct the worker leaves out the objects without overrides that the job's view layer evaluates
+        (the main process wrote them) and writes the ones it does not."""
+        make_object("Plain", mesh=cube_mesh())
+        get_collection("Hidden", parent=get_collection("Parts")).objects.link(bpy.data.objects.new("PlainHidden", cube_mesh("h")))
+        bpy.context.view_layer.layer_collection.children["Parts"].children["Hidden"].exclude = True
+        make_object("Box", group=make_gn_group())
+        preset = make_preset()
+        override(preset.nodegroups, "Size", "FLOAT", "1")
+        job, root = os.path.join(self.tmp, "job.json"), os.path.join(self.tmp, "out")
+        scene = bpy.context.scene
+        ce.headless.write_job_file(job, scene, scene.view_layers[0], preset, root, skip_direct=True)
+        code, out = self.run_worker(job)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(written_files(root), ["Box.stl", "PlainHidden.stl"])
+
+    def test_worker_links_a_collection_that_is_not_in_the_scene(self):
+        """A mapped collection that only another scene holds is linked into the job's scene in the worker's copy."""
+        group = make_gn_group()
+        elsewhere = bpy.data.scenes.new("Elsewhere")
+        col = bpy.data.collections.new("Only There")
+        elsewhere.collection.children.link(col)
+        ob = bpy.data.objects.new("Box", bpy.data.meshes.new("Box"))
+        ob.modifiers.new("GN", "NODES").node_group = group
+        col.objects.link(ob)
+        preset = make_preset(collections=("Only There",))
+        override(preset.nodegroups, "Size", "FLOAT", "2")
+        self.assertEqual(planned_paths(), ["Box.stl"])
+        job, root = os.path.join(self.tmp, "job.json"), os.path.join(self.tmp, "out")
+        write_job(job, preset, root)
+        code, out = self.run_worker(job)
+        self.assertEqual(code, 0, out)
+        self.assertIn("Linked 'Only There' into scene 'Scene'", out)
+        lo, hi = stl_bounds(os.path.join(root, "Box.stl"))
+        self.assertAlmostEqual(hi[0] - lo[0], 2.0, places=4)
 
 
 class FakeProcess:

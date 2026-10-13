@@ -11,6 +11,14 @@ def preset_dicts(scene=None):
     return [ce.data.copy_preset_to_dict(p) for p in (scene or bpy.context.scene).batch_stl_presets]
 
 
+def live_paths(scene, preset):
+    """The files a preset wrote before data version 4: the ticked objects that the view layer evaluates."""
+    live = ce.targets.live_collection_names(bpy.context.view_layer)
+    return sorted(f"{bl_obj.name}.stl" for c in preset.collections if bpy.data.collections.get(c.collection_name)
+                  and c.collection_name in live for o in c.objects if o.export
+                  for bl_obj in [bpy.data.objects.get(o.name)] if bl_obj and ce.targets.is_object_live(bl_obj, live))
+
+
 def build_rich_preset():
     """A preset using every stored field: prefix, collection tag / sub-folder, object entries, block naming, sweeps."""
     group = make_gn_group()
@@ -26,6 +34,10 @@ def build_rich_preset():
     override(col.nodegroups, "Mode", "MENU", "_*")
     override(box.nodegroups, "Word", "STRING", "\\B\\x", "_{a, b}")
     override(box.nodegroups, "Vertices X", "INT", "4", node="Cube [MESH_PRIMITIVE_CUBE]")
+    make_object("Spare", collection="Spares", group=group)
+    spares = preset.collections.add()
+    spares.collection_name, spares.export = "Spares", False
+    ce.targets.sync_collection_objects(spares)
     return preset
 
 
@@ -125,6 +137,27 @@ class JsonTests(BlenderTestCase):
         self.assertEqual(ce.fields.value_expr(preset.nodegroups[0].nodes[0].inputs[0].values[0], "FLOAT"), "\\B\\15\\_x_15")
 
 
+    def test_version_3_file_unticks_what_the_view_layer_skips(self):
+        """Before version 4 the view layer decided what a preset exported: a file of that version comes in with what
+        the importing view layer does not evaluate unticked, so it exports the same files. A current file keeps its
+        ticks whatever the view layer says."""
+        make_object("Box", mesh=cube_mesh())
+        make_object("Hidden", collection="Excluded", mesh=cube_mesh("h"))
+        preset = make_preset(collections=("Parts", "Excluded"))
+        current = ce.data.copy_setup_to_dict(bpy.context.scene)
+        old = json.loads(json.dumps(current))
+        old["data_version"] = old["presets"][0]["data_version"] = 3
+        for c in old["presets"][0]["collections"]: del c["export"]
+        bpy.context.view_layer.layer_collection.children["Excluded"].exclude = True
+        bpy.context.scene.batch_stl_presets.clear()
+        for name, data, ticks in (("old", old, [True, False]), ("current", current, [True, True])):
+            with self.subTest(name):
+                path = os.path.join(self.tmp, f"{name}.json")
+                with open(path, "w", encoding="utf-8") as f: json.dump(data, f)
+                self.assertEqual(bpy.ops.batch_stl.import_presets_json(filepath=path), {'FINISHED'})
+                self.assertEqual([c.export for c in bpy.context.scene.batch_stl_presets[-1].collections], ticks)
+
+
 class ClipboardAndMoveTests(BlenderTestCase):
     def test_copy_paste_preset(self):
         build_rich_preset()
@@ -216,6 +249,43 @@ class MigrationTests(BlenderTestCase):
         bpy.ops.wm.open_mainfile(filepath=path)
         val = bpy.data.scenes["Scripted"].batch_stl_presets[0].nodegroups[0].nodes[0].inputs[0].values[0]
         self.assertEqual((val.dir_tag, val.tag), ("B/*", "x_*"))
+
+    def test_version_3_unticks_what_the_view_layer_skipped(self):
+        """Data version 4: the ticks alone decide. What the view layer kept from exporting comes in unticked, so the
+        first export after the update writes the same files: a collection it excludes, the objects of a mapped
+        collection it does not evaluate (also ones without an entry yet). A missing collection keeps its tick."""
+        scene = bpy.context.scene
+        make_object("Box", mesh=cube_mesh())
+        make_object("Off", mesh=cube_mesh("o")).hide_viewport = True
+        get_collection("Inner", parent=get_collection("Parts"))
+        make_object("InInner", collection="Inner", mesh=cube_mesh("i"))
+        make_object("Gone", collection="Away", mesh=cube_mesh("g"))
+        preset = make_preset(collections=("Parts", "Away", "Missing"))
+        make_object("Late", collection="Inner", mesh=cube_mesh("l"))  # no entry yet: added while the add-on was off
+        layers = bpy.context.view_layer.layer_collection.children
+        layers["Parts"].children["Inner"].exclude = True
+        layers["Away"].exclude = True
+        before = live_paths(scene, preset)
+        self.assertEqual(before, ["Box.stl"])
+        scene.batch_stl_data_version = 3
+
+        ce.data.migrate_scene_data(scene)
+        self.assertEqual(scene.batch_stl_data_version, ce.data.DATA_VERSION)
+        self.assertEqual([c.export for c in preset.collections], [True, False, True])
+        self.assertEqual({o.name: o.export for o in preset.collections[0].objects},
+                         {"Box": True, "Off": False, "InInner": False, "Late": False})
+        self.assertEqual(planned_paths(preset), before)
+
+    def test_migration_follows_the_view_layer_the_window_shows(self):
+        scene = bpy.context.scene
+        make_object("Box", mesh=cube_mesh())
+        preset = make_preset()
+        second = scene.view_layers.new("Second")
+        second.layer_collection.children["Parts"].exclude = True
+        bpy.context.window.view_layer = second
+        scene.batch_stl_data_version = 3
+        ce.data.migrate_scene_data(scene)
+        self.assertFalse(preset.collections[0].export)
 
     def save_unversioned_scene(self):
         """A file whose scene 'Old' holds an unversioned (v1.0.0) value (see test_unversioned_scene), saved without the
