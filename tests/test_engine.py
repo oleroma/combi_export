@@ -37,8 +37,7 @@ class EngineTestCase(BlenderTestCase):
     def assertCountsMatch(self):
         """The variant count (product of pool sizes without anchors) equals the variants generated, and every variant's
         values are all active when it is walked again."""
-        live = ce.targets.live_collection_names(bpy.context.view_layer)
-        for *_rest, ovrs in ce.targets.iter_export_objects(self.scene, self.preset, live):
+        for *_rest, ovrs in ce.targets.iter_export_objects(self.scene, self.preset):
             variants = list(ce.engine.generate_named_combinations(ovrs))
             self.assertEqual(ce.engine.count_override_combinations(ovrs), len(variants))
             for combo, _tags, _dirs in variants:
@@ -90,8 +89,7 @@ class CombinationTests(EngineTestCase):
         # A block without naming whose values are all replaced still goes
         global_ng().sub_path = ""
         global_ng().nodes[0].inputs.remove(1)
-        live = ce.targets.live_collection_names(bpy.context.view_layer)
-        (*_rest, ovrs), = ce.targets.iter_export_objects(self.scene, self.preset, live)
+        (*_rest, ovrs), = ce.targets.iter_export_objects(self.scene, self.preset)
         self.assertEqual([o.level for o in ovrs], ["OBJECT"])
 
     def test_overrides_skip_objects_without_the_group(self):
@@ -102,7 +100,7 @@ class CombinationTests(EngineTestCase):
 
     def test_plain_values_clash(self):
         override(self.preset.nodegroups, "Size", "FLOAT", "1", "2")
-        clashes = ce.targets.find_export_clashes(self.scene, self.preset, ce.targets.live_collection_names(bpy.context.view_layer), self.tmp)
+        clashes = ce.targets.find_export_clashes(self.scene, self.preset, self.tmp)
         self.assertEqual(len(clashes), 1)
 
     def test_prefix_and_sub_folders(self):

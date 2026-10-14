@@ -163,10 +163,9 @@ def planned_paths(preset=None, scene=None):
     scene = scene or bpy.context.scene
     preset = preset or ce.data.get_active_preset(scene)
     for c in preset.collections: ce.targets.sync_collection_objects(c)
-    live = ce.targets.live_collection_names(bpy.context.view_layer)
     paths = []
     with ce.nodes.cached_menu_items():
-        for ovrs, items in ce.targets.group_by_signature(ce.targets.iter_export_objects(scene, preset, live)).values():
+        for ovrs, items in ce.targets.group_by_signature(ce.targets.iter_export_objects(scene, preset)).values():
             for _combo, tags, dirs in ce.engine.generate_named_combinations(ovrs):
                 for c, obj_prop, bl_obj in items:
                     parts, filename = ce.targets.export_file_parts(preset, c, obj_prop, bl_obj, tags, dirs)
