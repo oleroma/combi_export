@@ -229,6 +229,22 @@ class SocketDiscoveryTests(TableTestCase):
         self.assertFalse(any(t.startswith("Group Input") for t in targets))
         self.assertEqual(targets[0], "Cube [MESH_PRIMITIVE_CUBE]")
 
+    def test_add_node_stops_when_no_target_is_left(self):
+        """Once every target with overridable sockets has an entry, adding a node adds nothing (no <Modifier Interface>
+        entry for a group whose interface has nothing to override) and the add button is greyed out."""
+        small = bpy.data.node_groups.new("Small", "GeometryNodeTree")
+        small.interface.new_socket("Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
+        small.interface.new_socket("Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
+        small.nodes.new("NodeGroupInput"); small.nodes.new("NodeGroupOutput")
+        small.nodes.new("GeometryNodeMeshCube").name = "Cube"
+        self.ng.group_name = "Small"
+        self.assertEqual([n.name for n in self.ng.nodes], ["Cube [MESH_PRIMITIVE_CUBE]"])
+        self.assertFalse(ce.nodes.has_free_target(small, {"Cube"}))
+        self.table_action('ADD_NODE')
+        self.assertEqual([n.name for n in self.ng.nodes], ["Cube [MESH_PRIMITIVE_CUBE]"])
+        self.assertEqual(ce.nodes.get_target_node_names(small, {"Cube"}), [MODIFIER])  # the node field's fallback stays
+        self.assertTrue(ce.nodes.has_free_target(self.group, {"Cube"}))
+
 
 class ApplyOverridesTests(TableTestCase):
     def mock(self, node, input_name, override_type, value):

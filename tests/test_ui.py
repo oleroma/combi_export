@@ -22,7 +22,6 @@ class DepsgraphHandlerTests(BlenderTestCase):
     def settle(self):
         """The state a UI cache rebuild leaves (its timer never runs in background Blender)."""
         _ui_cache["objects_state"] = ce.ui_cache.mapped_objects_state(bpy.context.scene)
-        _ui_cache["live"] = ce.targets.live_collection_names(bpy.context.view_layer)
         _ui_cache["is_dirty"] = False
 
     def update(self, change):
@@ -95,7 +94,7 @@ class WindowTargetTests(BlenderTestCase):
 
     def test_the_tree_ignores_the_windows_view_layer(self):
         """The ticks decide what is exported: with the mapped collection excluded the tree and counts stay the same, and
-        the collection's row gets a note that it is exported all the same."""
+        the collection's row gets no note."""
         entry = self.scene_a.batch_stl_presets[0].collections[0]
         bare = self.scene_a.view_layers.new("Bare")
         bare.layer_collection.children["Parts"].exclude = True
@@ -103,7 +102,7 @@ class WindowTargetTests(BlenderTestCase):
         self.rebuild()
         self.assertEqual(self.tree_files(), ["BoxA.stl"])
         self.assertEqual(_ui_cache["stats"]["global"]["objs"], 1)
-        self.assertIn("Excluded or disabled in this view layer", ce.ui.collection_note(self.scene_a, entry))
+        self.assertIsNone(ce.ui.collection_note(self.scene_a, entry))
         bpy.context.window.view_layer = self.scene_a.view_layers[0]
         self.rebuild()
         self.assertEqual(self.tree_files(), ["BoxA.stl"])
@@ -456,14 +455,17 @@ class PanelLayoutTests(BlenderTestCase):
 
     def test_collection_tick_leads_its_row(self):
         """The export tick (a property, so a drag across ticks sets them all) comes before the collection field, like
-        the object tick; a ticked collection the view layer does not evaluate gets a note icon after the field, whose
-        tooltip says it is exported all the same."""
+        the object tick; a ticked collection that is not in the scene gets a note icon after the field, whose tooltip
+        says it is exported all the same. Excluded or disabled collections get none."""
         entry = bpy.context.scene.batch_stl_presets[0].collections[0]
+        parts = bpy.data.collections["Parts"]
         layer = bpy.context.view_layer.layer_collection.children["Parts"]
-        for export, excluded, note in ((True, False, False), (False, False, False), (True, True, True), (False, True, False)):
-            with self.subTest(export=export, excluded=excluded):
-                entry.export, layer.exclude = export, excluded
-                _ui_cache["live"] = ce.targets.live_collection_names(bpy.context.view_layer)
+        layer.exclude, parts.hide_viewport = True, True
+        for export, linked, note in ((True, True, False), (False, True, False), (True, False, True), (False, False, False)):
+            with self.subTest(export=export, linked=linked):
+                entry.export = export
+                if linked and "Parts" not in bpy.context.scene.collection.children: bpy.context.scene.collection.children.link(parts)
+                if not linked and "Parts" in bpy.context.scene.collection.children: bpy.context.scene.collection.children.unlink(parts)
                 log = self.draw_collection_item()
                 tick = log[0]
                 field, = (item for item in log if item.kind == "prop_search")

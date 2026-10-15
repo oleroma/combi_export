@@ -76,7 +76,7 @@ class DirectExportTests(BlenderTestCase):
         make_object("A", mesh=cube_mesh())
         make_object("B", mesh=cube_mesh())
         make_preset()
-        with mock.patch.object(ce.export_operator.subprocess, "Popen") as popen:
+        with mock.patch.object(ce.standby.subprocess, "Popen") as popen:
             result, _run = run_export()
         self.assertEqual(result, {'FINISHED'})
         popen.assert_not_called()
@@ -299,7 +299,7 @@ class WorkerExportTests(BlenderTestCase):
         crashed.stdout = io.StringIO("")
         run, context = ExportRun(), ContextProxy()
         run.direct_budget = 0
-        with mock.patch.object(ce.export_operator.subprocess, "Popen", return_value=crashed):
+        with mock.patch.object(ce.standby.subprocess, "Popen", return_value=crashed):
             self.assertEqual(run.invoke(context, None), {'RUNNING_MODAL'})
         self.assertEqual(run.modal(context, TIMER), {'CANCELLED'})
         self.assertEqual(written_files(self.tmp), ["A.stl", "B.stl"])
