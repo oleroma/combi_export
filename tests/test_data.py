@@ -158,6 +158,110 @@ class JsonTests(BlenderTestCase):
                 self.assertEqual([c.export for c in bpy.context.scene.batch_stl_presets[-1].collections], ticks)
 
 
+class SavedJsonTests(BlenderTestCase):
+    """Saving the .blend file writes <scene>_preset.json next to it (Scene.batch_stl_save_json, on by default)."""
+
+    def save(self, folder="", name="file.blend", copy=False):
+        path = os.path.join(self.tmp, folder, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        bpy.ops.wm.save_as_mainfile(filepath=path, copy=copy)
+        return path
+
+    def saved_json(self, folder="", scene_name="Scene"):
+        return os.path.join(self.tmp, folder, scene_name + ce.data.SAVED_JSON_SUFFIX)
+
+    def test_saving_writes_the_presets_and_their_files(self):
+        build_rich_preset()
+        scene = bpy.context.scene
+        self.assertTrue(scene.batch_stl_save_json)
+        override(scene.batch_stl_global_nodegroups, "Count", "INT", "\\1", "\\2")
+        self.save()
+        with open(self.saved_json(), encoding="utf-8") as f: data = json.load(f)
+        self.assertEqual(data["presets"], preset_dicts())
+        self.assertEqual(data["root_dir"], scene.batch_stl_root_dir)
+        self.assertEqual(data["global_nodegroups"], [ce.data.copy_ng_to_dict(ng) for ng in scene.batch_stl_global_nodegroups])
+        self.assertEqual(data["exports"], {"complete": True, "presets": [{"name": "Main", "files": sorted(set(planned_paths()))}]})
+
+        # Import JSON reads it like an exported file
+        before, paths = preset_dicts(), planned_paths()
+        scene.batch_stl_presets.clear()
+        self.assertEqual(bpy.ops.batch_stl.import_presets_json(filepath=self.saved_json()), {'FINISHED'})
+        self.assertEqual(preset_dicts(), before)
+        self.assertEqual(planned_paths(), paths)
+
+    def test_named_after_the_scene_and_one_per_scene(self):
+        make_gn_group()
+        make_object("Box")
+        make_preset("Main")
+        bpy.context.scene.name = "Grip V"
+        other = bpy.data.scenes.new("Other")
+        make_preset("Second", scene=other)
+        bpy.data.scenes.new("Empty")  # no presets: no file
+        self.save()
+        self.assertEqual(sorted(f for f in os.listdir(self.tmp) if f.endswith(".json")),
+                         ["Grip_V_preset.json", "Other_preset.json"])
+
+    def test_new_objects_are_listed_and_saved(self):
+        """The object entries are synced before the file is written, so the file and the JSON agree."""
+        make_gn_group()
+        make_object("Box")
+        make_preset("Main")
+        make_object("Lid")  # no entry yet: the UI timer never runs in the background
+        path = self.save()
+        with open(self.saved_json(), encoding="utf-8") as f: files = json.load(f)["exports"]["presets"][0]["files"]
+        self.assertEqual(files, ["Box.stl", "Lid.stl"])
+        bpy.ops.wm.open_mainfile(filepath=path)
+        self.assertEqual([o.name for o in bpy.context.scene.batch_stl_presets[0].collections[0].objects], ["Box", "Lid"])
+
+    def test_copies_and_the_tick_off_write_nothing(self):
+        make_gn_group()
+        make_object("Box")
+        make_preset("Main")
+        self.save("a")
+        os.remove(self.saved_json("a"))
+        self.save("b", "copy.blend", copy=True)  # also what the export worker's snapshot is
+        self.assertFalse(os.path.exists(self.saved_json("a")))
+        self.assertFalse(os.path.exists(self.saved_json("b")))
+        bpy.context.scene.batch_stl_save_json = False
+        self.save("a")
+        self.assertFalse(os.path.exists(self.saved_json("a")))
+        # Save As writes next to the new file
+        bpy.context.scene.batch_stl_save_json = True
+        self.save("c")
+        self.assertTrue(os.path.exists(self.saved_json("c")))
+
+    def test_unchanged_json_is_left_alone(self):
+        make_gn_group()
+        make_object("Box")
+        preset = make_preset("Main")
+        self.save()
+        path = self.saved_json()
+        os.utime(path, (1000000000, 1000000000))
+        bpy.ops.wm.save_mainfile()
+        self.assertEqual(os.path.getmtime(path), 1000000000)
+        preset.collections[0].objects[0].export_name = "Base"
+        bpy.ops.wm.save_mainfile()
+        self.assertNotEqual(os.path.getmtime(path), 1000000000)
+        with open(path, encoding="utf-8") as f: self.assertEqual(json.load(f)["exports"]["presets"][0]["files"], ["Base.stl"])
+
+    def test_list_stops_at_the_limit(self):
+        group = make_gn_group()
+        make_object("Box", group=group)
+        make_object("Lid", group=group)
+        preset = make_preset("Main")
+        override(preset.nodegroups, "Size", "FLOAT", "\\1", "\\2")
+        make_preset("Second")
+        scene = bpy.context.scene
+        for c in preset.collections: ce.targets.sync_collection_objects(c)
+        full = ce.targets.export_manifest(scene)
+        self.assertEqual(full["complete"], True)
+        self.assertEqual(full["presets"][0]["files"], ["1/Box.stl", "1/Lid.stl", "2/Box.stl", "2/Lid.stl"])
+        self.assertEqual(ce.targets.export_manifest(scene, limit=6)["complete"], True)
+        capped = ce.targets.export_manifest(scene, limit=3)
+        self.assertEqual(capped["complete"], False)
+        self.assertEqual([len(p["files"]) for p in capped["presets"]], [3])
+
+
 class ClipboardAndMoveTests(BlenderTestCase):
     def test_copy_paste_preset(self):
         build_rich_preset()
