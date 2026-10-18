@@ -1,4 +1,5 @@
 """The standby worker (standby.py): a background Blender started ahead of time that an export hands its job to."""
+import os
 import time
 import types
 from unittest import mock
@@ -11,7 +12,10 @@ READY_TIMEOUT = 60.0
 
 
 def wait_ready(worker):
-    if not worker.ready.wait(READY_TIMEOUT): raise AssertionError("standby worker never got ready")
+    deadline = time.monotonic() + READY_TIMEOUT
+    while not worker.is_ready():
+        if time.monotonic() > deadline: raise AssertionError("standby worker never got ready")
+        time.sleep(0.05)
 
 
 class StandbyTests(BlenderTestCase):
@@ -53,16 +57,19 @@ class StandbyTests(BlenderTestCase):
     def test_worker_that_is_not_ready_or_does_not_fit_is_not_used(self):
         """A booting standby is kept for the next export; one with another auto-run setting, or a dead one, is stopped.
         In both cases the export starts its own worker."""
-        def fake(alive=True, ready=False, autoexec=False):
-            worker = types.SimpleNamespace(autoexec=autoexec, ready=types.SimpleNamespace(is_set=lambda: ready),
-                                           alive=lambda: alive, stopped=False)
+        output = os.path.join(self.tmp, "worker.log")
+        open(output, "wb").close()
+        def fake(alive=True, ready=False, autoexec=False, path=output):
+            worker = types.SimpleNamespace(autoexec=autoexec, is_ready=lambda: ready, alive=lambda: alive, stopped=False,
+                                           output=types.SimpleNamespace(path=path))
             worker.stop = lambda: setattr(worker, "stopped", True)
             return worker
         booting = fake()
         ce.standby._standby = booting
         self.assertIsNone(ce.standby.take_standby(False))
         self.assertIs(ce.standby._standby, booting)
-        for worker in (fake(ready=True, autoexec=True), fake(alive=False, ready=True)):
+        gone = os.path.join(self.tmp, "removed", "worker.log")  # another Blender removed its folder as stale
+        for worker in (fake(ready=True, autoexec=True), fake(alive=False, ready=True), fake(ready=True, path=gone)):
             ce.standby._standby = worker
             self.assertIsNone(ce.standby.take_standby(False))
             self.assertTrue(worker.stopped)
@@ -72,6 +79,18 @@ class StandbyTests(BlenderTestCase):
         self.assertIs(ce.standby.take_standby(False), ready)
         self.assertIsNone(ce.standby._standby)
 
+    def test_output_is_read_by_complete_lines(self):
+        """The worker's output file is read a line at a time: a line still being written waits for the next read,
+        Windows line ends are dropped, and a read can stop after a given line."""
+        output = ce.standby.WorkerOutput(os.path.join(self.tmp, "worker.log"))
+        self.assertEqual(output.read_lines(), [], "no file yet: the worker has not started writing")
+        with open(output.path, "wb") as f: f.write(b"Blender 5.2\r\nBATCH_STL_READY\r\nBATCH_STL_TOTAL:2\r\nBATCH_STL_PROG")
+        self.assertEqual(output.read_lines(stop="BATCH_STL_READY"), ["Blender 5.2", "BATCH_STL_READY"])
+        self.assertEqual(output.read_lines(), ["BATCH_STL_TOTAL:2"])
+        with open(output.path, "ab") as f: f.write("RESS:1\nP | Bö\r\n".encode("utf-8"))
+        self.assertEqual(output.read_lines(), ["BATCH_STL_PROGRESS:1", "P | Bö"])
+        self.assertEqual(output.read_lines(), [])
+
     def test_worker_exits_when_its_input_closes(self):
         """Blender that started it is gone (its end of the pipe closes): the waiting worker ends by itself."""
         worker = ce.standby.StandbyWorker(autoexec=False)
@@ -79,6 +98,9 @@ class StandbyTests(BlenderTestCase):
         wait_ready(worker)
         worker.process.stdin.close()
         self.assertEqual(worker.process.wait(timeout=30), 0)
+        folder = worker.folder
+        worker.stop()
+        self.assertFalse(os.path.exists(folder), "a stopped worker leaves no temp folder")
 
     def test_stopped_on_unregister(self):
         """Reload Scripts or an update must not hand the next export to a worker running the old code."""
