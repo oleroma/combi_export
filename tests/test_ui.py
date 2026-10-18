@@ -39,6 +39,13 @@ class DepsgraphHandlerTests(BlenderTestCase):
         self.assertEqual(self.update(lambda: setattr(self.box, "location", (1, 2, 3))), (False, False))
         self.assertEqual(self.update(lambda: setattr(self.box, "rotation_euler", (0, 0, 1))), (False, False))
 
+    def test_selection_skips_the_walk(self):
+        """Selecting, making active and hiding with the eye only update the scene, which renames nothing."""
+        view_layer = bpy.context.view_layer
+        for change in (lambda: self.box.select_set(True), lambda: setattr(view_layer.objects, "active", self.box),
+                       lambda: self.box.hide_set(True)):
+            self.assertEqual(self.update(change), (False, False))
+
     def test_renames_and_visibility_still_mark_the_cache_dirty(self):
         self.assertEqual(self.update(lambda: setattr(self.box, "name", "Lid")), (True, True))
         layer_collection = bpy.context.view_layer.layer_collection.children["Parts"]

@@ -4,8 +4,8 @@ import collections
 import contextlib
 import io
 import os
-import queue
-import threading
+import shutil
+import tempfile
 import time
 import types
 import warnings
@@ -296,7 +296,6 @@ class WorkerExportTests(BlenderTestCase):
         make_object("Box", group=make_gn_group())
         override(make_preset().nodegroups, "Size", "FLOAT", "\\1", "\\2")
         crashed = FakeProcess(returncode=1)
-        crashed.stdout = io.StringIO("")
         run, context = ExportRun(), ContextProxy()
         run.direct_budget = 0
         with mock.patch.object(ce.standby.subprocess, "Popen", return_value=crashed):
@@ -545,11 +544,15 @@ class WorkerProtocolTests(BlenderTestCase):
         run = self.run = ExportRun()
         run.scene_uid, run.preset_uid, run.preset_name = bpy.context.scene.session_uid, self.preset.uid, self.preset.name
         run.export_start_time, run.total_operations, run.current_op, run._timer = time.perf_counter(), 1, 0, None
-        run.q, run.t = queue.Queue(), threading.Thread(target=lambda: None)
-        run.t.start()
+        folder = tempfile.mkdtemp(prefix="combi_test_worker_")  # not below the export root: written_files lists that
+        self.addCleanup(shutil.rmtree, folder, True)
+        run.output = ce.standby.WorkerOutput(os.path.join(folder, "worker.log"))
+        open(run.output.path, "wb").close()
 
     def feed(self, *lines):
-        for line in lines: self.run.q.put(line + "\n")
+        """What the worker prints: appended to its output file, as Windows writes it (CRLF)."""
+        with open(self.run.output.path, "ab") as f:
+            for line in lines: f.write((line + "\r\n").encode("utf-8"))
 
     def test_progress_and_completion(self):
         self.run.process = FakeProcess()
