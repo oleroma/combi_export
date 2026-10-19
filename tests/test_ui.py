@@ -136,7 +136,10 @@ class FakeLayout:
         object.__setattr__(self, "attrs", {})
         object.__setattr__(self, "ids", itertools.count() if ids is None else ids)
     def __setattr__(self, key, value): self.attrs[key] = value  # alert, enabled, alignment, ...
-    def _child(self, *_args, **_kwargs): return FakeLayout(self.log, self.path + (next(self.ids),), self.ids)
+    def _child(self, *_args, align=False, **_kwargs):
+        child = FakeLayout(self.log, self.path + (next(self.ids),), self.ids)
+        if align: child.attrs["align"] = True
+        return child
     row = column = box = split = _child
 
     def _record(self, **item):
@@ -430,7 +433,7 @@ class PanelLayoutTests(BlenderTestCase):
         self.assertEqual((button.action, button.is_global), ('ADD_GROUP', True))
         root, = (item for item in log if item.kind == "prop" and item.prop == "batch_stl_root_dir")
         label, = (item for item in log if item.kind == "label" and item.text == "Root:")
-        self.assertEqual(button.layout.path[:-1], root.layout.path, "in the root folder's row")
+        self.assertEqual(button.layout.path[:-1], root.layout.path[:-1], "in the root folder's row")
         self.assertLess(log.index(button), log.index(label))
 
     def test_json_buttons_share_the_root_folder_row(self):
@@ -438,12 +441,15 @@ class PanelLayoutTests(BlenderTestCase):
         root, = (item for item in log if item.kind == "prop" and item.prop == "batch_stl_root_dir")
         self.assertEqual(root.text, "", "the label is drawn apart from the field")
         label, = (item for item in log if item.kind == "label" and item.text == "Root:")
-        self.assertEqual(label.layout.path[:-1], root.layout.path, "the label is in the field's row")
+        self.assertEqual(label.layout.path[:-1], root.layout.path[:-1], "the label is in the field's row")
+        browse, = self.operators(log, "batch_stl.pick_root_dir")
+        self.assertEqual(browse.layout.path, root.layout.path, "the folder button shares the field's row")
+        self.assertTrue(root.layout.attrs.get("align"), "aligned, so the button touches the field")
         self.assertEqual(label.layout.attrs["alignment"], 'RIGHT')
         self.assertEqual(label.layout.attrs["ui_units_x"], ce.ui.ROOT_LABEL_UNITS)
         json_ops = [op for op in self.operators(log, "batch_stl.") if op.idname.endswith("_presets_json")]
         self.assertEqual([(op.idname, op.icon) for op in json_ops], [("batch_stl.import_presets_json", 'IMPORT'), ("batch_stl.export_presets_json", 'EXPORT')])
-        self.assertEqual({op.layout.path[:-1] for op in json_ops}, {root.layout.path}, "in the field's row")
+        self.assertEqual({op.layout.path[:-1] for op in json_ops}, {root.layout.path[:-1]}, "in the field's row")
         # The label comes first, then the field, then the buttons
         order = [log.index(label), log.index(root), log.index(json_ops[0])]
         self.assertEqual(order, sorted(order))

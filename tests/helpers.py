@@ -262,4 +262,4 @@ def write_job(path, preset, root, view_layer=None):
     """The worker's job file for exporting every object of `preset` to `root`, evaluated in the preset's own scene and
     `view_layer` (default: the scene's first)."""
     scene = preset.id_data
-    ce.headless.write_job_file(path, scene, view_layer or scene.view_layers[0], preset, root, skip_direct=False)
+    ce.headless.write_job_file(path, scene, view_layer or scene.view_layers[0], preset, root, root, skip_direct=False)
