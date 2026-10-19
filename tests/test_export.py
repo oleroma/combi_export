@@ -3,6 +3,7 @@ worker, and the worker's output protocol."""
 import collections
 import contextlib
 import io
+import json
 import os
 import shutil
 import tempfile
@@ -191,13 +192,60 @@ class RefusalTests(BlenderTestCase):
         self.assertRefused("Missing Root Directory")
 
     def test_relative_root_of_an_unsaved_file(self):
-        bpy.context.scene.batch_stl_root_dir = "//out"
-        self.assertRefused("save the .blend file")
+        """While the .blend file is not saved, relative paths start at the current folder, like Blender's own."""
+        cwd = os.getcwd()
+        self.addCleanup(os.chdir, cwd)
+        os.chdir(self.tmp)
+        for root in ("//out", "out2"):
+            bpy.context.scene.batch_stl_root_dir = root
+            self.assertEqual(run_export()[0], {'FINISHED'})
+        self.assertEqual(written_files(self.tmp), ["out/Box.stl", "out2/Box.stl"])
 
     def test_root_accepts_blend_relative_paths(self):
         with warnings.catch_warnings():
             warnings.simplefilter("error", RuntimeWarning)
             bpy.context.scene.batch_stl_root_dir = "//out"
+
+
+class RelativePathTests(BlenderTestCase):
+    def test_relative_settings_start_at_the_blend_folder(self):
+        """A .blend in a subfolder, a root '../x' and a collection sub-folder '..\\y\\' written on Windows: the files
+        go to the folders next to the .blend file's, on every OS, with no warning about '//' paths."""
+        project = os.path.join(self.tmp, "project")
+        os.makedirs(project)
+        make_object("Box", mesh=cube_mesh())
+        make_object("Lid", collection="Lids", mesh=cube_mesh())
+        preset = make_preset(collections=("Parts", "Lids"))
+        scene = bpy.context.scene
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            scene.batch_stl_root_dir = "../x"
+            preset.collections[1].sub_path = "..\\y\\"
+            bpy.ops.wm.save_as_mainfile(filepath=os.path.join(project, "scene.blend"))
+        self.assertEqual(preset.collections[1].sub_path, "..\\y\\")
+
+        result, run = run_export()
+        self.assertEqual(result, {'FINISHED'}, "\n".join(run.log()))
+        self.assertEqual(written_files(os.path.join(self.tmp, "x")), ["Box.stl"])
+        self.assertEqual(written_files(os.path.join(self.tmp, "y")), ["Lid.stl"])
+
+        # The JSON saved with the file lists the file below the root with '/', the one outside it by its full path
+        with open(os.path.join(project, scene.name + ce.data.SAVED_JSON_SUFFIX), encoding="utf-8") as f:
+            files = json.load(f)["exports"]["presets"][0]["files"]
+        self.assertEqual(files, sorted(["Box.stl", os.path.join(self.tmp, "y", "Lid.stl")]))
+        # and the tree view shows the folder outside the root as a tree of its own
+        tree, duplicates = ce.ui_cache.build_tree_dict(bpy.context)
+        self.assertEqual(tree, {os.path.join(self.tmp, "x"): {"_files": ["Box.stl"]}, os.path.join(self.tmp, "y"): {"_files": ["Lid.stl"]}})
+        self.assertFalse(duplicates)
+
+    def test_json_files_accept_blend_relative_paths(self):
+        bpy.ops.wm.save_as_mainfile(filepath=os.path.join(self.tmp, "scene.blend"))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            self.assertEqual(bpy.ops.batch_stl.export_presets_json(filepath="//..\\presets.json"), {'FINISHED'})
+            self.assertTrue(os.path.isfile(os.path.join(os.path.dirname(self.tmp), "presets.json")))
+            self.addCleanup(os.remove, os.path.join(os.path.dirname(self.tmp), "presets.json"))
+            self.assertEqual(bpy.ops.batch_stl.import_presets_json(filepath="../presets.json"), {'FINISHED'})
 
 
 class WorkerExportTests(BlenderTestCase):
@@ -490,7 +538,7 @@ class WorkerExportTests(BlenderTestCase):
         override(preset.nodegroups, "Size", "FLOAT", "1")
         job, root = os.path.join(self.tmp, "job.json"), os.path.join(self.tmp, "out")
         scene = bpy.context.scene
-        ce.headless.write_job_file(job, scene, scene.view_layers[0], preset, root, skip_direct=True)
+        ce.headless.write_job_file(job, scene, scene.view_layers[0], preset, root, root, skip_direct=True)
         code, out = self.run_worker(job)
         self.assertEqual(code, 0, out)
         self.assertEqual(written_files(root), ["Box.stl", "PlainHidden.stl"])
