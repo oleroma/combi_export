@@ -499,8 +499,9 @@ class VIEW3D_PT_batch_export_stl_main(bpy.types.Panel):
         label_row.ui_units_x = ROOT_LABEL_UNITS
         label_row.alignment = 'RIGHT'
         label_row.label(text="Root:")
-        dir_row.prop(scene, "batch_stl_root_dir", text="")
-        dir_row.operator("batch_stl.pick_root_dir", text="", icon=ICONS['BROWSE'])
+        field_row = dir_row.row(align=True)  # the field and its folder button touch, like Blender's own path fields
+        field_row.prop(scene, "batch_stl_root_dir", text="")
+        field_row.operator("batch_stl.pick_root_dir", text="", icon=ICONS['BROWSE'])
         json_row = dir_row.row(align=True)
         json_row.operator("batch_stl.import_presets_json", text="", icon=ICONS['IMPORT'])
         json_row.operator("batch_stl.export_presets_json", text="", icon=ICONS['EXPORT'])
