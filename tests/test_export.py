@@ -238,6 +238,24 @@ class RelativePathTests(BlenderTestCase):
         self.assertEqual(tree, {os.path.join(self.tmp, "x"): {"_files": ["Box.stl"]}, os.path.join(self.tmp, "y"): {"_files": ["Lid.stl"]}})
         self.assertFalse(duplicates)
 
+    def test_root_folder_button(self):
+        """The Root field's folder button opens at the root folder and stores the pick relative, with '/'."""
+        project = os.path.join(self.tmp, "project")
+        os.makedirs(os.path.join(self.tmp, "stl"))
+        os.makedirs(project)
+        bpy.ops.wm.save_as_mainfile(filepath=os.path.join(project, "scene.blend"))
+        scene = bpy.context.scene
+        scene.batch_stl_root_dir = "..\\stl\\new"  # not made yet: the browser opens at the folder above it
+        self.assertEqual(scene.batch_stl_root_dir, "../stl/new", "stored with '/'")
+        op = types.SimpleNamespace(directory="")
+        opened = []
+        context = types.SimpleNamespace(scene=scene, window_manager=types.SimpleNamespace(fileselect_add=opened.append))
+        self.assertEqual(ce.operators.BATCH_STL_OT_pick_root_dir.invoke(op, context, None), {'RUNNING_MODAL'})
+        self.assertEqual(opened, [op])
+        self.assertEqual(op.directory, os.path.join(self.tmp, "stl", ""))
+        self.assertEqual(bpy.ops.batch_stl.pick_root_dir(directory=os.path.join(self.tmp, "stl", "")), {'FINISHED'})
+        self.assertEqual(scene.batch_stl_root_dir, "//../stl/")
+
     def test_json_files_accept_blend_relative_paths(self):
         bpy.ops.wm.save_as_mainfile(filepath=os.path.join(self.tmp, "scene.blend"))
         with warnings.catch_warnings():

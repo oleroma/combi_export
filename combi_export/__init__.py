@@ -50,6 +50,13 @@ WM_PROPS = ("batch_stl_jobs", "batch_stl_verbose_console", "batch_stl_ui_tips", 
 SCENE_PROPS = ("batch_stl_data_version", "batch_stl_root_dir", "batch_stl_presets", "batch_stl_preset_index", "batch_stl_global_nodegroups",
                "batch_stl_save_json")
 
+def on_root_dir_update(scene, context):
+    """A folder picked in the file browser (or typed) is stored with '/' when it is relative, so a file set up on Windows
+    shows and saves the same path on Linux."""
+    portable = paths.portable_setting(scene.batch_stl_root_dir)
+    if portable != scene.batch_stl_root_dir: scene.batch_stl_root_dir = portable
+    mark_dirty()
+
 def register():
     for cls in classes: bpy.utils.register_class(cls)
 
@@ -69,7 +76,7 @@ def register():
     WM.batch_stl_info_global = bpy.props.BoolProperty(name="Global Mode", default=False, update=lambda s, c: mark_dirty())
 
     Scene = bpy.types.Scene
-    Scene.batch_stl_root_dir = bpy.props.StringProperty(name="Root", default="//", subtype="DIR_PATH", options={'PATH_SUPPORTS_BLEND_RELATIVE'}, update=mark_dirty, description=(
+    Scene.batch_stl_root_dir = bpy.props.StringProperty(name="Root", default="//", update=on_root_dir_update, description=(
         "Folder the presets export to. A relative path (stl, ../stl, or Blender's //../stl) starts at the .blend file's "
         "folder (the current folder while the file is not saved); '/' and '\\' both separate folders"))
     Scene.batch_stl_presets = bpy.props.CollectionProperty(type=BatchSTLExportPreset)

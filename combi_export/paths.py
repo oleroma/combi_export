@@ -55,6 +55,30 @@ def resolve_path(text, base_dir, flavor=os.path):
     `base_dir`, the .blend file's folder (the current folder while the file is not saved). Empty stays empty."""
     return resolve_below(base_dir, text, base_dir, flavor) if text else ""
 
+def portable_setting(text):
+    """A setting as it is stored so it reads the same on every OS: a relative or `//` path (what Blender's file browser
+    gives with *Relative Path* on, `//..\\stl\\` on Windows) with `/` between folders. Absolute paths are left as they
+    are: they only exist on one machine anyway, and `\\\\server\\share` must stay a network path."""
+    return text.replace("\\", "/") if path_kind(text) in ("blend", "relative") else text
+
+def picked_setting(folder, base_dir, relative=True, flavor=os.path):
+    """How a folder picked in the file browser is stored: `//` and its path from `base_dir` (the .blend file's folder),
+    with `/` between folders and at the end like Blender's own (`//../stl/`), or the absolute folder when `relative` is
+    off (Blender's *Relative Paths* preference, or a file that is not saved) or it is on another drive."""
+    folder = flavor.normpath(_native(folder, flavor))
+    if not relative: return folder
+    try: rel = flavor.relpath(folder, flavor.normpath(_native(base_dir, flavor)))
+    except ValueError: return folder
+    return "//" if rel == flavor.curdir else "//" + rel.replace(flavor.sep, "/") + "/"
+
+def nearest_existing_dir(folder, isdir=os.path.isdir, flavor=os.path):
+    """`folder`, or the closest folder above it that exists (where a file browser can open), or "" when none does."""
+    while folder and not isdir(folder):
+        parent = flavor.dirname(folder)
+        if parent == folder: return ""
+        folder = parent
+    return folder
+
 def split_relative(text):
     """The folder names of a relative setting, separated by `/` or `\\`: `..` is kept (one folder up), empty names and
     `.` are dropped. A folder starting with dots (`..hidden`) is a name like any other."""

@@ -143,6 +143,36 @@ class RelativeBelowTests(unittest.TestCase):
         self.assertIsNone(paths.parts_below("/out", "/", posixpath))
 
 
+class PickedFolderTests(unittest.TestCase):
+    """picked_setting and nearest_existing_dir: the Root field's folder button."""
+
+    def test_a_picked_folder_is_stored_relative_with_slashes(self):
+        self.assertEqual(paths.picked_setting("C:\\work\\stl", WIN_BLEND, True, ntpath), "//../stl/")
+        self.assertEqual(paths.picked_setting("C:\\work\\project\\", WIN_BLEND, True, ntpath), "//")
+        self.assertEqual(paths.picked_setting("/home/me/stl/", LINUX_BLEND, True, posixpath), "//../stl/")
+        self.assertEqual(paths.picked_setting("/home/me/project/..hidden", LINUX_BLEND, True, posixpath), "//..hidden/")
+
+    def test_absolute_when_asked_or_on_another_drive(self):
+        self.assertEqual(paths.picked_setting("/home/me/stl/", LINUX_BLEND, False, posixpath), "/home/me/stl")
+        self.assertEqual(paths.picked_setting("D:\\stl\\", WIN_BLEND, True, ntpath), "D:\\stl")
+        self.assertEqual(paths.picked_setting("\\\\srv\\share\\stl", WIN_BLEND, True, ntpath), "\\\\srv\\share\\stl")
+
+    def test_the_browser_opens_at_the_closest_existing_folder(self):
+        existing = {"C:\\work", "C:\\"}
+        self.assertEqual(paths.nearest_existing_dir("C:\\work\\stl\\new", existing.__contains__, ntpath), "C:\\work")
+        self.assertEqual(paths.nearest_existing_dir("/gone/x", lambda p: False, posixpath), "")
+        self.assertEqual(paths.nearest_existing_dir("", lambda p: True, posixpath), "")
+
+
+class PortableSettingTests(unittest.TestCase):
+    def test_relative_settings_are_stored_with_slashes(self):
+        self.assertEqual(paths.portable_setting("//..\\stl\\"), "//../stl/")
+        self.assertEqual(paths.portable_setting("..\\y\\"), "../y/")
+        for text in ("D:\\stl", "\\\\server\\share", "\\top", ""):
+            with self.subTest(text=text):
+                self.assertEqual(paths.portable_setting(text), text)
+
+
 class FolderStepTests(unittest.TestCase):
     """naming.folder_setting_parts and export_dir: the preset root directory and collection / object sub-folders."""
 

@@ -6,14 +6,14 @@ import json
 import bpy
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
-from .common import blend_dir, inside_operator, mark_dirty, overrides_open_prop, raw_edits, _held_keys, _ui_cache
+from .common import blend_dir, inside_operator, mark_dirty, overrides_open_prop, raw_edits, root_dir, _held_keys, _ui_cache
 from .nodes import clean_node_name, get_menu_switch_items, get_supported_inputs, get_target_node_names
 from .fields import add_value, name_permutations, same_fields, value_fields
 from .engine import MockInput, MockOverride, parse_sweep_values
 from .data import (copy_collection_to_dict, copy_ng_to_dict, copy_preset_to_dict, copy_setup_to_dict,
     ensure_preset_uids, get_active_collection, get_active_object, get_active_preset, get_job,
     paste_collection_from_dict, paste_ng_from_dict, paste_preset_from_dict, remove_job, upgrade_nodegroup_dicts)
-from .paths import resolve_path
+from .paths import nearest_existing_dir, picked_setting, resolve_path
 from .ui_cache import (expand_last_dirs, is_dir_collapsed, iter_tree_dirs, load_toggled_dirs, save_toggled_dirs,
     set_dir_collapsed)
 
@@ -46,6 +46,31 @@ class BATCH_STL_OT_export_presets_json(bpy.types.Operator, ExportHelper):
         except Exception as e:
             self.report({'ERROR'}, f"Failed to export presets: {e}")
             return {'CANCELLED'}
+
+class BATCH_STL_OT_pick_root_dir(bpy.types.Operator):
+    """The Root field's folder button. Blender's own (a DIR_PATH field) cannot read the paths paths.py accepts
+    ('../stl', '..\\stl' on Linux) and opens its file browser at the drive's top: this one opens at the folder the
+    Root field names (or the closest one above it that exists) and stores the pick like Blender does."""
+    bl_idname = "batch_stl.pick_root_dir"
+    bl_label = "Accept"
+    bl_description = "Pick the root folder in the file browser. It opens at the current root folder"
+    bl_options = {'REGISTER', 'UNDO'}
+    directory: bpy.props.StringProperty(subtype='DIR_PATH', options={'HIDDEN', 'SKIP_SAVE', 'PATH_SUPPORTS_BLEND_RELATIVE'})
+    filter_folder: bpy.props.BoolProperty(default=True, options={'HIDDEN', 'SKIP_SAVE'})
+
+    def invoke(self, context, event):
+        base = blend_dir()
+        start = nearest_existing_dir(root_dir(context.scene)) or base
+        self.directory = os.path.join(start, "")
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        if not self.directory: return {'CANCELLED'}
+        folder = resolve_path(self.directory, blend_dir())
+        relative = bool(bpy.data.filepath) and context.preferences.filepaths.use_relative_paths
+        context.scene.batch_stl_root_dir = picked_setting(folder, blend_dir(), relative)
+        return {'FINISHED'}
 
 class BATCH_STL_OT_import_presets_json(bpy.types.Operator, ImportHelper):
     bl_idname = "batch_stl.import_presets_json"
@@ -577,7 +602,7 @@ class BATCH_STL_OT_read_modifiers(bpy.types.Operator):
         _held_keys["ctrl"] = event.ctrl
         return {'CANCELLED'}
 
-classes = (BATCH_STL_OT_export_presets_json, BATCH_STL_OT_import_presets_json, BATCH_STL_OT_clear_console,
+classes = (BATCH_STL_OT_export_presets_json, BATCH_STL_OT_import_presets_json, BATCH_STL_OT_pick_root_dir, BATCH_STL_OT_clear_console,
            BATCH_STL_OT_preset_actions, BATCH_STL_OT_collection_actions, BATCH_STL_OT_table_action,
            BATCH_STL_OT_toggle_dir_tree, BATCH_STL_OT_tree_expansion, BATCH_STL_OT_merge_info, BATCH_STL_OT_collection_note,
            BATCH_STL_OT_read_modifiers)
