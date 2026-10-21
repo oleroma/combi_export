@@ -1,3 +1,13 @@
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./media/logo_light.svg">
+    <source media="(prefers-color-scheme: light)" srcset="./media/logo_dark.svg">
+    <!-- The fallback image for older browsers -->
+    <img alt="combi_export" src="./media/logo_light.svg" width="200">
+  </picture>
+  <br>
+</h1>
+
 # Combi Export
 
 <img src="preview/thumbnail_gold.png" alt="Combi Export: overrides for Width (thin, thick) and Height (tall, medium, short) give 2 x 3 = 6 variants, written as mapped STL files in a folder tree" width="100%">
