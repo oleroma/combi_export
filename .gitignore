@@ -5,3 +5,6 @@ blender_mcp_addon/
 .agents/
 .delta/
 *.orig
+
+# Everything made by building, testing or running the program
+/build/
