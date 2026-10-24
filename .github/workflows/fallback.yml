@@ -1,0 +1,40 @@
+name: Fallback tests
+
+# Tests run on the dev PC. Run this by hand only when the PC is offline:
+#   gh workflow run fallback.yml --ref <branch>
+# It runs the full test suite in headless Blender. The add-on has nothing to build.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fallback
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install Blender
+        # The newest patch release of the series in blender_version_min.
+        run: |
+          series=$(sed -nE 's/^blender_version_min = "([0-9]+\.[0-9]+).*/\1/p' combi_export/blender_manifest.toml)
+          base="https://download.blender.org/release/Blender$series"
+          file=$(curl -fsSL "$base/" | grep -oE "blender-$series\.[0-9]+-linux-x64\.tar\.xz" | sort -uV | tail -1)
+          echo "Installing $file"
+          sudo apt-get update -q
+          sudo apt-get install -yq libxi6 libxxf86vm1 libxfixes3 libxrender1 libxkbcommon0 libsm6 libgl1 libegl1
+          curl -fsSL "$base/$file" | tar -xJ -C "$RUNNER_TEMP"
+          echo "BLENDER=$RUNNER_TEMP/${file%.tar.xz}/blender" >> "$GITHUB_ENV"
+
+      - name: Tests
+        run: python tests/run.py
