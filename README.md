@@ -183,3 +183,5 @@ Values with a folder or filename tag create branches, e.g. letters `A B C` × nu
 ## Tests
 
 `python tests/run.py` runs the test suite in headless Blender (set `BLENDER` to the executable if it is not in the default install location; `-k NAME` runs matching tests, `-v` lists them). It covers naming, the value field syntax, variant generation and branch merging, the STL writer, presets and migrations, the override table callbacks, and the export operator with a real background worker, invoked like the button and called from a script. The panels themselves need a window and are not covered; the override table is drawn into a recording layout to check its kept merge predictions, and the depsgraph handler is driven by real scene changes. Tests marked `expectedFailure` reproduce known bugs. The path rules (`tests/test_paths.py`) also run without Blender, under both the Windows and the Linux rules whatever the machine: `python -m unittest tests/test_paths.py`.
+
+The tests run on the dev PC; GitHub CI doesn't run them on push. When the PC is offline, the manual `fallback.yml` workflow runs the full suite in headless Blender on Linux.
