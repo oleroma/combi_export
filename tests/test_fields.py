@@ -146,6 +146,10 @@ class ComposeTests(unittest.TestCase):
         for text in ('\\"_"x_mm', '\\"_"x', '\\"_"_x_mm\\_y', '\\B\\"_"x_mm\\_t_15', '\\"_"_mm'):
             with self.subTest(field=text):
                 self.assertRoundTrip(text, "STRING", "x")
+        # '{' and '}' of a text value written in a name are quoted, else they would start a sweep
+        for text in ('\\"{"x"}"_mm', '\\a"{"b', '_x_a"{"b', '\\B\\"_{"x\\_t_15'):
+            with self.subTest(field=text):
+                self.assertRoundTrip(text, "STRING", "x")
         # A value hidden by typed names is written first
         self.assertRoundTrip("my text\\big", "STRING", "x")
         self.assertRoundTrip("a _big", "STRING", "x")
@@ -161,6 +165,8 @@ class ComposeTests(unittest.TestCase):
         self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "15"}, NO_NAMING, "INT"), "15")
         self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "15"}, {"dir": "B/*", "tag": "x_*"}, "FLOAT"), "\\B\\15\\_x_15")
         self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "_x"}, {"dir": "*_mm", "tag": None}, "STRING"), '\\"_"x_mm')
+        self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "{x}"}, {"dir": "*_mm", "tag": None}, "STRING"), '\\"{"x"}"_mm')
+        self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "a{b"}, NO_NAMING, "STRING"), '"a{b"')
 
 
 class BlockNamingTests(unittest.TestCase):
