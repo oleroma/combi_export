@@ -123,8 +123,8 @@ class JsonTests(BlenderTestCase):
         preset = bpy.context.scene.batch_stl_presets.add()
         ce.data.paste_preset_from_dict(preset, data)
         inputs = preset.nodegroups[0].nodes[0].inputs
-        # The tag 'lid' replaced the value in the file name; the value itself stays, shown in brackets
-        self.assertEqual([ce.fields.value_expr(i.values[0], i.override_type) for i in inputs], ["\\5", "\\0.5:0.25:3", "[False]_lid"])
+        # The tag 'lid' replaced the value in the file name; the value itself stays, written first
+        self.assertEqual([ce.fields.value_expr(i.values[0], i.override_type) for i in inputs], ["\\5", "\\0.5:0.25:3", "False_lid"])
         self.assertEqual(inputs["Flag"].values[0].value_menu, "False")
 
     def test_earlier_field_syntax(self):

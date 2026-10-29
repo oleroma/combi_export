@@ -13,7 +13,7 @@ from .naming import (SCOPE_KINDS, VALUE_SLOT, legacy_naming_template, split_path
     value_name_parts)
 from .fields import (add_value, compose_block_naming, compose_value_field, expr_text, fields_text, _is_open, lex_expr,
     name_permutations, parse_block_naming, parse_number, parse_value_field, _render_typed, same_fields, _slot_run,
-    _split_bare, split_field, split_value_field, value_expr, value_fields, _value_readers, _value_runs, value_specs)
+    _split_bare, split_field, value_expr, value_fields, _value_readers, _value_runs, value_specs)
 from .paths import is_absolute
 from .scope import OTHER_KIND, BranchScope, naming_completions, scope_dead
 from .data import get_active_collection, get_active_object, get_active_preset
@@ -466,7 +466,7 @@ def search_value_expr(self, context, edit_text):
     fields, templates = parse(edit_text)
     if fields is None: templates = stored_templates
     chars = lex_expr(edit_text)
-    try: value_chars, sections = split_value_field(chars, readable)
+    try: value_chars, sections = split_field(chars, readable)
     except ValueError: value_chars, sections = [], []
     offers, tab = [], []
 
@@ -581,9 +581,9 @@ class BatchSTLLogLine(bpy.types.PropertyGroup): text: bpy.props.StringProperty()
 EXPR_DESCRIPTION = (
     "The value and its naming: '\\' starts the folder, '_' the filename token, and the value goes where it is written.\n"
     "15: value only · \\15: folder 15 · _15: token 15 · \\15\\_15: both\n"
-    "\\big, _big: your name instead of the value (the value stays, shown in brackets: [15]\\big) · \\15_mm, \\size_15, _15_mm: the value joined with text\n"
+    "\\big, _big: your name instead of the value (the value stays, written first: 15\\big) · \\15_mm, \\size_15, _15_mm: the value joined with text\n"
     "\\B\\15, _B_15: B, then the value. Names that exist upstream merge into that branch (\\C\\2\\15)\n"
-    "\\15 → \\16 changes the value, unless 16 exists upstream (then it merges). 16\\big or [16]\\big: value and names at once\n"
+    "\\15 → \\16 changes the value, unless 16 exists upstream (then it merges). 16\\big: value and names at once\n"
     "Tab completes an upstream name with its separator (\\A → \\A\\), so the next name can be typed\n"
     "Sweeps: \\0:0.5:5 (start:step:count), _{a, b} (strings), \\* (every menu item, True and False; replaces the other values)\n"
     "Quoted text is literal: \"a_b\". Clear the field to delete the value")

@@ -110,7 +110,7 @@ Generate variant permutations across any socket. A sweep is typed in the value f
   | `\15` | `15/` | `Box` | a folder per value |
   | `_15` | | `Box_15` | a filename token per value |
   | `\15\_15` | `15/` | `Box_15` | both (the `\` before `_` closes the folder) |
-  | `\big` | `big/` | | your name instead of the value (the value stays; the field shows it as `[15]\big`) |
+  | `\big` | `big/` | | your name instead of the value (the value stays; the field shows it first: `15\big`) |
   | `_big` | | `Box_big` | your token instead of the value |
   | `\15_mm` | `15_mm/` | | one folder joining the value and text |
   | `\size_15` | `size_15/` | | text before the value works too |
@@ -123,12 +123,12 @@ Generate variant permutations across any socket. A sweep is typed in the value f
   | `_{a, b}` | | `Box_a`, `Box_b` | a string list |
   | `\*` | one per item | | every menu item, or `True` and `False`; replaces the input's other values |
 
-  **Your names and the value:** a field whose names replace the value shows the value in brackets before them (`[15]\big`, `[15]_big`), so you always see which value the names stand for. Edit the number in the brackets to change the value and keep the names (`[16]\big`). Hover the icon before the field for more detail. Every name that is not the value is your own text and merges into an upstream folder / token of that name (`\A` on a value inside the `A` branches only, see *Branch Merging*). When you type, the value is read like this:
+  **Your names and the value:** a field whose names replace the value shows the value first (`15\big`, `15_big`), so you always see which value the names stand for. Edit that number to change the value and keep the names (`16\big`). Every name that is not the value is your own text and merges into an upstream folder / token of that name (`\A` on a value inside the `A` branches only, see *Branch Merging*). When you type, the value is read like this:
   - The value the field holds, written in the names (`\B\15`, `\15_mm`), stays the value: edit the names around it freely.
   - A value typed where the old one was changes it: `\15` → `\16`, `\B\15` → `\B\16`, `\15_mm` → `\16_mm` (also `\16` on a value that had no folder yet). But when that name exists upstream, it is your name and merges: with a folder `2` upstream, `\2` on `\15` keeps 15 and merges into `2`.
   - Sweeps (`\0:1:5`, `\*`, `_{a, b}`) and values with a space are always the value.
   - Anything else is your name and the value stays: `\big` on 15 is folder `big`.
-  - Write the value first to set both at once: `16\big` or `[16]\big`, `2\` (value 2, a folder per value). In brackets the text is always the value, and the sections follow the `]`. A string that starts with `[` is quoted (`"[a]"`).
+  - Write the value first to set both at once: `16\big`, `2\` (value 2, a folder per value).
   - When the text can be read both ways, the list offers the other reading: `2\…` (*Value 2*) for a name that merges, `\"16"` (*Typed names, the value stays 15*) for a value typed in its place. Quotes keep a name as your text (`\"16"`).
 
   **Shortcuts:** a section that ends in its separator goes on with the value: `\B\` = `\B\15`, `_B_` = `_B_15`, `15\` = `\15`, `15_` = `_15`.
