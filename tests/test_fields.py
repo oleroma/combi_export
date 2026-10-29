@@ -141,9 +141,18 @@ class ComposeTests(unittest.TestCase):
         self.assertRoundTrip('"a_b"_x', "STRING", "x")
         self.assertRoundTrip("_{a, b}", "STRING", "x")
         self.assertRoundTrip("\\*", "MENU", "A", MENU)
+        # A value hidden by typed names is written first
+        self.assertRoundTrip("my text\\big", "STRING", "x")
+        self.assertRoundTrip("a _big", "STRING", "x")
+        self.assertRoundTrip("B\\big", "MENU", "A", MENU)
+        self.assertRoundTrip("0:0.5:5\\big", "FLOAT", "1")
 
     def test_display(self):
-        self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "15"}, {"dir": "big", "tag": None}, "INT"), "\\big")
+        self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "15"}, {"dir": "big", "tag": None}, "INT"), "15\\big")
+        self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "15"}, {"dir": None, "tag": "big"}, "INT"), "15_big")
+        self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "15"}, {"dir": "big", "tag": "*"}, "INT"), "\\big\\_15")
+        self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "15"}, {"dir": "15", "tag": None}, "INT"), '15\\"15"')
+        self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "a"}, {"dir": None, "tag": "big"}, "STRING"), "a _big")
         self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "15"}, NO_NAMING, "INT"), "15")
         self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "15"}, {"dir": "B/*", "tag": "x_*"}, "FLOAT"), "\\B\\15\\_x_15")
 

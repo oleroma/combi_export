@@ -74,7 +74,7 @@ class InputTests(TableTestCase):
 class ValueFieldTests(TableTestCase):
     def test_edits(self):
         val = self.new_input("Size").values[0]
-        for typed, shown in (("\\2", "\\2"), ("abc", "\\2"), ("\\big", "\\big"), ("16\\", "\\16"), ("_B_", "_B_16")):
+        for typed, shown in (("\\2", "\\2"), ("abc", "\\2"), ("\\big", "2\\big"), ("3\\big", "3\\big"), ("16\\", "\\16"), ("_B_", "_B_16")):
             with self.subTest(typed=typed):
                 val.expr = typed
                 self.assertEqual(val.expr, shown)

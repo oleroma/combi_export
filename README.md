@@ -110,7 +110,7 @@ Generate variant permutations across any socket. A sweep is typed in the value f
   | `\15` | `15/` | `Box` | a folder per value |
   | `_15` | | `Box_15` | a filename token per value |
   | `\15\_15` | `15/` | `Box_15` | both (the `\` before `_` closes the folder) |
-  | `\big` | `big/` | | your name instead of the value (the value stays, it is not shown) |
+  | `\big` | `big/` | | your name instead of the value (the value stays; the field shows it first: `15\big`) |
   | `_big` | | `Box_big` | your token instead of the value |
   | `\15_mm` | `15_mm/` | | one folder joining the value and text |
   | `\size_15` | `size_15/` | | text before the value works too |
@@ -123,7 +123,7 @@ Generate variant permutations across any socket. A sweep is typed in the value f
   | `_{a, b}` | | `Box_a`, `Box_b` | a string list |
   | `\*` | one per item | | every menu item, or `True` and `False`; replaces the input's other values |
 
-  **Your names and the value:** a field whose names replace the value shows only the names (`\big`); hover the icon before it to see the value. Every name that is not the value is your own text and merges into an upstream folder / token of that name (`\A` on a value inside the `A` branches only, see *Branch Merging*). When you type, the value is read like this:
+  **Your names and the value:** a field whose names replace the value shows the value first (`15\big`, `15_big`), so you always see which value the names stand for. Edit that number to change the value and keep the names (`16\big`). Every name that is not the value is your own text and merges into an upstream folder / token of that name (`\A` on a value inside the `A` branches only, see *Branch Merging*). When you type, the value is read like this:
   - The value the field holds, written in the names (`\B\15`, `\15_mm`), stays the value: edit the names around it freely.
   - A value typed where the old one was changes it: `\15` → `\16`, `\B\15` → `\B\16`, `\15_mm` → `\16_mm` (also `\16` on a value that had no folder yet). But when that name exists upstream, it is your name and merges: with a folder `2` upstream, `\2` on `\15` keeps 15 and merges into `2`.
   - Sweeps (`\0:1:5`, `\*`, `_{a, b}`) and values with a space are always the value.
