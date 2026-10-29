@@ -18,6 +18,7 @@ from .naming import SCOPE_KINDS, VALUE_SLOT, value_parts
 #   \B\15         folder B, then a folder per value         _B_15        token B, then the value: Box_B_15
 #   \15\_15       folder and token ('\' closes the folder)  \big\_15     folder big, token 15
 #   \0:1:5  _{a, b}  \*   sweeps: numbers start:step:count, strings {a, b}, menus and booleans *
+#   [15]\big     the value in brackets before the sections: how a field whose names hide the value shows it
 # - Any other name is typed text: it merges into an upstream folder / token of that name (B in \B\15, big in \big).
 # - Without a value written before the sections (15\big also works), the value is read from them (_infer_value): the
 #   value the field holds where it is written; a value written in its place instead ('\15' -> '\16' is the value 16),
@@ -29,6 +30,8 @@ from .naming import SCOPE_KINDS, VALUE_SLOT, value_parts
 #   section starts. In the value part '_' starts it after the longest text that is a value: '15_big' is 15 with the
 #   token big, while the string 'a_b' or the menu item 'Mode_A' stay whole. A space before '_' ends the value: 'a _b'.
 # - Double quotes make text literal, never the value or a mark: \"15"\15 is folder 15, then the value 15.
+# - A bare '[' at the start holds the value up to its ']' ([16]\big, [my text]_x); the sections follow it. A string
+#   that starts with '[' is quoted ("[a]").
 # Node group and node blocks use the sections without a value (BatchSTLNodeGroup.naming): \C\2\_B.
 
 def lex_expr(text):
@@ -122,6 +125,21 @@ def split_field(chars, value_ok=None):
         if any(s[0] == kind for s in sections): raise ValueError("a section is given twice")
         sections.append((kind, expr_strip(chars[body:k]), start, kind == "dir" and k < n))
     return value, sections
+
+def split_value_field(chars, value_ok):
+    """split_field of a value field, with the value in brackets at its start ('[15]\\big') when it has one. Raises
+    ValueError for a '[' left open or text between the ']' and the sections."""
+    i = 0
+    while i < len(chars) and is_space(chars[i]): i += 1
+    if i == len(chars) or not bare(chars[i], "["): return split_field(chars, value_ok)
+    free = _outside_braces(chars)
+    close = next((k for k in range(i + 1, len(chars)) if free[k] and bare(chars[k], "]")), None)
+    if close is None: raise ValueError("a '[' is not closed")
+    rest, sections = split_field(chars[close + 1:], lambda r: False)
+    if rest: raise ValueError("text between the value and the sections")
+    # Mark indices count in the whole field
+    sections = [(kind, body, None if start is None else start + close + 1, closed) for kind, body, start, closed in sections]
+    return expr_strip(chars[i + 1:close]), sections
 
 _NAME_ERRORS = re.compile(r'[<>:"/\\|?*\x00-\x1f\s]')
 
@@ -374,7 +392,7 @@ def parse_value_field(text, override_type, items=None, stored=None, taken=None, 
     def matches(chars, fields):
         try: return same_fields(override_type, read(chars), fields)
         except ValueError: return False
-    value, sections = split_field(lex_expr(text), readable)
+    value, sections = split_value_field(lex_expr(text), readable)
     fields = read(value) if value else _infer_value(sections, read, matches, stored, taken, stored_templates, upstream)
     templates = dict.fromkeys(SCOPE_KINDS)
     for kind, chars, _start, closed in sections:
@@ -425,7 +443,7 @@ def _render_section(kind, template, vtext, always=False, short=False):
 def _quote_value_part(vtext, fields, override_type, always=False):
     """The value written before the sections, quoted when it would not read back as typed."""
     if fields["use_sweep"] or override_type in ('FLOAT', 'INT'): return vtext
-    if always or not vtext or vtext != vtext.strip() or vtext.startswith(("_", "{")) or vtext == "*" or any(c in vtext for c in '"\\'):
+    if always or not vtext or vtext != vtext.strip() or vtext.startswith(("_", "{", "[")) or vtext == "*" or any(c in vtext for c in '"\\'):
         return _quote(vtext)
     return vtext
 
@@ -459,6 +477,14 @@ def compose_value_field(fields, templates, override_type, items=None, current=No
         return same_fields(override_type, f, fields) and all(norm(tps[k]) == norm(templates[k]) for k in SCOPE_KINDS)
 
     candidates = []
+    # Typed names that replace the value hide it: the value goes in brackets before them ('[15]\\big')
+    hidden = fields is not None and any(t is not None for t in templates.values()) and \
+        not any(VALUE_SLOT in norm(t) for t in templates.values() if t is not None)
+    if hidden:
+        for always in (False, True):
+            plain = fields["use_sweep"] or override_type in ('FLOAT', 'INT') or not (always or "]" in vtext)
+            head = vtext if plain else _quote(vtext)
+            candidates.append("[" + head + "]" + sections(always))
     if fields is not None:
         if any(t is not None for t in templates.values()):
             # Typed names that could be read as the value go in quotes: the last one ('\\A\\1\\"3"'), every one, then all

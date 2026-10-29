@@ -77,6 +77,18 @@ class ValueInferenceTests(unittest.TestCase):
         self.assertEqual(naming("16\\big"), (16, ["big"], []))
         self.assertEqual(naming("2\\"), (2, ["2"], []))
 
+    def test_value_in_brackets(self):
+        self.assertEqual(naming("[16]\\big"), (16, ["big"], []))
+        self.assertEqual(naming("[16]_big"), (16, [], ["big"]))
+        self.assertEqual(naming(" [ 16 ] \\big _x"), (16, ["big"], ["x"]))
+        self.assertEqual(naming("[16]"), (16, [], []))
+        self.assertEqual(naming("[16]\\16"), (16, ["16"], []))
+        self.assertEqual(naming("[my text]_x", "STRING", "x"), ("my text", [], ["x"]))
+        self.assertEqual(naming('"[a]"', "STRING", "x"), ("[a]", [], []))
+        for text in ("[16", "[16]big", "[abc]\\big"):
+            with self.subTest(field=text), self.assertRaises(ValueError):
+                parse(text)
+
     def test_blank_value_takes_the_last_value_in_the_names(self):
         self.assertEqual(naming("\\B\\1", stored=None), (1, ["B", "1"], []))
         self.assertEqual(naming("_B_2_15", "FLOAT", stored=None), (15.0, [], ["B_2", "15"]))
@@ -134,16 +146,23 @@ class ComposeTests(unittest.TestCase):
 
     def test_round_trips(self):
         for text in ("15", "\\15", "_15", "\\15\\_15", "\\big", "_big", "\\15_mm", "\\size_15", "\\B\\15", "_B_15",
-                     "\\big\\_small", '\\"15"\\15', "15_big", "16\\big"):
+                     "\\big\\_small", '\\"15"\\15', "15_big", "16\\big", "[16]\\big", "[15]_big"):
             with self.subTest(field=text):
                 self.assertRoundTrip(text)
         self.assertRoundTrip("\\0:0.5:5", "FLOAT", "1")
         self.assertRoundTrip('"a_b"_x', "STRING", "x")
         self.assertRoundTrip("_{a, b}", "STRING", "x")
         self.assertRoundTrip("\\*", "MENU", "A", MENU)
+        for text in ("[my text]\\big", '["a]b"]\\big', '["[a]"]\\big', '"[a]"', "[{a, b}]_x"):
+            with self.subTest(field=text):
+                self.assertRoundTrip(text, "STRING", "x")
+        self.assertRoundTrip("[B]\\big", "MENU", "A", MENU)
+        self.assertRoundTrip("[0:0.5:5]\\big", "FLOAT", "1")
 
     def test_display(self):
-        self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "15"}, {"dir": "big", "tag": None}, "INT"), "\\big")
+        self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "15"}, {"dir": "big", "tag": None}, "INT"), "[15]\\big")
+        self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "15"}, {"dir": "big", "tag": "x"}, "INT"), "[15]\\big\\_x")
+        self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "15"}, {"dir": "big", "tag": "*"}, "INT"), "\\big\\_15")
         self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "15"}, NO_NAMING, "INT"), "15")
         self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "15"}, {"dir": "B/*", "tag": "x_*"}, "FLOAT"), "\\B\\15\\_x_15")
 
