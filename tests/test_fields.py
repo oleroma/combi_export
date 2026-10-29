@@ -141,6 +141,11 @@ class ComposeTests(unittest.TestCase):
         self.assertRoundTrip('"a_b"_x', "STRING", "x")
         self.assertRoundTrip("_{a, b}", "STRING", "x")
         self.assertRoundTrip("\\*", "MENU", "A", MENU)
+        # A '_' starting a folder name is quoted, in a typed name ('_a') or a text value ('_x')
+        self.assertRoundTrip('\\"_"a_15')
+        for text in ('\\"_"x_mm', '\\"_"x', '\\"_"_x_mm\\_y', '\\B\\"_"x_mm\\_t_15', '\\"_"_mm'):
+            with self.subTest(field=text):
+                self.assertRoundTrip(text, "STRING", "x")
         # A value hidden by typed names is written first
         self.assertRoundTrip("my text\\big", "STRING", "x")
         self.assertRoundTrip("a _big", "STRING", "x")
@@ -155,6 +160,7 @@ class ComposeTests(unittest.TestCase):
         self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "a"}, {"dir": None, "tag": "big"}, "STRING"), "a _big")
         self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "15"}, NO_NAMING, "INT"), "15")
         self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "15"}, {"dir": "B/*", "tag": "x_*"}, "FLOAT"), "\\B\\15\\_x_15")
+        self.assertEqual(ce.fields.compose_value_field({"use_sweep": False, "value_string": "_x"}, {"dir": "*_mm", "tag": None}, "STRING"), '\\"_"x_mm')
 
 
 class BlockNamingTests(unittest.TestCase):

@@ -28,7 +28,9 @@ from .naming import SCOPE_KINDS, VALUE_SLOT, value_parts
 # - In a folder section '_' belongs to the name (\15_mm), except right after '\' or a space: there the filename
 #   section starts. In the value part '_' starts it after the longest text that is a value: '15_big' is 15 with the
 #   token big, while the string 'a_b' or the menu item 'Mode_A' stay whole. A space before '_' ends the value: 'a _b'.
-# - Double quotes make text literal, never the value or a mark: \"15"\15 is folder 15, then the value 15.
+# - Double quotes make text literal, never the value or a mark: \"15"\15 is folder 15, then the value 15. A '_'
+#   quoted alone at the start of a folder name, before unquoted text, only keeps it from starting the filename
+#   section: \"_"x_mm can be the value _x joined with mm, \"_"a_15 the name _a joined with 15.
 # Node group and node blocks use the sections without a value (BatchSTLNodeGroup.naming): \C\2\_B.
 
 def lex_expr(text):
@@ -152,15 +154,21 @@ def _is_open(kind, chars, closed):
     """Whether a section ends in its separator, so the value comes after its names ('\\B\\', '_B_')."""
     return bool(chars) and not closed and bare(chars[-1], "\\/" if kind == "dir" else "_/")
 
+def _quoted_mark(chars, s):
+    """Whether chars[s] is a '_' quoted only so that it does not start the filename section: the first char of a name,
+    quoted alone, before unquoted text ('\\"_"x_mm' is the value _x joined with mm, '\\"_"_mm' the value _)."""
+    return s == 0 and len(chars) > 1 and chars[0][1] and chars[0][0] == "_" and not chars[1][1]
+
 def _value_runs(chars, accept, seps="_"):
-    """[(start, end)] of the runs of whole pieces of `chars` (between bare `seps`) without a quoted char that `accept`
-    takes: the places a value can be written at."""
+    """[(start, end)] of the runs of whole pieces of `chars` (between bare `seps`) without a quoted char (but a leading
+    '_', see _quoted_mark) that `accept` takes: the places a value can be written at."""
     spans = _split_bare(chars, seps)
     runs = []
     for a in range(len(spans)):
         for b in range(a, len(spans)):
             s, e = spans[a][0], spans[b][1]
-            if e > s and not any(ch[1] for ch in chars[s:e]) and accept(chars[s:e]): runs.append((s, e))
+            literal = any(ch[1] for ch in chars[s + _quoted_mark(chars, s):e])
+            if e > s and not literal and accept(chars[s:e]): runs.append((s, e))
     return runs
 
 def _value_places(sections):
@@ -415,7 +423,9 @@ def _render_section(kind, template, vtext, always=False, short=False):
             # The '_' next to the value stays bare: it separates the value from the text around it
             pre = _render_typed(prefix[:-1], "_", True, always) + "_" if prefix.endswith("_") else _render_typed(prefix, "_", True, always)
             post = "_" + _render_typed(suffix[1:], "_", False, always) if suffix.startswith("_") else _render_typed(suffix, "_", False, always)
-            out.append(pre + vtext + post)
+            name = pre + vtext + post
+            # A '_' starting the name is quoted, else it would start the filename section (see _quoted_mark)
+            out.append(_quote("_") + name[1:] if name.startswith("_") else name)
         return "\\".join(out)
     if VALUE_SLOT not in template: return _render_typed(template, "_/", False, always)
     prefix, suffix = template.split(VALUE_SLOT, 1)
